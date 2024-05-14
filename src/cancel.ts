@@ -20,8 +20,12 @@ const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 
 
 
+const uniqueCollections = collections.filter(
+  (collection, index, self) =>
+    index === self.findIndex((c) => c.tokenReceiveAddress === collection.tokenReceiveAddress && c.offerType === collection.offerType)
+);
 
-collections.forEach((item) => {
+uniqueCollections.forEach((item) => {
   main(item)
 })
 
@@ -40,7 +44,7 @@ async function main(item: CollectionData) {
       const offerData = await getUserOffers(buyerTokenReceiveAddress)
 
       if (offerData && offerData.offers && offerData.offers.length > 0) {
-        const offers = offerData.offers.filter((item => item.token.collectionSymbol === collectionSymbol))
+        const offers = offerData.offers
         console.log('--------------------------------------------------------------------------------');
         console.log(`${offers.length} OFFERS FOUND FOR ${buyerTokenReceiveAddress}`);
         console.log('--------------------------------------------------------------------------------');

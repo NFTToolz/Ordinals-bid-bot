@@ -11,7 +11,6 @@ const network = bitcoin.networks.bitcoin;
 config()
 
 const api_key = process.env.API_KEY as string;
-const private_key = process.env.PRIVATE_KEY as string;
 
 const headers = {
   'Content-Type': 'application/json',
@@ -196,7 +195,6 @@ export async function createOffer(
     const { data } = await limiter.schedule(() => axiosInstance.get(baseURL, { params, headers }))
     return data
   } catch (error: any) {
-    console.log("createOfferError: ", error.response.data);
   }
 }
 
@@ -216,6 +214,20 @@ export function signData(unsignedData: any, privateKey: string) {
   }
 }
 
+async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol?: string, tokenId?: string, buyerPaymentAddress?: string) {
+  try {
+    const offerFormat = await retrieveCancelOfferFormat(offer.id)
+    if (offerFormat) {
+      const signedOfferFormat = signData(offerFormat, privateKey)
+      if (signedOfferFormat) {
+        await submitCancelOfferData(offer.id, signedOfferFormat)
+
+      }
+    }
+  } catch (error) {
+  }
+}
+
 
 export async function submitSignedOfferOrder(
   signedPSBTBase64: string,
@@ -226,9 +238,9 @@ export async function submitSignedOfferOrder(
   buyerReceiveAddress: string,
   publicKey: string,
   feerateTier: string,
+  privateKey: string
 ) {
-  const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/create'
-
+  const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/create';
   const data = {
     signedPSBTBase64: signedPSBTBase64,
     feerateTier: feerateTier,
@@ -240,26 +252,41 @@ export async function submitSignedOfferOrder(
     buyerReceiveAddress: buyerReceiveAddress
   };
 
-  try {
-    const response = await limiter.schedule(() => axiosInstance.post(url, data, { headers }))
-    return response.data;
-  } catch (error: any) {
-    console.log(error.response.data);
+  let errorOccurred = false;
 
-  }
+  do {
+    try {
+      const response = await limiter.schedule(() => axiosInstance.post(url, data, { headers }));
+      return response.data;
+    } catch (error: any) {
+      if (error.response?.data?.error === "You already have an offer for this token") {
+        await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
+        const offerData = await getOffers(tokenId, buyerReceiveAddress);
+        if (offerData && offerData.offers.length > 0) {
+          for (const item of offerData.offers) {
+            await cancelBid(item, privateKey);
+          }
+        }
+        errorOccurred = true;  // Signal to retry
+      } else {
+        errorOccurred = false;
+        throw error;  // Rethrow other types of errors that are not handled specifically
+      }
+    }
+  } while (errorOccurred);
 }
+
 
 export async function getBestCollectionOffer(collectionSymbol: string) {
   const url = `https://nfttools.pro/magiceden/v2/ord/btc/collection-offers/collection/${collectionSymbol}`;
   const params = {
     sort: 'priceDesc',
     status: ['valid'],
-    limit: 2,
+    limit: 100,
     offset: 0
   };
 
   try {
-
     const { data } = await limiter.schedule(() => axiosInstance.get<CollectionOfferData>(url, { params, headers }));
     return data
   } catch (error: any) {
@@ -316,7 +343,6 @@ export async function cancelAllUserOffers(buyerTokenReceiveAddress: string, priv
       }
     }
   } catch (error) {
-    console.log("cancelAllUserOffers: ", error);
   }
 }
 
@@ -338,7 +364,6 @@ export async function cancelBulkTokenOffers(tokenIds: string[], buyerTokenReceiv
       }
     }
   } catch (error) {
-    console.log('cancelBulkTokenOffers: ', error);
   }
 }
 
@@ -348,7 +373,6 @@ export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: stri
   let params: any = {
     status: 'valid',
     limit: 100,
-    offset: 0,
     sortBy: 'priceDesc',
     token_id: tokenId
   };
@@ -356,8 +380,7 @@ export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: stri
   if (buyerTokenReceiveAddress) {
     params = {
       status: 'valid',
-      limit: 1,
-      offset: 0,
+      limit: 100,
       sortBy: 'priceDesc',
       token_id: tokenId,
       wallet_address_buyer: buyerTokenReceiveAddress
@@ -368,7 +391,6 @@ export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: stri
     const { data } = await limiter.schedule(() => axiosInstance.get<OfferData>(url, { params, headers }))
     return data
   } catch (error: any) {
-    console.log("getOffers ", error.response.data);
   }
 }
 
@@ -396,7 +418,6 @@ export async function submitCancelOfferData(offerId: string, signedPSBTBase64: s
     const response = await limiter.schedule(() => axiosInstance.post(url, data, { headers }))
     return response.data.ok
   } catch (error: any) {
-    console.log('submitCancelOfferData: ', error.response.data);
   }
 }
 
@@ -450,7 +471,7 @@ export async function counterBid(
 
   if (signedOfferData) {
 
-    const offerData = await submitSignedOfferOrder(signedOfferData, tokenId, price, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, feerateTier)
+    const offerData = await submitSignedOfferOrder(signedOfferData, tokenId, price, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, feerateTier, privateKey)
 
     console.log('--------------------------------------------------------------------------------');
     console.log({ offerData });
