@@ -1,11 +1,11 @@
 [
 	{
-		"collectionSymbol": "cpnks",
-		"minBid": 0.00051935,
-		"maxBid": 0.0005593,
-		"minFloorBid": 65,
-		"maxFloorBid": 70,
-		"bidCount": 10,
+		"collectionSymbol": "bury",
+		"minBid": 0.001032,
+		"maxBid": 0.0010965,
+		"minFloorBid": 80,
+		"maxFloorBid": 85,
+		"bidCount": 20,
 		"duration": 60,
 		"scheduledLoop": 300,
 		"enableCounterBidding": true,
