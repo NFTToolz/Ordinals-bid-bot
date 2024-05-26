@@ -116,3 +116,5 @@ OR
 #### Bulk cancel offers
 
 `yarn cancel`
+
+**Raise a ticket to get access today https://discord.gg/Yezs2VDhBV (subscription model)**
