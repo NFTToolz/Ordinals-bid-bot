@@ -1278,6 +1278,7 @@ paths:
           description: "URI encoded signature e.g signature=${encodeURIComponent(signature)"
           schema:
             type: string
+            example: "0xff38d9gfgfd96469e62ad970493f101463a6837644d68487389052ebea11564e5dcf99c5d4a495243afa20e3c5476614d284136160c4gdfg8384a572de1c"
       summary: Submit signed order
       description: This endpoint allows you to submit a signed order on the specified chain.
       requestBody:
@@ -1286,81 +1287,81 @@ paths:
           application/json:
             schema:
               type: object
-              properties:
-                items:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      order:
-                        type: object
-                        properties:
-                          kind:
-                            type: string
-                            example: payment-processor-v2
-                          data:
-                            type: object
-                            properties:
-                              kind:
-                                type: string
-                                example: collection-offer-approval
-                              sellerOrBuyer:
-                                type: string
-                                example: "0xb71425024868e0c9156c3942ac115cd3b56d5559"
-                              protocol:
-                                type: integer
-                                example: 0
-                              cosigner:
-                                type: string
-                                example: "0x32da57e736e05f75aa4fae2e9be60fd904492726"
-                              beneficiary:
-                                type: string
-                                example: "0xb71425024868e0c9156c3942ac115cd3b56d5559"
-                              marketplace:
-                                type: string
-                                example: "0xca9337244b5f04cb946391bc8b8a980e988f9a6a"
-                              fallbackRoyaltyRecipient:
-                                type: string
-                                example: "0x9ccf727dbb547d623ded5ab83c5b0e499eee5532"
-                              paymentMethod:
-                                type: string
-                                example: "0x4200000000000000000000000000000000000006"
-                              tokenAddress:
-                                type: string
-                                example: "0x00b5f2e672f6b8a176bf6ade71238b61360a29e9"
-                              amount:
-                                type: string
-                                example: "1"
-                              itemPrice:
-                                type: string
-                                example: "100000000000000"
-                              expiration:
-                                type: string
-                                example: "1722607020"
-                              marketplaceFeeNumerator:
-                                type: string
-                                example: "200"
-                              nonce:
-                                type: string
-                                example: "69005277841611552456666767078621072521642912468796321438269508217196416860176"
-                              masterNonce:
-                                type: string
-                                example: "0"
-                              r:
-                                type: string
-                                example: "0x0000000000000000000000000000000000000000000000000000000000000000"
-                              s:
-                                type: string
-                                example: "0x0000000000000000000000000000000000000000000000000000000000000000"
-                              v:
-                                type: integer
-                                example: 0
-                      orderbook:
-                        type: string
-                        example: reservoir
-                source:
-                  type: string
-                  example: magiceden.io
+            examples:
+              SubmitBidRequest:
+                summary: Submit signed bid request
+                description: Submits a signed bid order to Magic Eden for processing.
+                value:
+                  "items":
+                    [
+                      {
+                        "order":
+                          {
+                            "kind": "payment-processor-v2",
+                            "data":
+                              {
+                                "kind": "collection-offer-approval",
+                                "sellerOrBuyer": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                "protocol": 0,
+                                "cosigner": "0x32da57e736e05f75aa4fae2e9be60fd904492726",
+                                "beneficiary": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                "marketplace": "0xca9337244b5f04cb946391bc8b8a980e988f9a6a",
+                                "fallbackRoyaltyRecipient": "0xf7aa4de9ef448261ec91bdd79cc03b9eb5104a9d",
+                                "paymentMethod": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                                "tokenAddress": "0x6aa0e1910353af11f1f21eb5b2e4a0e9b0374d8a",
+                                "amount": "1",
+                                "itemPrice": "9436369130321426",
+                                "expiration": "1723141612",
+                                "marketplaceFeeNumerator": "200",
+                                "nonce": "69005277841611552456666767078621072521642912468796321438269508217196416860427",
+                                "masterNonce": "0",
+                                "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "s": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "v": 0,
+                              },
+                          },
+                        "orderbook": "reservoir",
+                      },
+                    ]
+                  "source": "magiceden.io"
+
+              SubmitListingRequest:
+                summary: "Submit Signed List Order"
+                description: "Submits a signed list order to Magic Eden for processing."
+                value:
+                  "items":
+                    [
+                      {
+                        "order":
+                          {
+                            "kind": "payment-processor-v2",
+                            "data":
+                              {
+                                "kind": "sale-approval",
+                                "sellerOrBuyer": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                "protocol": 0,
+                                "cosigner": "0x32da57e736e05f75aa4fae2e9be60fd904492726",
+                                "marketplace": "0xca9337244b5f04cb946391bc8b8a980e988f9a6a",
+                                "fallbackRoyaltyRecipient": "0x118dba55d907be00a0e2c77494f2bd012676e3c2",
+                                "paymentMethod": "0x0000000000000000000000000000000000000000",
+                                "tokenAddress": "0xa4991609c508b6d4fb7156426db0bd49fe298bd8",
+                                "tokenId": "3012",
+                                "amount": "1",
+                                "itemPrice": "999990000000000000",
+                                "expiration": "1723142940",
+                                "marketplaceFeeNumerator": "200",
+                                "maxRoyaltyFeeNumerator": "500",
+                                "nonce": "69005277841611552456666767078621072521642912468796321438269508217196416860429",
+                                "masterNonce": "0",
+                                "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "s": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "v": 0,
+                              },
+                          },
+                        "orderbook": "reservoir",
+                      },
+                    ]
+                  "source": "magiceden.io"
       responses:
         "200":
           description: Successful response
@@ -3268,7 +3269,7 @@ paths:
     post:
       tags:
         - EVM
-      summary: Cancel a norder on Magic Eden
+      summary: Cancel an order on Magic Eden
       description: Submits a request to cancel an order on Magic Eden
       parameters:
         - name: chain
@@ -3427,6 +3428,86 @@ paths:
                     type: string
                     example: "Invalid request data"
 
+  /sdk/{apiKey}/nonce:
+    get:
+      summary: Retrieve Nonce
+      description: Returns a nonce for the provided API key.
+      parameters:
+        - name: apiKey
+          in: path
+          required: true
+          description: The API key associated with the Magic Eden SDK.
+          schema:
+            type: string
+            example: c1314b5b-ece8-4b4f-a879-3894dda364e4
+      responses:
+        "200":
+          description: A nonce for authentication.s
+        "400":
+          description: Invalid API key.
+        "500":
+          description: Server error.
+
+  /sdk/{apiKey}/verify:
+    post:
+      summary: Verify Signed Message
+      description: Verifies a signed message and returns the verification status.
+      parameters:
+        - name: apiKey
+          in: path
+          required: true
+          description: The API key associated with the Magic Eden SDK.
+          schema:
+            type: string
+            example: c1314b5b-ece8-4b4f-a879-3894dda364e4
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signedMessage:
+                  type: string
+                  description: The signed message to verify.
+                  example: "0xff38d9gfgfd96469e62ad970493f101463a6837644d68487389052ebea11564e5dcf99c5d4a495243afa20e3c5476614d284136160c4gdfg8384a572de1c"
+                messageToSign:
+                  type: string
+                  description: The message that was signed.
+                  example: "magiceden.io wants you to sign in with your Ethereum account:\n0xe61dcC9gdfgdf97a1ba7Af2781361f58e7A\n\nWelcome to Magic Eden. Signing is the only way we can truly know that you are the owner of the wallet you are connecting. Signing is a safe, gas-less transaction that does not in any way give Magic Eden permission to perform any transactions with your wallet.\n\nURI: https://magiceden.io/\nVersion: 1\nChain ID: 1\nNonce: 4545e1668a55gdgfdf31bbe10288f00\nIssued At: 2024-08-08T09:55:43.997Z\nRequest ID: c131gdfg4b5b-ece8-4b4f-a879-3894ddfgd64e4"
+                publicWalletAddress:
+                  type: string
+                  description: The public wallet address used to sign the message.
+                  example: "0xe61dcC958fc886gdfgdf1361f5gdfg"
+                chain:
+                  type: string
+                  description: The blockchain network used.
+                  example: "EVM"
+                walletName:
+                  type: string
+                  description: The name of the wallet used to sign the message.
+                  example: "metamask"
+                walletProvider:
+                  type: string
+                  description: The provider of the wallet used to sign the message.
+                  example: "browserExtension"
+                network:
+                  type: string
+                  description: The network ID where the wallet is operating.
+                  example: "1"
+                additionalWalletAddresses:
+                  type: array
+                  description: Additional wallet addresses if applicable.
+                  items:
+                    type: string
+                  example: []
+      responses:
+        "200":
+          description: Verification successful.
+        "400":
+          description: Bad request, e.g., missing or invalid parameters.
+        "500":
+          description: Server error.
 components:
   securitySchemes:
     ApiKeyAuth:
