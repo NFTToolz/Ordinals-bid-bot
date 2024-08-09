@@ -1445,10 +1445,203 @@ paths:
             application/json:
               schema:
                 type: object
-                properties:
-                  success:
-                    type: boolean
-                    example: true
+
+                example:
+                  "steps":
+                    [
+                      {
+                        "id": "currency-wrapping",
+                        "action": "Wrapping currency",
+                        "description": "We'll ask your approval to wrap the currency for bidding. Gas fee required.",
+                        "kind": "transaction",
+                        "items":
+                          [
+                            {
+                              "status": "incomplete",
+                              "data":
+                                {
+                                  "from": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                  "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                                  "data": "0xd0e30db0",
+                                  "value": "0x1bb8446bdac042",
+                                },
+                              "orderIndexes": [0],
+                            },
+                          ],
+                      },
+                      {
+                        "id": "currency-approval",
+                        "action": "Approve currency",
+                        "description": "We'll ask your approval for the exchange to access your token. This is a one-time only operation per exchange.",
+                        "kind": "transaction",
+                        "items":
+                          [{ "status": "complete", "orderIndexes": [0] }],
+                      },
+                      {
+                        "id": "auth-transaction",
+                        "action": "On-chain verification",
+                        "description": "Some marketplaces require triggering an auth transaction before filling",
+                        "kind": "transaction",
+                        "items": [],
+                      },
+                      {
+                        "id": "currency-permit",
+                        "action": "Sign permits",
+                        "description": "Sign permits for accessing the tokens in your wallet",
+                        "kind": "signature",
+                        "items": [],
+                      },
+                      {
+                        "id": "order-signature",
+                        "action": "Authorize offer",
+                        "description": "A free off-chain signature to create the offer",
+                        "kind": "signature",
+                        "items":
+                          [
+                            {
+                              "status": "incomplete",
+                              "data":
+                                {
+                                  "sign":
+                                    {
+                                      "signatureKind": "eip712",
+                                      "domain":
+                                        {
+                                          "name": "PaymentProcessor",
+                                          "version": "2",
+                                          "chainId": 1,
+                                          "verifyingContract": "0x9a1d00bed7cd04bcda516d721a596eb22aac6834",
+                                        },
+                                      "types":
+                                        {
+                                          "CollectionOfferApproval":
+                                            [
+                                              {
+                                                "name": "protocol",
+                                                "type": "uint8",
+                                              },
+                                              {
+                                                "name": "cosigner",
+                                                "type": "address",
+                                              },
+                                              {
+                                                "name": "buyer",
+                                                "type": "address",
+                                              },
+                                              {
+                                                "name": "beneficiary",
+                                                "type": "address",
+                                              },
+                                              {
+                                                "name": "marketplace",
+                                                "type": "address",
+                                              },
+                                              {
+                                                "name": "fallbackRoyaltyRecipient",
+                                                "type": "address",
+                                              },
+                                              {
+                                                "name": "paymentMethod",
+                                                "type": "address",
+                                              },
+                                              {
+                                                "name": "tokenAddress",
+                                                "type": "address",
+                                              },
+                                              {
+                                                "name": "amount",
+                                                "type": "uint256",
+                                              },
+                                              {
+                                                "name": "itemPrice",
+                                                "type": "uint256",
+                                              },
+                                              {
+                                                "name": "expiration",
+                                                "type": "uint256",
+                                              },
+                                              {
+                                                "name": "marketplaceFeeNumerator",
+                                                "type": "uint256",
+                                              },
+                                              {
+                                                "name": "nonce",
+                                                "type": "uint256",
+                                              },
+                                              {
+                                                "name": "masterNonce",
+                                                "type": "uint256",
+                                              },
+                                            ],
+                                        },
+                                      "value":
+                                        {
+                                          "protocol": 0,
+                                          "cosigner": "0x32da57e736e05f75aa4fae2e9be60fd904492726",
+                                          "buyer": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                          "beneficiary": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                          "marketplace": "0xca9337244b5f04cb946391bc8b8a980e988f9a6a",
+                                          "fallbackRoyaltyRecipient": "0xf7aa4de9ef448261ec91bdd79cc03b9eb5104a9d",
+                                          "paymentMethod": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                                          "tokenAddress": "0x6aa0e1910353af11f1f21eb5b2e4a0e9b0374d8a",
+                                          "amount": "1",
+                                          "itemPrice": "7802428377972802",
+                                          "expiration": "1723208469",
+                                          "marketplaceFeeNumerator": "200",
+                                          "nonce": "69005277841611552456666767078621072521642912468796321438269508217196416860430",
+                                          "masterNonce": "0",
+                                        },
+                                      "primaryType": "CollectionOfferApproval",
+                                    },
+                                  "post":
+                                    {
+                                      "endpoint": "/order/v4",
+                                      "method": "POST",
+                                      "body":
+                                        {
+                                          "items":
+                                            [
+                                              {
+                                                "order":
+                                                  {
+                                                    "kind": "payment-processor-v2",
+                                                    "data":
+                                                      {
+                                                        "kind": "collection-offer-approval",
+                                                        "protocol": 0,
+                                                        "cosigner": "0x32da57e736e05f75aa4fae2e9be60fd904492726",
+                                                        "sellerOrBuyer": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                                        "marketplace": "0xca9337244b5f04cb946391bc8b8a980e988f9a6a",
+                                                        "paymentMethod": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                                                        "tokenAddress": "0x6aa0e1910353af11f1f21eb5b2e4a0e9b0374d8a",
+                                                        "amount": "1",
+                                                        "itemPrice": "7802428377972802",
+                                                        "expiration": "1723208469",
+                                                        "marketplaceFeeNumerator": "200",
+                                                        "nonce": "69005277841611552456666767078621072521642912468796321438269508217196416860430",
+                                                        "masterNonce": "0",
+                                                        "fallbackRoyaltyRecipient": "0xf7aa4de9ef448261ec91bdd79cc03b9eb5104a9d",
+                                                        "beneficiary": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                                        "v": 0,
+                                                        "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                        "s": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                      },
+                                                  },
+                                                "collection": "0x6aa0e1910353af11f1f21eb5b2e4a0e9b0374d8a",
+                                                "isNonFlagged": false,
+                                                "orderbook": "reservoir",
+                                              },
+                                            ],
+                                          "source": "magiceden.io",
+                                        },
+                                    },
+                                },
+                              "orderIndexes": [0],
+                            },
+                          ],
+                      },
+                    ]
+                  "errors": []
 
   /v3/rtp/{chain}/execute/list/v5:
     post:
@@ -1521,10 +1714,183 @@ paths:
             application/json:
               schema:
                 type: object
-                properties:
-                  success:
-                    type: boolean
-                    example: true
+              example:
+                "steps":
+                  [
+                    {
+                      "id": "nft-approval",
+                      "action": "Approve NFT contract",
+                      "description": "Each NFT collection you want to trade requires a one-time approval transaction",
+                      "kind": "transaction",
+                      "items":
+                        [
+                          {
+                            "status": "incomplete",
+                            "data":
+                              {
+                                "from": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                "to": "0xa4991609c508b6d4fb7156426db0bd49fe298bd8",
+                                "data": "0xa22cb4650000000000000000000000009a1d00bed7cd04bcda516d721a596eb22aac68340000000000000000000000000000000000000000000000000000000000000001",
+                              },
+                            "orderIndexes": [0],
+                          },
+                        ],
+                    },
+                    {
+                      "id": "order-signature",
+                      "action": "Authorize listing",
+                      "description": "A free off-chain signature to create the listing",
+                      "kind": "signature",
+                      "items":
+                        [
+                          {
+                            "status": "incomplete",
+                            "data":
+                              {
+                                "sign":
+                                  {
+                                    "signatureKind": "eip712",
+                                    "domain":
+                                      {
+                                        "name": "PaymentProcessor",
+                                        "version": "2",
+                                        "chainId": 1,
+                                        "verifyingContract": "0x9a1d00bed7cd04bcda516d721a596eb22aac6834",
+                                      },
+                                    "types":
+                                      {
+                                        "SaleApproval":
+                                          [
+                                            {
+                                              "name": "protocol",
+                                              "type": "uint8",
+                                            },
+                                            {
+                                              "name": "cosigner",
+                                              "type": "address",
+                                            },
+                                            {
+                                              "name": "seller",
+                                              "type": "address",
+                                            },
+                                            {
+                                              "name": "marketplace",
+                                              "type": "address",
+                                            },
+                                            {
+                                              "name": "fallbackRoyaltyRecipient",
+                                              "type": "address",
+                                            },
+                                            {
+                                              "name": "paymentMethod",
+                                              "type": "address",
+                                            },
+                                            {
+                                              "name": "tokenAddress",
+                                              "type": "address",
+                                            },
+                                            {
+                                              "name": "tokenId",
+                                              "type": "uint256",
+                                            },
+                                            {
+                                              "name": "amount",
+                                              "type": "uint256",
+                                            },
+                                            {
+                                              "name": "itemPrice",
+                                              "type": "uint256",
+                                            },
+                                            {
+                                              "name": "expiration",
+                                              "type": "uint256",
+                                            },
+                                            {
+                                              "name": "marketplaceFeeNumerator",
+                                              "type": "uint256",
+                                            },
+                                            {
+                                              "name": "maxRoyaltyFeeNumerator",
+                                              "type": "uint256",
+                                            },
+                                            {
+                                              "name": "nonce",
+                                              "type": "uint256",
+                                            },
+                                            {
+                                              "name": "masterNonce",
+                                              "type": "uint256",
+                                            },
+                                          ],
+                                      },
+                                    "value":
+                                      {
+                                        "protocol": 0,
+                                        "cosigner": "0x32da57e736e05f75aa4fae2e9be60fd904492726",
+                                        "seller": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                        "marketplace": "0xca9337244b5f04cb946391bc8b8a980e988f9a6a",
+                                        "fallbackRoyaltyRecipient": "0x118dba55d907be00a0e2c77494f2bd012676e3c2",
+                                        "paymentMethod": "0x0000000000000000000000000000000000000000",
+                                        "tokenAddress": "0xa4991609c508b6d4fb7156426db0bd49fe298bd8",
+                                        "tokenId": "3012",
+                                        "amount": "1",
+                                        "itemPrice": "999990000000000000",
+                                        "expiration": "1723209074",
+                                        "marketplaceFeeNumerator": "200",
+                                        "maxRoyaltyFeeNumerator": "500",
+                                        "nonce": "69005277841611552456666767078621072521642912468796321438269508217196416860431",
+                                        "masterNonce": "0",
+                                      },
+                                    "primaryType": "SaleApproval",
+                                  },
+                                "post":
+                                  {
+                                    "endpoint": "/order/v4",
+                                    "method": "POST",
+                                    "body":
+                                      {
+                                        "items":
+                                          [
+                                            {
+                                              "order":
+                                                {
+                                                  "kind": "payment-processor-v2",
+                                                  "data":
+                                                    {
+                                                      "kind": "sale-approval",
+                                                      "protocol": 0,
+                                                      "cosigner": "0x32da57e736e05f75aa4fae2e9be60fd904492726",
+                                                      "sellerOrBuyer": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                                      "marketplace": "0xca9337244b5f04cb946391bc8b8a980e988f9a6a",
+                                                      "paymentMethod": "0x0000000000000000000000000000000000000000",
+                                                      "tokenAddress": "0xa4991609c508b6d4fb7156426db0bd49fe298bd8",
+                                                      "amount": "1",
+                                                      "itemPrice": "999990000000000000",
+                                                      "expiration": "1723209074",
+                                                      "marketplaceFeeNumerator": "200",
+                                                      "nonce": "69005277841611552456666767078621072521642912468796321438269508217196416860431",
+                                                      "masterNonce": "0",
+                                                      "fallbackRoyaltyRecipient": "0x118dba55d907be00a0e2c77494f2bd012676e3c2",
+                                                      "maxRoyaltyFeeNumerator": "500",
+                                                      "tokenId": "3012",
+                                                      "v": 0,
+                                                      "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                      "s": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                    },
+                                                },
+                                              "orderbook": "reservoir",
+                                            },
+                                          ],
+                                        "source": "magiceden.io",
+                                      },
+                                  },
+                              },
+                            "orderIndexes": [0],
+                          },
+                        ],
+                    },
+                  ]
+                "errors": []
 
   /v3/rtp/{chain}/collections/0x9db39ac416c5ec75c2c3ae622d2013ecccc2d74a/marketplace-configurations/v2:
     get:
@@ -2539,6 +2905,14 @@ paths:
       responses:
         "200":
           description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                offerIds: ["abeddc46-6f95-49dd-a604-003807579ea2"]
+                psbtBase64: "cHNidP8BAFICAAAAAW6fp74E08B6FEyvzB+cuoGTkpMPQ4ix0y+T0XqPQmk1AAAAAAD/////AVDDAAAAAAAAFgAUr96ckiK89gXZZ42shVnd2OkOLnsAAAAACPwCbWUDc2lnQCcsS86n4Xg3VNQ9IJEIRwELzxUtoYe4G2BA3o831VllJQJhV2H0nUdX5Mz/QSa5zGZPp5W5qJh2YUTy3l7FWH4L/AJtZQZzaWdleHAIQnkTg19FAAAZ/AJtZRRtZC1jb2xsZWN0aW9uOnN5bWJvbAZjYW5jZWwAAQEfUMMAAAAAAAAWABSv3pySIrz2BdlnjayFWd3Y6Q4uewAA"
+
         "400":
           description: Invalid request
         "404":
@@ -2586,13 +2960,10 @@ paths:
             application/json:
               schema:
                 type: object
-                properties:
-                  status:
-                    type: string
-                    example: "success"
-                  message:
-                    type: string
-                    example: "Offers cancelled successfully"
+
+              example:
+                offerIds: ["abeddc46-6f95-49dd-a604-003807579ea2"]
+                ok: true
         "400":
           description: Invalid request
         "404":
@@ -2663,19 +3034,14 @@ paths:
             application/json:
               schema:
                 type: object
-                properties:
-                  status:
-                    type: string
-                    example: "success"
-                  data:
-                    type: object
-                    properties:
-                      offerId:
-                        type: string
-                        example: "offer123456"
-                      psbt:
-                        type: string
-                        example: "cHNidP8BAHcCAAAAAZX6s......."
+              example:
+                offers:
+                  [
+                    {
+                      psbtBase64: "cHNidP8BAH0CAAAAAW6fp74E08B6FEyvzB+cuoGTkpMPQ4ix0y+T0XqPQmk1AAAAAAD/////Aja0AAAAAAAAIgAg33KEMZ4Vm7n6nBGLCKt33DuDgtPGl+usyf/mbsA9ZdNPDQAAAAAAABYAFK/enJIivPYF2WeNrIVZ3djpDi57AAAAAAj8Am1lA3NpZ0BK2zdTZKcl9R4tysErsozArf7hZoYollWBxvUyDjYXWmnxfx3ZPY1xpWTxHjJozt5XFfRA175YtfuxgrZZ5SMaC/wCbWUGc2lnZXhwCEJ5E4InpTAAGfwCbWUUbWQtY29sbGVjdGlvbjpzeW1ib2wNbGlmZV9pc19jcmF6eQABAR9QwwAAAAAAABYAFK/enJIivPYF2WeNrIVZ3djpDi57AAAA",
+                      transactionFeeSats: 459,
+                    },
+                  ]
         "400":
           description: Invalid request
         "404":
@@ -2731,6 +3097,12 @@ paths:
       responses:
         "200":
           description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                offerIds: ["abeddc46-6f95-49dd-a604-003807579ea2"]
         "400":
           description: Invalid request
         "404":
@@ -2791,6 +3163,21 @@ paths:
       responses:
         "200":
           description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                psbtBase64: "cHNidP8BAPACAAAAAsx6UqCask/X9MeF/giyBPG9EJQ9H0Rsky9Ye6pU4kUGAAAAAAD/////bp+nvgTTwHoUTK/MH5y6gZOSkw9DiLHTL5PReo9CaTUAAAAAAP////8E6AMAAAAAAAAiUSAntV1h7zEk/Wtemxgeo5DVxzX5IduThtxvIH0Uips25yywAAAAAAAAIlEgNWGFnHtLNlXWAWMBM6gkOEjr8tKo6eumPDpXIzQMGIxlBAAAAAAAABYAFMAVxlJ21fONWZ1EXEywOqeqDcNlSwoAAAAAAAAWABSv3pySIrz2BdlnjayFWd3Y6Q4uewAAAAAAAQEr6AMAAAAAAAAiUSA1YYWce0s2VdYBYwEzqCQ4SOvy0qjp66Y8OlcjNAwYjAEDBAEAAAABFyBykry9chb3FH5Mhswx9ThUHg4CsQWW9bGdZd/eEPER5gABAR9QwwAAAAAAABYAFK/enJIivPYF2WeNrIVZ3djpDi57AAAAAAA="
+                toSignSigHash: 1
+                toSignInputs: [1]
+                toSignOrdinalInputs: []
+                tokenId: "68cf53e735004023ff844f363261a131dfce1fe00e7b4a466f75b3ce62292f76i0"
+                price: 45000
+                expirationDate: "1723229759400"
+                buyerReceiveAddress: "bc1py7646c00xyj06667nvvpagus6hrnt7fpmwfcdhr0yp73fz5mxmnsej6egt"
+                buyerPaymentAddress: "bc1q4l0fey3zhnmqtkt83kkg2kwamr5sutnmvas999"
+                buyerPaymentPublicKey: "03ead7ba6ef3d76a1981aab415913f1532de92de6f8ff29c796c984550e244dce3"
         "400":
           description: Invalid request
         "404":
@@ -2849,6 +3236,12 @@ paths:
       responses:
         "200":
           description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                ok: true
         "400":
           description: Bad Request
         "500":
@@ -2972,7 +3365,11 @@ paths:
             application/json:
               schema:
                 type: object
-                # Add more specific properties if known
+              example:
+                offerId: "70bb516f-0864-480e-8960-3e3f6e41a732"
+                psbtBase64: "cHNidP8BAPACAAAAAsx6UqCask/X9MeF/giyBPG9EJQ9H0Rsky9Ye6pU4kUGAAAAAAD/////bp+nvgTTwHoUTK/MH5y6gZOSkw9DiLHTL5PReo9CaTUAAAAAAP////8E6AMAAAAAAAAiUSAntV1h7zEk/Wtemxgeo5DVxzX5IduThtxvIH0Uips25yywAAAAAAAAIlEgNWGFnHtLNlXWAWMBM6gkOEjr8tKo6eumPDpXIzQMGIxlBAAAAAAAABYAFMAVxlJ21fONWZ1EXEywOqeqDcNlSwoAAAAAAAAWABSv3pySIrz2BdlnjayFWd3Y6Q4uewAAAAAAAQEr6AMAAAAAAAAiUSA1YYWce0s2VdYBYwEzqCQ4SOvy0qjp66Y8OlcjNAwYjAEDBAEAAAABFyBykry9chb3FH5Mhswx9ThUHg4CsQWW9bGdZd/eEPER5gABAR9QwwAAAAAAABYAFK/enJIivPYF2WeNrIVZ3djpDi57AAAAAAA="
+                toSignSigHash: 1
+                toSignInputs: [1]
         "400":
           description: Bad request
         "404":
@@ -3002,6 +3399,11 @@ paths:
       responses:
         "200":
           description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+              example: true
         "400":
           description: Bad request
         "404":
@@ -3256,6 +3658,103 @@ paths:
       responses:
         "200":
           description: Successfully executed buy operation
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                "requestId": "a2e382d5-4e92-4c2b-9b54-b7e685b6a271"
+                "steps":
+                  [
+                    {
+                      "id": "sale",
+                      "action": "Confirm transaction in your wallet",
+                      "description": "To purchase this item you must confirm the transaction and pay the gas fee",
+                      "kind": "transaction",
+                      "items":
+                        [
+                          {
+                            "status": "incomplete",
+                            "orderIds":
+                              [
+                                "0x6ba7a654a1a748319da50ff508b17bab29dd279d7a6a7ea3c09edc47d595c228",
+                              ],
+                            "data":
+                              {
+                                "from": "0x9adcffff1def95f7e58b587c1a6b06ac6a7ae1e5",
+                                "to": "0xc2c862322e9c97d6244a3506655da95f05246fd8",
+                                "data": "0x760f2a0b000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000d8f24f5f0382e197c1e87ad82b357209383470cf00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000001c6bf52634000000000000000000000000000000000000000000000000000000000000000078476af662900000000000000000000000000000000000000000000000000000000000000c00000000000000000000000009adcffff1def95f7e58b587c1a6b06ac6a7ae1e50000000000000000000000009adcffff1def95f7e58b587c1a6b06ac6a7ae1e500000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000001c6bf52634000000000000000000000000000000000000000000000000000000000000000076000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000011000000000000000000000000000000000000000000000000000000000000052000000000000000000000000000000000000000000000000000000000000006800000000000000000000000000b818dc9d41732617dfc5bc8dff03dac632780e1000000000000000000000000004c00500000ad104d7dbd00e3ae0a5c00560c00000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000002200000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006694ad1c0000000000000000000000000000000000000000000000000000000066f0f61c000000000000000000000000000000000000000000000000000000000000000072db8c0b0000000000000000000000000000000000000000d5c510e2083083600000007b02230091a7ed01230072f7006a004d60a8d4e71d599b8104250f000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000300000000000000000000000076be3b62873462d2142405439777e971754e8e7700000000000000000000000000000000000000000000000000000000000029ed000000000000000000000000000000000000000000000000000000000000001100000000000000000000000000000000000000000000000000000000000000110000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001b06fb1f20f800000000000000000000000000000000000000000000000000001b06fb1f20f8000000000000000000000000000b818dc9d41732617dfc5bc8dff03dac632780e1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000026a74d672800000000000000000000000000000000000000000000000000000026a74d6728000000000000000000000000000000a26b00c1f0df003000390027140000faa719000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000305120c0f2000000000000000000000000000000000000000000000000000000305120c0f2000000000000000000000000000157e23d3e68ac6f99334b8b0fe71f0eb844911dd0000000000000000000000000000000000000000000000000000000000000123c51234595b2cc3bff9d0223b33f04f9802440164f3aba66c2e0d4935bf39c825346b91271c0078ff7a153f2b2014e8f2726abd905fff3824dc470e14dd59843a00001f99d25aace64f4ab1e45c1e3a702669957d039a4adb805b8d768ee24ec5fd4bf9e721ab5709b34b38ab9bb023327eb3a967cf962fa620f42ff363f03d7fba436c142899c4946e506562968e433cc72ff875915d36560a07bf8f52a5b10103260b5772fa6456b24cb4ed596e53dca479d64bdbcfd5bdef1ee761b2b794e0ecae5d18c8629844a57d385d3b6dda4c7ec2e580f3ddb911c6a188d7c086b2ac0a0684f9a6cc0e3a19b60d5da243ad2f2cf335f708108b8b3f59fdcca62cf4f63a0ddabf556e0b31c15b9a65eec697ce1f684d59b833508e922ec86e06fd1918e5db6e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d4da48b0e1c0c38",
+                                "value": "0x01c6bf52634000",
+                              },
+                            "check":
+                              {
+                                "endpoint": "/execute/status/v1",
+                                "method": "POST",
+                                "body": { "kind": "transaction" },
+                              },
+                            "gasEstimate": 160000,
+                          },
+                        ],
+                    },
+                  ]
+                "errors": []
+                "path":
+                  [
+                    {
+                      "orderId": "0x6ba7a654a1a748319da50ff508b17bab29dd279d7a6a7ea3c09edc47d595c228",
+                      "contract": "0x76be3b62873462d2142405439777e971754e8e77",
+                      "tokenId": "10733",
+                      "quantity": 1,
+                      "source": "opensea.io",
+                      "currency": "0x0000000000000000000000000000000000000000",
+                      "currencySymbol": "ETH",
+                      "currencyDecimals": 18,
+                      "quote": 0.0005,
+                      "rawQuote": "500000000000000",
+                      "builtInFees":
+                        [
+                          {
+                            "kind": "marketplace",
+                            "recipient": "0x0000a26b00c1f0df003000390027140000faa719",
+                            "bps": 50,
+                            "amount": 0,
+                            "rawAmount": "2500000000000",
+                          },
+                          {
+                            "kind": "royalty",
+                            "recipient": "0x157e23d3e68ac6f99334b8b0fe71f0eb844911dd",
+                            "bps": 1000,
+                            "amount": 0.00005,
+                            "rawAmount": "50000000000000",
+                          },
+                        ],
+                      "isNativeOffChainCancellable": false,
+                      "feesOnTop": [],
+                      "totalPrice": 0.0005,
+                      "totalRawPrice": "500000000000000",
+                    },
+                  ]
+                "fees":
+                  {
+                    "gas":
+                      {
+                        "currency":
+                          {
+                            "contract": "0x0000000000000000000000000000000000000000",
+                            "name": "Ether",
+                            "symbol": "ETH",
+                            "decimals": 18,
+                          },
+                        "amount":
+                          {
+                            "raw": "487128952320000",
+                            "decimal": 0.00049,
+                            "usd": 1.14066,
+                            "native": null,
+                          },
+                      },
+                  }
+
         "400":
           description: Bad Request
         "401":
