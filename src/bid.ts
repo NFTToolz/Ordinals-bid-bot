@@ -6,11 +6,10 @@ import PQueue from "p-queue"
 import { getBitcoinBalance } from "./utils";
 import { ICollectionOffer, IOffer, cancelCollectionOffer, createCollectionOffer, createOffer, getBestCollectionOffer, getBestOffer, getOffers, getUserOffers, retrieveCancelOfferFormat, signCollectionOffer, signData, submitCancelOfferData, submitCollectionOffer, submitSignedOfferOrder } from "./functions/Offer";
 import { OfferPlaced, collectionDetails } from "./functions/Collection";
-import { ITokenData, retrieveTokens } from "./functions/Tokens";
+import { retrieveTokens } from "./functions/Tokens";
 import axiosInstance from "./axios/axiosInstance";
 import limiter from "./bottleneck";
 import WebSocket from 'ws';
-import { off } from "process";
 
 
 config()
@@ -315,6 +314,7 @@ class EventManager {
     console.log('----------------------------------------------------------------------');
 
     const collectionSymbol = item.collectionSymbol
+    const traits = item.traits
     const feeSatsPerVbyte = item.feeSatsPerVbyte
     const offerType = item.offerType.toUpperCase()
     const minBid = item.minBid
@@ -377,7 +377,7 @@ class EventManager {
         }
       }
 
-      let tokens = await retrieveTokens(collectionSymbol, bidCount)
+      let tokens = await retrieveTokens(collectionSymbol, bidCount, traits)
       tokens = tokens.slice(0, bidCount)
 
       const bottomTokens = tokens
@@ -1087,7 +1087,6 @@ async function placeBid(
     const signedOffer = await signData(unsignedOffer, privateKey)
     if (signedOffer) {
       await submitSignedOfferOrder(signedOffer, tokenId, offerPrice, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey)
-
       return true
     }
 
@@ -1208,6 +1207,7 @@ export interface CollectionData {
   offerType: "ITEM" | "COLLECTION";
   feeSatsPerVbyte?: number;
   quantity: number;
+  traits: Trait[]
 }
 
 interface Token {
@@ -1215,6 +1215,10 @@ interface Token {
   price: number;
 }
 
+export interface Trait {
+  traitType: string;
+  value: string;
+}
 
 interface Offer {
   collectionSymbol: string;

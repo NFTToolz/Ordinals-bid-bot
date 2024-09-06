@@ -1,7 +1,6 @@
 import { config } from "dotenv"
 import axiosInstance from "../axios/axiosInstance"
 import { Trait, transformTrait } from "../utils/traits.utils";
-import Bottleneck from "bottleneck";
 import limiter from "../bottleneck";
 
 
@@ -12,32 +11,63 @@ const headers = {
   'X-NFT-API-Key': API_KEY,
 }
 
-export async function retrieveTokens(collectionSymbol: string, bidCount: number = 20) {
+export async function retrieveTokens(collectionSymbol: string, bidCount: number = 20, traits?: Trait[] | Trait) {
   try {
+
     const limit = getLimit(bidCount)
-    const url = `https://nfttools.pro/magiceden/v2/ord/btc/tokens`;
-    const params = {
-      limit: limit,
-      offset: 0,
-      sortBy: 'priceAsc',
-      minPrice: 0,
-      maxPrice: 0,
-      collectionSymbol: collectionSymbol,
-      disablePendingTransactions: true
-    };
+    if (!traits) {
 
-    const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }));
+      const url = `https://nfttools.pro/magiceden/v2/ord/btc/tokens`;
+      const params = {
+        limit: limit,
+        offset: 0,
+        sortBy: 'priceAsc',
+        minPrice: 0,
+        maxPrice: 0,
+        collectionSymbol: collectionSymbol,
+        disablePendingTransactions: true
+      };
 
-    const tokens = data.tokens
+      const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }));
 
-    return tokens.filter(item => item.listed === true)
+      const tokens = data.tokens.filter(item => item.listed === true)
+
+      return tokens
+    } else {
+      const traitsArray: Trait[] = Array.isArray(traits) ? traits : [traits]
+
+      const transformedTraits = transformTrait(traitsArray)
+
+      const transformedAttributes = {
+        "attributes": transformedTraits
+      }
+
+      const params = {
+        attributes: encodeURIComponent(JSON.stringify(transformedAttributes)),
+        collectionSymbol: collectionSymbol,
+        disablePendingTransactions: true,
+        offset: 0,
+        sortBy: 'priceAsc'
+      };
+
+      const url = 'https://nfttools.pro/magiceden/v2/ord/btc/attributes';
+
+      const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }))
+      const tokens = data.tokens.filter(item => item.listed === true)
+
+      console.log({
+        count: tokens.length,
+        tokens: JSON.stringify(tokens[0])
+      });
+      return tokens
+    }
   } catch (error: any) {
     console.log('retrieveTokens: ', error?.response?.data);
     return []
   }
 }
 
-export async function getTokenByTraits(traits: Trait[] | Trait, collectionSymbol: string, bidCount: number = 20) {
+export async function getTokenByTraits(collectionSymbol: string, bidCount: number = 20, traits: Trait[]) {
   const limit = bidCount >= 20 ? bidCount : 20
   const traitsArray: Trait[] = Array.isArray(traits) ? traits : [traits]
 
@@ -52,7 +82,7 @@ export async function getTokenByTraits(traits: Trait[] | Trait, collectionSymbol
     attributes: encodeURIComponent(JSON.stringify(transformedAttributes)),
     collectionSymbol: collectionSymbol,
     disablePendingTransactions: true,
-    limit: limit,
+    // limit: limit,
     offset: 0,
     sortBy: 'priceAsc'
   };
@@ -62,7 +92,13 @@ export async function getTokenByTraits(traits: Trait[] | Trait, collectionSymbol
   try {
     const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }))
     const tokens = data.tokens
-    return tokens.filter(item => item.listed === true)
+
+    console.log({
+      count: tokens.length,
+      tokens: JSON.stringify(tokens[0])
+    });
+
+    return tokens
   } catch (error: any) {
     console.log('getTokenByTraits', error.response.data);
     return []
