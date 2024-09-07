@@ -111,6 +111,51 @@ OR
 ]
 ```
 
+### TRAIT OFFER
+
+| Field                           | Description                                                           |
+| ------------------------------- | --------------------------------------------------------------------- |
+| collectionSymbol                | The symbol of the collection to bid on.                               |
+| minBid                          | The minimum bid amount.                                               |
+| maxBid                          | The maximum bid amount.                                               |
+| minFloorBid                     | The minimum percentage of the floor price to bid.                     |
+| maxFloorBid                     | The maximum percentage of the floor price to bid.                     |
+| bidCount                        | The number of bids to place.                                          |
+| duration                        | The duration of the bidding process.                                  |
+| scheduledLoop                   | The interval (in seconds) at which to run the scheduled bidding loop. |
+| offerType                       | Must be "ITEM" for trait bidding.                                     |
+| enableCounterBidding (OPTIONAL) | Enable / disable counter bidding                                      |
+| outBidMargin                    | The margin to outbid existing offers.                                 |
+| quantity                        | The maximum number of tokens to buy.                                  |
+| feeSatsPerVbyte (OPTIONAL)      | Network fees, default to 28                                           |
+| traits                          | An array of trait objects specifying traitType and value.             |
+
+```
+[
+  {
+    "collectionSymbol": "octoglyphs",
+    "minBid": 0.001615,
+    "maxBid": 0.0018915,
+    "minFloorBid": 95,
+    "maxFloorBid": 97,
+    "bidCount": 40,
+    "duration": 60,
+    "scheduledLoop": 300,
+    "enableCounterBidding": true,
+    "outBidMargin": 5e-5,
+    "offerType": "ITEM",
+    "quantity": 1,
+    "feeSatsPerVbyte": 25,
+    "traits": [
+      {
+        "traitType": "Accessories",
+        "value: "Juice Box",
+			}
+		]
+	}
+]
+```
+
 `yarn bid`
 
 #### Bulk cancel offers
