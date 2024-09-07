@@ -93,11 +93,6 @@ export async function getTokenByTraits(collectionSymbol: string, bidCount: numbe
     const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }))
     const tokens = data.tokens
 
-    console.log({
-      count: tokens.length,
-      tokens: JSON.stringify(tokens[0])
-    });
-
     return tokens
   } catch (error: any) {
     console.log('getTokenByTraits', error.response.data);
