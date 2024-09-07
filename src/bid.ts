@@ -163,7 +163,15 @@ class EventManager {
       const publicKey = keyPair.publicKey.toString('hex');
       const buyerPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string
       const outBidAmount = outBidMargin * 1e8
-      const maxFloorBid = collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100
+      const maxFloorBid = collection.offerType === "ITEM" && collection.traits && collection.traits.length > 0
+        ? collection.maxFloorBid
+        : (collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100);
+      const minFloorBid = collection.minFloorBid
+
+      if (collection.offerType === "ITEM" && collection.traits && collection.traits.length > 0 && maxFloorBid > 100) {
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making a trait bid for ${collection.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price.`);
+      }
+
       const collectionData = await collectionDetails(collectionSymbol)
       const floorPrice = Number(collectionData?.floorPrice) ?? 0
       const maxPrice = Math.round(collection.maxBid * CONVERSION_RATE)
@@ -402,10 +410,18 @@ class EventManager {
       const minPrice = Math.round(minBid * CONVERSION_RATE)
       const maxPrice = Math.round(maxBid * CONVERSION_RATE)
       const floorPrice = Number(collectionData?.floorPrice) ?? 0
-      const maxFloorBid = item.maxFloorBid <= 100 ? item.maxFloorBid : 100
+      const maxFloorBid = item.offerType === "ITEM" && item.traits && item.traits.length > 0
+        ? item.maxFloorBid
+        : (item.maxFloorBid <= 100 ? item.maxFloorBid : 100);
       const minFloorBid = item.minFloorBid
       const minOffer = Math.max(minPrice, Math.round(minFloorBid * floorPrice / 100))
       const maxOffer = Math.min(maxPrice, Math.round(maxFloorBid * floorPrice / 100))
+
+      if (item.offerType === "ITEM" && item.traits && item.traits.length > 0 && maxFloorBid > 100) {
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making a trait bid for ${item.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price.`);
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+      }
 
       const userBids = Object.entries(bidHistory).flatMap(([collectionSymbol, bidData]) => {
         return Object.entries(bidData.ourBids).map(([tokenId, bidInfo]) => ({
