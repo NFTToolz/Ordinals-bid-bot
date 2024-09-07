@@ -168,8 +168,11 @@ class EventManager {
         : (collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100);
       const minFloorBid = collection.minFloorBid
 
-      if (collection.offerType === "ITEM" && collection.traits && collection.traits.length > 0 && maxFloorBid > 100) {
-        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making a trait bid for ${collection.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price.`);
+      if ((collection.offerType === "ITEM" || collection.offerType === "COLLECTION") && !collection.traits && maxFloorBid > 100) {
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making an offer for ${collection.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price. Skip Bid`);
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        return
       }
 
       const collectionData = await collectionDetails(collectionSymbol)
@@ -410,17 +413,24 @@ class EventManager {
       const minPrice = Math.round(minBid * CONVERSION_RATE)
       const maxPrice = Math.round(maxBid * CONVERSION_RATE)
       const floorPrice = Number(collectionData?.floorPrice) ?? 0
-      const maxFloorBid = item.offerType === "ITEM" && item.traits && item.traits.length > 0
-        ? item.maxFloorBid
-        : (item.maxFloorBid <= 100 ? item.maxFloorBid : 100);
+      const maxFloorBid = item.maxFloorBid
       const minFloorBid = item.minFloorBid
       const minOffer = Math.max(minPrice, Math.round(minFloorBid * floorPrice / 100))
       const maxOffer = Math.min(maxPrice, Math.round(maxFloorBid * floorPrice / 100))
 
-      if (item.offerType === "ITEM" && item.traits && item.traits.length > 0 && maxFloorBid > 100) {
+
+      if (minFloorBid > maxFloorBid) {
         console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
-        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making a trait bid for ${item.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price.`);
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Min floor bid ${item.minFloorBid} % for ${item.collectionSymbol} > max floor bid ${item.maxFloorBid} %. Skip Bid`);
         console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        return
+      }
+
+      if ((item.offerType === "ITEM" || item.offerType === "COLLECTION") && !item.traits && maxFloorBid > 100) {
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making an offer for ${item.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price. Skip Bid`);
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        return
       }
 
       const userBids = Object.entries(bidHistory).flatMap(([collectionSymbol, bidData]) => {
