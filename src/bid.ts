@@ -6,11 +6,10 @@ import PQueue from "p-queue"
 import { getBitcoinBalance } from "./utils";
 import { ICollectionOffer, IOffer, cancelCollectionOffer, createCollectionOffer, createOffer, getBestCollectionOffer, getBestOffer, getOffers, getUserOffers, retrieveCancelOfferFormat, signCollectionOffer, signData, submitCancelOfferData, submitCollectionOffer, submitSignedOfferOrder } from "./functions/Offer";
 import { OfferPlaced, collectionDetails } from "./functions/Collection";
-import { ITokenData, retrieveTokens } from "./functions/Tokens";
+import { retrieveTokens } from "./functions/Tokens";
 import axiosInstance from "./axios/axiosInstance";
 import limiter from "./bottleneck";
 import WebSocket from 'ws';
-import { off } from "process";
 
 
 config()
@@ -164,7 +163,18 @@ class EventManager {
       const publicKey = keyPair.publicKey.toString('hex');
       const buyerPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string
       const outBidAmount = outBidMargin * 1e8
-      const maxFloorBid = collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100
+      const maxFloorBid = collection.offerType === "ITEM" && collection.traits && collection.traits.length > 0
+        ? collection.maxFloorBid
+        : (collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100);
+      const minFloorBid = collection.minFloorBid
+
+      if ((collection.offerType === "ITEM" || collection.offerType === "COLLECTION") && !collection.traits && maxFloorBid > 100) {
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making an offer for ${collection.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price. Skip Bid`);
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        return
+      }
+
       const collectionData = await collectionDetails(collectionSymbol)
       const floorPrice = Number(collectionData?.floorPrice) ?? 0
       const maxPrice = Math.round(collection.maxBid * CONVERSION_RATE)
@@ -315,6 +325,7 @@ class EventManager {
     console.log('----------------------------------------------------------------------');
 
     const collectionSymbol = item.collectionSymbol
+    const traits = item.traits
     const feeSatsPerVbyte = item.feeSatsPerVbyte
     const offerType = item.offerType.toUpperCase()
     const minBid = item.minBid
@@ -377,7 +388,7 @@ class EventManager {
         }
       }
 
-      let tokens = await retrieveTokens(collectionSymbol, bidCount)
+      let tokens = await retrieveTokens(collectionSymbol, bidCount, traits)
       tokens = tokens.slice(0, bidCount)
 
       const bottomTokens = tokens
@@ -402,10 +413,25 @@ class EventManager {
       const minPrice = Math.round(minBid * CONVERSION_RATE)
       const maxPrice = Math.round(maxBid * CONVERSION_RATE)
       const floorPrice = Number(collectionData?.floorPrice) ?? 0
-      const maxFloorBid = item.maxFloorBid <= 100 ? item.maxFloorBid : 100
+      const maxFloorBid = item.maxFloorBid
       const minFloorBid = item.minFloorBid
       const minOffer = Math.max(minPrice, Math.round(minFloorBid * floorPrice / 100))
       const maxOffer = Math.min(maxPrice, Math.round(maxFloorBid * floorPrice / 100))
+
+
+      if (minFloorBid > maxFloorBid) {
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Min floor bid ${item.minFloorBid} % for ${item.collectionSymbol} > max floor bid ${item.maxFloorBid} %. Skip Bid`);
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        return
+      }
+
+      if ((item.offerType === "ITEM" || item.offerType === "COLLECTION") && !item.traits && maxFloorBid > 100) {
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        console.log('\x1b[31m%s\x1b[0m', `WARNING: Making an offer for ${item.collectionSymbol} at ${maxFloorBid}% of floor price, which is higher than the floor price. Skip Bid`);
+        console.log('\x1b[31m%s\x1b[0m', `-----------------------------------------------------------------------------------------------------------------------------------`);
+        return
+      }
 
       const userBids = Object.entries(bidHistory).flatMap(([collectionSymbol, bidData]) => {
         return Object.entries(bidData.ourBids).map(([tokenId, bidInfo]) => ({
@@ -1087,7 +1113,6 @@ async function placeBid(
     const signedOffer = await signData(unsignedOffer, privateKey)
     if (signedOffer) {
       await submitSignedOfferOrder(signedOffer, tokenId, offerPrice, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey)
-
       return true
     }
 
@@ -1208,6 +1233,7 @@ export interface CollectionData {
   offerType: "ITEM" | "COLLECTION";
   feeSatsPerVbyte?: number;
   quantity: number;
+  traits: Trait[]
 }
 
 interface Token {
@@ -1215,6 +1241,10 @@ interface Token {
   price: number;
 }
 
+export interface Trait {
+  traitType: string;
+  value: string;
+}
 
 interface Offer {
   collectionSymbol: string;

@@ -14,6 +14,10 @@
 		"scan:collections": "ts-node src/scanCollections.ts",
 		"test": "ts-node src/test.ts",
 		"solana:test": "ts-node src/solana/test.ts",
+		"example:ethereum": "ts-node src/examples/ethereum.ts",
+		"example:ospro": "ts-node src/examples/ospro.ts",
+		"example:base": "ts-node src/examples/base.ts",
+		"example:solana": "ts-node src/examples/solana.ts",
 		"base:test": "ts-node src/base/test.ts",
 		"bid:ethereum": "ts-node src/ethereum/bid.ts"
 	},
@@ -21,6 +25,7 @@
 	"author": "",
 	"license": "ISC",
 	"dependencies": {
+		"@solana/web3.js": "^1.94.0",
 		"ajv": "^8.12.0",
 		"axios": "^1.6.8",
 		"axios-retry": "^4.1.0",
@@ -29,6 +34,7 @@
 		"bip39": "^3.1.0",
 		"bitcoinjs-lib": "^6.1.5",
 		"bottleneck": "^2.19.5",
+		"cors": "^2.8.5",
 		"crypto": "^1.0.1",
 		"dotenv": "^16.4.5",
 		"ecpair": "^2.1.0",
@@ -48,6 +54,7 @@
 		"yargs": "^17.7.2"
 	},
 	"devDependencies": {
+		"@types/cors": "^2.8.17",
 		"@types/express": "^4.17.21",
 		"@types/json-bigint": "^1.0.4",
 		"@types/jsonlint": "^1.6.3",
