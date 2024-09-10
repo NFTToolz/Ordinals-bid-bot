@@ -54,11 +54,6 @@ export async function retrieveTokens(collectionSymbol: string, bidCount: number 
 
       const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }))
       const tokens = data.tokens.filter(item => item.listed === true)
-
-      console.log({
-        count: tokens.length,
-        tokens: JSON.stringify(tokens[0])
-      });
       return tokens
     }
   } catch (error: any) {
