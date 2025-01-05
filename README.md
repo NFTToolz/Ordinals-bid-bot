@@ -165,3 +165,7 @@ OR
 
 
 https://discord.gg/CsGGnd7rtJ
+
+discord: mattnfttools
+
+telegram: nfttoolz
