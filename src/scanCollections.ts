@@ -1,13 +1,27 @@
 import fs from "fs"
+import { config } from "dotenv"
 
 import { fetchCollections } from './functions/Collection';
 import { retrieveTokens } from './functions/Tokens';
 import { getOffers } from './functions/Offer'
 import path from "path";
 
+config()
+
 async function run() {
   try {
+    if (!process.env.API_KEY) {
+      console.error("Error: API_KEY environment variable is not set");
+      process.exit(1);
+    }
+
     const collections = await fetchCollections()
+
+    if (collections.length === 0) {
+      console.log("No collections returned. Check API_KEY and network connection.");
+      return;
+    }
+
     let count = 0;
 
     for (const collection of collections) {
@@ -32,7 +46,9 @@ async function run() {
         listedMakerFeeBp = token && token.listedMakerFeeBp ? token.listedMakerFeeBp : 0
 
         const data = await getOffers(tokenId)
-        const highestOffer = data && data.offers.length > 0 && data.offers[0].price ? data.offers[0].price * 0.00000001 : 0;
+        const highestOffer = data?.offers?.[0]?.price
+          ? data.offers[0].price * 0.00000001
+          : 0;
 
         if (highestOffer === 0) {
           tokensWithNoOffers.push({ tokenId, highestOffer })

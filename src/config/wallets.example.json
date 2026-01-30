@@ -1,0 +1,21 @@
+{
+  "wallets": [
+    {
+      "wif": "L1aW4aubDFB7yfras2S1mN3bqg9nwySY8nkoLmJebSLD5BWv3ENZ",
+      "receiveAddress": "bc1q...",
+      "label": "wallet-1"
+    },
+    {
+      "wif": "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn",
+      "receiveAddress": "bc1q...",
+      "label": "wallet-2"
+    },
+    {
+      "wif": "L3p8oAcQTtuokSCRHQ7i4MhjWc9zornvpJLfmg62sYpLRJF9woSu",
+      "receiveAddress": "bc1q...",
+      "label": "wallet-3"
+    }
+  ],
+  "bidsPerMinute": 5,
+  "selectionStrategy": "least-recently-used"
+}

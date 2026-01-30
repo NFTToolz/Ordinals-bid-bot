@@ -69,7 +69,7 @@ async function main() {
     console.log('--------------------------------------------------------------------------------');
   }
 
-  const distributionAmount = wallets.length > 0 ? Math.floor(balance / wallets.length) : 0
+  const distributionAmount = wallets.length > 0 && balance ? Math.floor(balance / wallets.length) : 0
 
   const destinationKeyPairs = wallets.map(item => ECPair.fromWIF(item.privateKey));
 

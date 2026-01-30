@@ -1,0 +1,60 @@
+import { restart, isRunning, getStatus } from '../../services/BotProcessManager';
+import {
+  showSectionHeader,
+  showSuccess,
+  showError,
+  showWarning,
+  withSpinner,
+} from '../../utils/display';
+import { promptConfirm } from '../../utils/prompts';
+
+export async function restartBot(): Promise<void> {
+  showSectionHeader('RESTART BOT');
+
+  const wasRunning = isRunning();
+
+  if (wasRunning) {
+    const status = getStatus();
+    console.log('Bot is currently running:');
+    console.log(`  PID: ${status.pid}`);
+    console.log(`  Uptime: ${status.uptime}`);
+    console.log('');
+
+    const confirm = await promptConfirm('Restart the bot?', true);
+
+    if (!confirm) {
+      showWarning('Restart cancelled');
+      return;
+    }
+  } else {
+    console.log('Bot is not currently running.');
+    console.log('');
+
+    const confirm = await promptConfirm('Start the bot?', true);
+
+    if (!confirm) {
+      showWarning('Start cancelled');
+      return;
+    }
+  }
+
+  console.log('');
+
+  const result = await withSpinner(
+    wasRunning ? 'Restarting bot...' : 'Starting bot...',
+    () => restart()
+  );
+
+  if (result.success) {
+    showSuccess(wasRunning ? 'Bot restarted successfully!' : 'Bot started successfully!');
+    console.log('');
+    console.log(`  PID: ${result.pid}`);
+    console.log(`  Log file: bot.log`);
+    console.log('');
+    console.log('Use "View logs" to see bot output.');
+  } else {
+    showError(`Failed to restart bot: ${result.error}`);
+  }
+
+  console.log('');
+}

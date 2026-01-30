@@ -1,4 +1,3 @@
-import Bottleneck from "bottleneck";
 import axiosInstance from "../axios/axiosInstance"
 import limiter from "../bottleneck";
 
@@ -51,33 +50,8 @@ export async function fetchCollections() {
     const { data: collections } = await limiter.schedule(() => axiosInstance.get(url, { params, headers }))
     return collections
   } catch (error: any) {
-    console.log("fetchCollectionsError: ", error.response);
+    console.log("fetchCollectionsError: ", error.response?.data || error.message);
     return []
-  }
-}
-
-export async function collectionActivity(collectionSymbol: string, bidCount: number = 20) {
-  console.log('----------------------------------------------------------------------------');
-  console.log(`POLLING FOR NEW OFFER ACTIVITIES FOR ${collectionSymbol}`);
-  console.log('----------------------------------------------------------------------------');
-
-
-  const url = 'https://nfttools.pro/magiceden/v2/ord/btc/activities';
-
-  const limit = bidCount >= 20 ? bidCount : 20
-  const params = {
-    limit: limit,
-    offset: 0,
-    sortBy: 'priceDesc',
-    collectionSymbol: collectionSymbol,
-    kind: ['offer_placed']
-  };
-
-  try {
-    const { data } = await limiter.schedule(() => axiosInstance.get<OfferData>(url, { params, headers }))
-    return data
-  } catch (error) {
-    console.log("collectionActivityError: ", error);
   }
 }
 

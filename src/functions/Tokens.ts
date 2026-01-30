@@ -62,49 +62,6 @@ export async function retrieveTokens(collectionSymbol: string, bidCount: number 
   }
 }
 
-export async function getTokenByTraits(collectionSymbol: string, bidCount: number = 20, traits: Trait[]) {
-  const limit = bidCount >= 20 ? bidCount : 20
-  const traitsArray: Trait[] = Array.isArray(traits) ? traits : [traits]
-
-
-  const transformedTraits = transformTrait(traitsArray)
-
-  const transformedAttributes = {
-    "attributes": transformedTraits
-  }
-
-  const params = {
-    attributes: encodeURIComponent(JSON.stringify(transformedAttributes)),
-    collectionSymbol: collectionSymbol,
-    disablePendingTransactions: true,
-    // limit: limit,
-    offset: 0,
-    sortBy: 'priceAsc'
-  };
-
-  const url = 'https://nfttools.pro/magiceden/v2/ord/btc/attributes';
-
-  try {
-    const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }))
-    const tokens = data.tokens
-
-    return tokens
-  } catch (error: any) {
-    console.log('getTokenByTraits', error.response.data);
-    return []
-  }
-}
-
-export async function getToken(tokenId: string) {
-  try {
-    const { data } = await limiter.schedule(() => axiosInstance.get<Inscription>(`https://nfttools.pro/magiceden/v2/ord/btc/tokens/${tokenId}`, { headers }))
-
-    return data
-  } catch (error) {
-    console.log('getToken', error);
-  }
-}
-
 export interface IToken {
   tokens: ITokenData[]
 }

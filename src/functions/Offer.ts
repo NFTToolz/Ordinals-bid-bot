@@ -3,6 +3,7 @@ import * as bitcoin from "bitcoinjs-lib"
 import { ECPairInterface, ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
 import { config } from "dotenv"
 import limiter from "../bottleneck";
+import Logger from "../utils/logger";
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -30,7 +31,7 @@ export async function cancelCollectionOfferRequest(offerIds: string[], makerPubl
     return data
 
   } catch (error: any) {
-    console.log(error.response.data);
+    Logger.offer.error('cancelCollectionOfferRequest', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
   }
 }
 
@@ -61,12 +62,12 @@ export async function submitCancelCollectionOffer(
 
     const response = await limiter.schedule(() => axiosInstance.post<ICancelOfferResponse>(url, data, { headers }))
 
-    console.log(response.data);
+    Logger.info(`[OFFER] Collection offer cancelled: ${offerIds.join(',')}`);
 
     return response
 
   } catch (error: any) {
-    console.log(error.response.data);
+    Logger.offer.error('submitCancelCollectionOffer', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
   }
 }
 
@@ -82,8 +83,8 @@ export async function cancelCollectionOffer(
       const signedData = signCancelCollectionOfferRequest(unsignedData, privateKey)
       await submitCancelCollectionOffer(offerIds, makerPublicKey, signedData)
     }
-  } catch (error) {
-    console.log(error);
+  } catch (error: any) {
+    Logger.offer.error('cancelCollectionOffer', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
   }
 }
 
@@ -123,7 +124,7 @@ export async function createCollectionOffer(
         }
         errorOccurred = true;
       } else {
-        console.log(error.response.data);
+        Logger.offer.error('createCollectionOffer', collectionSymbol, error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
         errorOccurred = false;
         throw error;
       }
@@ -164,11 +165,10 @@ export async function submitCollectionOffer(
   do {
     try {
       const { data: requestData } = await limiter.schedule(() => axiosInstance.post<ISubmitCollectionOfferResponse>(url, data, { headers }))
-      console.log({ requestData });
+      Logger.info(`[OFFER] Collection offer submitted for ${collectionSymbol}`);
       return requestData
     } catch (error: any) {
-      console.log('Submit collection offer error from')
-      console.log(error.response.data);
+      Logger.offer.error('submitCollectionOffer', collectionSymbol, error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
       if (error.response?.data?.error === "Only 1 collection offer allowed per collection.") {
         await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
         const offerData = await getBestCollectionOffer(collectionSymbol);
@@ -179,7 +179,6 @@ export async function submitCollectionOffer(
         }
         errorOccurred = true;
       } else {
-        console.log(error.response.data);
         errorOccurred = false;
         throw error;
       }
@@ -239,7 +238,8 @@ export async function createOffer(
   buyerTokenReceiveAddress: string,
   buyerPaymentAddress: string,
   publicKey: string,
-  feerateTier: string
+  feerateTier: string,
+  sellerReceiveAddress?: string
 ) {
   const baseURL = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/create';
   const params = {
@@ -249,13 +249,48 @@ export async function createOffer(
     buyerTokenReceiveAddress: buyerTokenReceiveAddress,
     buyerPaymentAddress: buyerPaymentAddress,
     buyerPaymentPublicKey: publicKey,
-    feerateTier: feerateTier
+    feerateTier: feerateTier,
+    ...(sellerReceiveAddress && { sellerReceiveAddress })
   };
 
   try {
     const { data } = await limiter.schedule(() => axiosInstance.get(baseURL, { params, headers }))
     return data
   } catch (error: any) {
+    console.error(`[CREATE_OFFER ERROR] Token ${tokenId.slice(-8)}: ${error?.message || error}`);
+
+    // Log API response details if available
+    if (error?.response?.data) {
+      const errorMessage = error.response.data?.error || '';
+
+      // Check for specific error patterns
+      if (errorMessage.includes('maximum number of offers')) {
+        console.error(`[CREATE_OFFER] 🚨 Hit maximum offer limit!`);
+      }
+
+      // Parse and display insufficient funds with breakdown
+      if (errorMessage.includes('Insufficient funds')) {
+        // Parse: "Insufficient funds. Required 16634 sats, found 0 sats."
+        const match = errorMessage.match(/Required (\d+) sats, found (\d+) sats/);
+        if (match) {
+          const required = parseInt(match[1], 10);
+          const available = parseInt(match[2], 10);
+          Logger.offer.insufficientFunds(tokenId, price, required, available);
+        } else {
+          // Fallback if parsing fails
+          console.error(`[CREATE_OFFER API] Response:`, error.response.data);
+        }
+      } else {
+        // Log other errors normally
+        console.error(`[CREATE_OFFER API] Response:`, error.response.data);
+      }
+    }
+    if (error?.response?.status) {
+      console.error(`[CREATE_OFFER HTTP] Status: ${error.response.status}`);
+    }
+
+    // Re-throw the error so placeBid can handle it
+    throw error;
   }
 }
 
@@ -299,7 +334,8 @@ export async function submitSignedOfferOrder(
   buyerReceiveAddress: string,
   publicKey: string,
   feerateTier: string,
-  privateKey: string
+  privateKey: string,
+  sellerReceiveAddress?: string
 ) {
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/create';
   const data = {
@@ -310,7 +346,8 @@ export async function submitSignedOfferOrder(
     expirationDate: expiration.toString(),
     buyerPaymentAddress: buyerPaymentAddress,
     buyerPaymentPublicKey: publicKey,
-    buyerReceiveAddress: buyerReceiveAddress
+    buyerReceiveAddress: buyerReceiveAddress,
+    ...(sellerReceiveAddress && { sellerReceiveAddress })
   };
 
   let errorOccurred = false;
@@ -351,7 +388,7 @@ export async function getBestCollectionOffer(collectionSymbol: string) {
     const { data } = await limiter.schedule(() => axiosInstance.get<CollectionOfferData>(url, { params, headers }));
     return data
   } catch (error: any) {
-    console.log('getBestCollectionOffer: ', error.response.data);
+    Logger.error(`[COLLECTION OFFER] getBestCollectionOffer error for ${collectionSymbol}`, error?.response?.data || error?.message);
   }
 
 }
@@ -370,41 +407,12 @@ export async function getBestOffer(tokenId: string) {
     const { data } = await limiter.schedule(() => axiosInstance.get<OfferData>(url, { params, headers }));
     return data
   } catch (error: any) {
+    Logger.error(`[BEST OFFER] getBestOffer error for ${tokenId.slice(-8)}`, error?.response?.data || error?.message);
+    return undefined;
   }
 
 }
 
-
-export async function cancelAllUserOffers(buyerTokenReceiveAddress: string, privateKey: string) {
-  try {
-    console.log('--------------------------------------------------------------------------------');
-    console.log('CANCEL ALL OFFERS!!!');
-    console.log('--------------------------------------------------------------------------------');
-
-    const offerData = await getUserOffers(buyerTokenReceiveAddress)
-
-    if (offerData && offerData.offers && offerData.offers.length > 0) {
-      const offers = offerData.offers
-      console.log('--------------------------------------------------------------------------------');
-      console.log('NUMBER OF CURRENT ACTIVE OFFERS: ', offers.length);
-      console.log('--------------------------------------------------------------------------------');
-
-      for (const offer of offers) {
-        const offerFormat = await retrieveCancelOfferFormat(offer.id)
-        const signedOfferFormat = signData(offerFormat, privateKey)
-        if (signedOfferFormat) {
-          await submitCancelOfferData(offer.id, signedOfferFormat)
-
-          console.log('--------------------------------------------------------------------------------');
-          console.log(`CANCELLED OFFER FOR ${offer.token.collectionSymbol} ${offer.token.id}`);
-          console.log('--------------------------------------------------------------------------------');
-
-        }
-      }
-    }
-  } catch (error) {
-  }
-}
 
 export async function cancelBulkTokenOffers(tokenIds: string[], buyerTokenReceiveAddress: string, privateKey: string) {
   try {
@@ -451,6 +459,8 @@ export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: stri
     const { data } = await limiter.schedule(() => axiosInstance.get<OfferData>(url, { params, headers }))
     return data
   } catch (error: any) {
+    Logger.error(`[GET OFFERS] getOffers error for ${tokenId.slice(-8)}`, error?.response?.data || error?.message);
+    return { total: '0', offers: [] };
   }
 }
 
@@ -478,65 +488,6 @@ export async function submitCancelOfferData(offerId: string, signedPSBTBase64: s
     return response.data.ok
   } catch (error: any) {
   }
-}
-
-export async function counterBid(
-  offerId: string,
-  tokenId: string,
-  price: number,
-  expiration: number,
-  buyerTokenReceiveAddress: string,
-  buyerPaymentAddress: string,
-  publicKey: string,
-  feerateTier: string,
-  privateKey: string
-) {
-  console.log('--------------------------------------------------------------------------------');
-  console.log("COUNTER BID");
-  console.log('--------------------------------------------------------------------------------');
-
-  const cancelOfferFormat = await retrieveCancelOfferFormat(offerId)
-
-  console.log('--------------------------------------------------------------------------------');
-  console.log({ cancelOfferFormat });
-  console.log('--------------------------------------------------------------------------------');
-
-  const signedCancelOffer = signData(cancelOfferFormat, privateKey)
-
-  console.log('--------------------------------------------------------------------------------');
-  console.log({ signedCancelOffer });
-  console.log('--------------------------------------------------------------------------------');
-
-  if (signedCancelOffer) {
-    const submitCancelOffer = await submitCancelOfferData(offerId, signedCancelOffer)
-
-    console.log('--------------------------------------------------------------------------------');
-    console.log({ submitCancelOffer });
-    console.log('--------------------------------------------------------------------------------');
-
-  }
-
-  const unsignedOffer = await createOffer(tokenId, price, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, feerateTier)
-
-  console.log('--------------------------------------------------------------------------------');
-  console.log({ unsignedOffer });
-  console.log('--------------------------------------------------------------------------------');
-
-  const signedOfferData = signData(unsignedOffer, privateKey)
-
-  console.log('--------------------------------------------------------------------------------');
-  console.log({ signedOfferData });
-  console.log('--------------------------------------------------------------------------------');
-
-  if (signedOfferData) {
-
-    const offerData = await submitSignedOfferOrder(signedOfferData, tokenId, price, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, feerateTier, privateKey)
-
-    console.log('--------------------------------------------------------------------------------');
-    console.log({ offerData });
-    console.log('--------------------------------------------------------------------------------');
-  }
-
 }
 
 export async function getUserOffers(buyerPaymentAddress: string) {

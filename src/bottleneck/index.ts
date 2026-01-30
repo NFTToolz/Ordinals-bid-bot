@@ -6,7 +6,7 @@ config()
 const RATE_LIMIT = Number(process.env.RATE_LIMIT) ?? 32
 
 const limiter = new Bottleneck({
-  minTime: 1 / RATE_LIMIT,
+  minTime: 1000 / RATE_LIMIT,
 });
 
 export default limiter

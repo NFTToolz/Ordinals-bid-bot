@@ -153,3 +153,20 @@ dist
 .svelte-kit
 
 # End of https://www.toptal.com/developers/gitignore/api/node
+
+# Wallet configuration (contains private keys)
+src/config/wallets.json
+
+# Bot process management
+.bot.pid
+bot.log
+
+# Wallet backups (encrypted)
+wallets-backup.enc
+*.enc
+
+# Runtime stats
+botStats.json
+
+# Backup files
+*.backup

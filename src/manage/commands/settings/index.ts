@@ -1,0 +1,1 @@
+export { walletRotationSettings } from './walletRotation';

@@ -1,55 +1,17 @@
 [
 	{
-		"collectionSymbol": "reality_exe",
-		"minBid": 0.001615,
-		"maxBid": 0.0018915,
-		"minFloorBid": 95,
+		"collectionSymbol": "n0k",
+		"minBid": 0.00001,
+		"maxBid": 0.00025,
+		"minFloorBid": 50,
 		"maxFloorBid": 97,
-		"bidCount": 20,
+		"bidCount": 10,
 		"duration": 60,
-		"scheduledLoop": 300,
+		"scheduledLoop": 60,
 		"enableCounterBidding": true,
-		"outBidMargin": 5e-5,
-		"offerType": "COLLECTION",
-		"quantity": 1,
-		"feeSatsPerVbyte": 25
-	},
-
-	{
-		"collectionSymbol": "octoglyphs",
-		"minBid": 0.001615,
-		"maxBid": 0.0018915,
-		"minFloorBid": 95,
-		"maxFloorBid": 97,
-		"bidCount": 40,
-		"duration": 60,
-		"scheduledLoop": 300,
-		"enableCounterBidding": true,
-		"outBidMargin": 5e-5,
+		"outBidMargin": 0.000005,
 		"offerType": "ITEM",
 		"quantity": 1,
 		"feeSatsPerVbyte": 25
-	},
-
-	{
-		"collectionSymbol": "octoglyphs",
-		"minBid": 0.001615,
-		"maxBid": 0.0018915,
-		"minFloorBid": 95,
-		"maxFloorBid": 97,
-		"bidCount": 40,
-		"duration": 60,
-		"scheduledLoop": 300,
-		"enableCounterBidding": true,
-		"outBidMargin": 5e-5,
-		"offerType": "ITEM",
-		"quantity": 1,
-		"feeSatsPerVbyte": 25,
-		"traits": [
-			{
-				"traitType": "Accessories",
-				"value": "Juice box"
-			}
-		]
 	}
 ]
