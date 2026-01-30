@@ -4,13 +4,15 @@ import limiter from "../bottleneck";
 
 config()
 
+const API_KEY = process.env.API_KEY as string;
+
 export async function getBitcoinBalance(address: string): Promise<number | undefined> {
   try {
     const response = await limiter.schedule(() =>
       axiosInstance.get('https://nfttools.pro', {
         headers: {
           'url': `https://blockchain.info/q/addressbalance/${address}`,
-          'x-nft-api-key': 'a4eae399-f135-4627-829a-18435bb631ae'
+          'x-nft-api-key': API_KEY
         }
       }));
 
@@ -21,6 +23,7 @@ export async function getBitcoinBalance(address: string): Promise<number | undef
 
     return balance;
   } catch (error: any) {
-    console.error('getBitcoinBalance:');
+    console.error('getBitcoinBalance:', error?.response?.data || error?.message);
+    return undefined;  // Return undefined to distinguish API error from zero balance
   }
 }

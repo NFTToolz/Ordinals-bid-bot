@@ -2,6 +2,7 @@ import { config } from "dotenv"
 import axiosInstance from "../axios/axiosInstance"
 import { Trait, transformTrait } from "../utils/traits.utils";
 import limiter from "../bottleneck";
+import Logger from "../utils/logger";
 
 
 config()
@@ -11,7 +12,7 @@ const headers = {
   'X-NFT-API-Key': API_KEY,
 }
 
-export async function retrieveTokens(collectionSymbol: string, bidCount: number = 20, traits?: Trait[] | Trait) {
+export async function retrieveTokens(collectionSymbol: string, bidCount: number = 20, traits?: Trait[] | Trait): Promise<ITokenData[] | null> {
   try {
 
     const limit = getLimit(bidCount)
@@ -57,8 +58,8 @@ export async function retrieveTokens(collectionSymbol: string, bidCount: number 
       return tokens
     }
   } catch (error: any) {
-    console.log('retrieveTokens: ', error?.response?.data);
-    return []
+    Logger.error(`[TOKENS] retrieveTokens error for ${collectionSymbol}`, error?.response?.data || error?.message);
+    return null;
   }
 }
 

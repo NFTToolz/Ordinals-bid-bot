@@ -24,7 +24,9 @@ import {
 import {
   initializeWalletPool,
   getAvailableWallet,
+  getAvailableWalletAsync,
   recordBid as recordWalletBid,
+  decrementBidCount as decrementWalletBidCount,
   getWalletByPaymentAddress,
   getWalletPoolStats,
   isWalletPoolInitialized,
@@ -47,7 +49,7 @@ const network = bitcoin.networks.bitcoin;
 
 // Multi-wallet rotation configuration
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
-const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './src/config/wallets.json';
+const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 
 // Bid pacing configuration (Magic Eden's per-wallet rate limit)
 const BIDS_PER_MINUTE = Number(process.env.BIDS_PER_MINUTE) || 5;
@@ -58,23 +60,125 @@ const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 
 const DEFAULT_LOOP = Number(process.env.DEFAULT_LOOP) ?? 30
 let RESTART = true
+let lastRehydrationTime = 0;  // Track when rehydration last ran
+const REHYDRATE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour - periodic rehydration interval
 
 // Track bot start time for stats
 const BOT_START_TIME = Date.now();
 
-// Define a global map to track processing tokens
+// Define a global map to track processing tokens with atomic lock support
 const processingTokens: Record<string, boolean> = {};
+const processingTokenLocks: Record<string, Promise<void> | undefined> = {};
+const processingTokenResolvers: Record<string, (() => void) | undefined> = {};
+
+/**
+ * Atomically acquire a lock for a token to prevent race conditions.
+ * Returns true if lock acquired, false if already locked.
+ */
+async function acquireTokenLock(tokenId: string): Promise<boolean> {
+  // If there's an existing lock, wait for it
+  const existingLock = processingTokenLocks[tokenId];
+  if (existingLock) {
+    await existingLock;
+  }
+
+  // Double-check after waiting - another process may have acquired the lock
+  if (processingTokens[tokenId]) {
+    return false;
+  }
+
+  // Atomically set the flag and create a lock promise with stored resolver
+  processingTokens[tokenId] = true;
+
+  processingTokenLocks[tokenId] = new Promise<void>(resolve => {
+    // Store resolver so releaseTokenLock can resolve the promise
+    processingTokenResolvers[tokenId] = resolve;
+  });
+
+  return true;
+}
+
+/**
+ * Release the lock for a token
+ */
+function releaseTokenLock(tokenId: string): void {
+  // Resolve the promise first to unblock any waiters
+  const resolver = processingTokenResolvers[tokenId];
+  if (resolver) {
+    resolver();
+  }
+  delete processingTokens[tokenId];
+  delete processingTokenLocks[tokenId];
+  delete processingTokenResolvers[tokenId];
+}
 
 // Rate limit deduplication: Track recently bid tokens to prevent duplicate bids
 const recentBids: Map<string, number> = new Map();
 const RECENT_BID_COOLDOWN_MS = 30000; // 30 seconds - prevents duplicate bids on same token
+const MAX_RECENT_BIDS_SIZE = 5000; // Cap recentBids map size to prevent unbounded growth
+
+// Mutex for atomic quantity updates to prevent race conditions
+// Using a single object for lock state to enable atomic check-and-set
+const quantityLockState: Record<string, { promise: Promise<void>; resolver: () => void } | undefined> = {};
+
+/**
+ * Atomically increment the quantity for a collection.
+ * Uses a proper mutex pattern with atomic lock acquisition to prevent TOCTOU races.
+ *
+ * Previous bug: The while loop checking quantityLocks[collectionSymbol] had a race
+ * where multiple callers could pass the check simultaneously before any acquired the lock.
+ *
+ * Fix: Check and acquire lock atomically in a single synchronous operation.
+ */
+async function incrementQuantity(collectionSymbol: string): Promise<number> {
+  // If there's an existing lock, wait for it then retry recursively
+  // This ensures only one caller proceeds at a time
+  const existingLock = quantityLockState[collectionSymbol];
+  if (existingLock) {
+    await existingLock.promise;
+    // After waiting, recursively try again - another caller may have acquired the lock
+    return incrementQuantity(collectionSymbol);
+  }
+
+  // Atomically create and store lock in a single synchronous operation
+  // This prevents the TOCTOU race where multiple callers pass the check above
+  let resolver: () => void;
+  const promise = new Promise<void>(resolve => {
+    resolver = resolve;
+  });
+  quantityLockState[collectionSymbol] = { promise, resolver: resolver! };
+
+  try {
+    // Perform the atomic increment
+    if (bidHistory[collectionSymbol]) {
+      bidHistory[collectionSymbol].quantity += 1;
+      return bidHistory[collectionSymbol].quantity;
+    }
+    return 0;
+  } finally {
+    // Release the lock - resolve promise first to unblock waiters, then delete state
+    const lockState = quantityLockState[collectionSymbol];
+    if (lockState) {
+      lockState.resolver();
+    }
+    delete quantityLockState[collectionSymbol];
+  }
+}
 
 const headers = {
   'Content-Type': 'application/json',
   'X-NFT-API-Key': API_KEY,
 }
 
-const filePath = `${__dirname}/collections.json`
+import path from "path"
+
+// Ensure data directory exists for persistence files
+const DATA_DIR = path.join(process.cwd(), 'data');
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+const filePath = path.join(process.cwd(), 'config/collections.json')
 const collections: CollectionData[] = JSON.parse(fs.readFileSync(filePath, "utf-8"))
 let balance: number | undefined;
 
@@ -112,6 +216,24 @@ interface BidHistory {
 
 
 const bidHistory: BidHistory = {};
+
+/**
+ * Initialize bidHistory entry for a collection if it doesn't exist
+ * Ensures consistent initialization across all code paths
+ */
+function initBidHistory(collectionSymbol: string, offerType: 'ITEM' | 'COLLECTION'): void {
+  if (!bidHistory[collectionSymbol]) {
+    bidHistory[collectionSymbol] = {
+      offerType,
+      topOffers: {},
+      ourBids: {},
+      topBids: {},
+      bottomListings: [],
+      lastSeenActivity: null,
+      quantity: 0
+    };
+  }
+}
 
 // Wallet credentials interface for wallet rotation
 interface WalletCredentials {
@@ -196,6 +318,55 @@ function isOurPaymentAddress(address: string): boolean {
   return false;
 }
 
+/**
+ * Check if a receive address belongs to one of our wallets
+ * Used for collection offer detection to identify our own offers
+ */
+function isOurReceiveAddress(address: string): boolean {
+  if (!address) return false;
+  const normalizedAddress = address.toLowerCase();
+
+  // Check primary receive address from env
+  if (normalizedAddress === TOKEN_RECEIVE_ADDRESS.toLowerCase()) {
+    return true;
+  }
+
+  // Check wallet pool (if enabled)
+  if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
+    const pool = getWalletPool();
+    const allAddresses = pool.getAllReceiveAddresses();
+    return allAddresses.some(addr => addr.toLowerCase() === normalizedAddress);
+  }
+
+  return false;
+}
+
+/**
+ * Get all receive addresses to query for bid rehydration
+ * Includes all wallet pool addresses and the default TOKEN_RECEIVE_ADDRESS
+ */
+function getReceiveAddressesToQuery(): string[] {
+  const addresses: string[] = [];
+  const seen = new Set<string>();
+
+  // Add wallet pool addresses if rotation enabled
+  if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
+    for (const addr of getWalletPool().getAllReceiveAddresses()) {
+      if (!seen.has(addr.toLowerCase())) {
+        addresses.push(addr);
+        seen.add(addr.toLowerCase());
+      }
+    }
+  }
+
+  // Add default address
+  if (TOKEN_RECEIVE_ADDRESS && !seen.has(TOKEN_RECEIVE_ADDRESS.toLowerCase())) {
+    addresses.push(TOKEN_RECEIVE_ADDRESS);
+  }
+
+  return addresses;
+}
+
 // Memory leak fix: bidHistory cleanup configuration
 const BID_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours TTL
 const BID_HISTORY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // Run cleanup every hour
@@ -245,25 +416,29 @@ class EventManager {
       console.log(`[WARNING] Event queue is ${Math.round((this.queue.length / this.MAX_QUEUE_SIZE) * 100)}% full (${this.queue.length}/${this.MAX_QUEUE_SIZE})`);
     }
 
-    this.processQueue();
+    this.processQueue().catch(err => Logger.error('[EVENT QUEUE] Queue processing error', err));
   }
 
   async processQueue(): Promise<void> {
     // Ensure that the queue is not currently being processed and that there is something to process
     if (!this.isProcessingQueue && this.queue.length > 0) {
       this.isProcessingQueue = true;
-      // Process the queue
-      while (this.queue.length > 0) {
-        // Wait until `this.isScheduledRunning` is false before starting processing
-        while (this.isScheduledRunning) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+      try {
+        // Process the queue
+        while (this.queue.length > 0) {
+          // Wait until `this.isScheduledRunning` is false before starting processing
+          while (this.isScheduledRunning) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+          const event = this.queue.shift();
+          if (event) {
+            await this.handleIncomingBid(event);
+          }
         }
-        const event = this.queue.shift();
-        if (event) {
-          this.handleIncomingBid(event);
-        }
+      } finally {
+        // Ensure flag is always reset even if handleIncomingBid throws
+        this.isProcessingQueue = false;
       }
-      this.isProcessingQueue = false
     }
   }
 
@@ -285,17 +460,7 @@ class EventManager {
       const collection = collections.find((item) => item.collectionSymbol === collectionSymbol)
       if (!collection) return
 
-      if (!bidHistory[collectionSymbol]) {
-        bidHistory[collectionSymbol] = {
-          offerType: collection.offerType,
-          topOffers: {},
-          ourBids: {},
-          topBids: {},
-          bottomListings: [],
-          lastSeenActivity: null,
-          quantity: 0
-        };
-      }
+      initBidHistory(collectionSymbol, collection.offerType);
 
       const outBidMargin = collection?.outBidMargin ?? DEFAULT_OUTBID_MARGIN
       const duration = collection?.duration ?? DEFAULT_OFFER_EXPIRATION
@@ -308,7 +473,8 @@ class EventManager {
       const keyPair = ECPair.fromWIF(privateKey, network);
       const publicKey = keyPair.publicKey.toString('hex');
       const buyerPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string
-      const outBidAmount = outBidMargin * 1e8
+      // Use Math.round to prevent floating-point drift (e.g., 0.000001 * 1e8 = 99.99999999)
+      const outBidAmount = Math.round(outBidMargin * 1e8)
       const maxFloorBid = collection.offerType === "ITEM" && collection.traits && collection.traits.length > 0
         ? collection.maxFloorBid
         : (collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100);
@@ -320,7 +486,12 @@ class EventManager {
       }
 
       const collectionData = await collectionDetails(collectionSymbol)
-      const floorPrice = Number(collectionData?.floorPrice) ?? 0
+      // Validate floor price data - skip if unavailable (API error)
+      if (!collectionData?.floorPrice) {
+        Logger.warning(`[WS] No floor price data for ${collectionSymbol}, skipping event`);
+        return;
+      }
+      const floorPrice = Number(collectionData.floorPrice)
       const maxPrice = Math.round(collection.maxBid * CONVERSION_RATE)
       const maxOffer = Math.min(maxPrice, Math.round(maxFloorBid * floorPrice / 100))
       const offerType = collection.offerType
@@ -341,7 +512,7 @@ class EventManager {
           }
 
           if (bottomListings.includes(tokenId)) {
-            if (incomingBuyerTokenReceiveAddress.toLowerCase() != buyerTokenReceiveAddress.toLowerCase()) {
+            if (incomingBuyerTokenReceiveAddress.toLowerCase() !== buyerTokenReceiveAddress.toLowerCase()) {
               let verifiedOfferPrice = +(incomingBidAmount);
               const ourExistingBid = bidHistory[collectionSymbol]?.ourBids?.[tokenId];
 
@@ -399,14 +570,18 @@ class EventManager {
                 }).sort((a, b) => a.price - b.price)
 
                 userBids.forEach((bid) => {
-                  const givenTimestamp = new Date(bid.expiration);
-                  const bidExpiration = new Date();
-                  bidExpiration.setMinutes(bidExpiration.getMinutes() + duration);
+                  const bidExpirationTime = new Date(bid.expiration).getTime();
 
-                  if (givenTimestamp.getTime() >= bidExpiration.getTime()) {
+                  // Mark as expired if current time is past the bid's expiration
+                  if (Date.now() >= bidExpirationTime) {
                     Logger.bidCancelled(bid.collectionSymbol, bid.tokenId, 'Expired');
-                    delete bidHistory[collectionSymbol].ourBids[bid.tokenId]
-                    delete bidHistory[collectionSymbol].topBids[bid.tokenId]
+                    // Use bid.collectionSymbol (not outer scope collectionSymbol) and null-check
+                    if (bidHistory[bid.collectionSymbol]?.ourBids) {
+                      delete bidHistory[bid.collectionSymbol].ourBids[bid.tokenId]
+                    }
+                    if (bidHistory[bid.collectionSymbol]?.topBids) {
+                      delete bidHistory[bid.collectionSymbol].topBids[bid.tokenId]
+                    }
                   }
                 })
 
@@ -418,6 +593,11 @@ class EventManager {
                     return;
                   }
 
+                  // ATOMIC DEDUPLICATION: Set timestamp BEFORE async operations to prevent race conditions
+                  // If bid fails, we'll delete the entry; if succeeds, we update it
+                  const bidAttemptTime = Date.now();
+                  recentBids.set(tokenId, bidAttemptTime);
+
                   // Check global rate limit before counter-bidding - wait if rate limited
                   if (isGloballyRateLimited()) {
                     const waitMs = getGlobalResetWaitTime();
@@ -425,25 +605,25 @@ class EventManager {
                     await delay(waitMs + 1000); // +1s buffer
                   }
 
-                  // Wait if token is already being processed
-                  while (processingTokens[tokenId]) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                  // Atomically acquire lock for this token to prevent race conditions
+                  const lockAcquired = await acquireTokenLock(tokenId);
+                  if (!lockAcquired) {
+                    Logger.info(`[WS] ${tokenId.slice(-8)}: Token already being processed, skipping`);
+                    // Don't delete recentBids entry - another process is handling this token
+                    return;
                   }
 
-                  // Re-check rate limit after waiting - wait again if still rate limited
+                  // Re-check rate limit after acquiring lock - wait again if still rate limited
                   if (isGloballyRateLimited()) {
                     const waitMs = getGlobalResetWaitTime();
                     Logger.queue.waiting(tokenId, Math.ceil(waitMs / 1000));
                     await delay(waitMs + 1000); // +1s buffer
                   }
 
-                  // Mark the token as being processed
-                  processingTokens[tokenId] = true;
-
                   try {
-                    const result = await placeBidWithRotation(collection, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey);
+                    const result = await placeBidWithRotation(collection, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, undefined, maxOffer);
                     if (result.success) {
-                      recentBids.set(tokenId, Date.now());  // Record bid time for deduplication
+                      recentBids.set(tokenId, Date.now());  // Update with actual completion time
                       bidHistory[collectionSymbol].topBids[tokenId] = true
                       bidHistory[collectionSymbol].ourBids[tokenId] = {
                         price: bidPrice,
@@ -451,13 +631,24 @@ class EventManager {
                         paymentAddress: result.paymentAddress
                       }
                       Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID');
+                    } else {
+                      // Bid failed - remove the early deduplication entry to allow retry
+                      recentBids.delete(tokenId);
                     }
+                  } catch (error) {
+                    // Bid failed with exception - remove the early deduplication entry to allow retry
+                    recentBids.delete(tokenId);
+                    throw error;
                   } finally {
-                    processingTokens[tokenId] = false;
+                    releaseTokenLock(tokenId);
                   }
+                } else {
+                  // Counter-bid would exceed maxOffer (which includes maxFloorBid% validation)
+                  Logger.bidSkipped(collectionSymbol, tokenId, 'Counter-bid would exceed max', verifiedOfferPrice, bidPrice, maxOffer);
                 }
 
-              } catch (error) {
+              } catch (error: any) {
+                Logger.error(`[WS] Counter-bid error for ${collectionSymbol} ${tokenId}`, error?.message || error);
               }
             }
           }
@@ -467,7 +658,7 @@ class EventManager {
           const collectionSymbol = message.collectionSymbol
 
           const incomingBidAmount = message.listedPrice
-          const ourBidPrice = bidHistory[collectionSymbol].highestCollectionOffer?.price
+          const ourBidPrice = bidHistory[collectionSymbol]?.highestCollectionOffer?.price
 
           const incomingBuyerPaymentAddress = message.buyerPaymentAddress
 
@@ -480,15 +671,16 @@ class EventManager {
           if (incomingBuyerPaymentAddress.toLowerCase() !== buyerPaymentAddress.toLowerCase() && Number(incomingBidAmount) > Number(ourBidPrice)) {
             Logger.websocket.event('coll_offer_created', collectionSymbol);
 
-            while (processingTokens[collectionSymbol]) {
-              Logger.info(`Processing existing collection offer: ${collectionSymbol}`);
-              await new Promise(resolve => setTimeout(resolve, 500));
+            // Atomically acquire lock for this collection to prevent race conditions
+            const lockAcquired = await acquireTokenLock(collectionSymbol);
+            if (!lockAcquired) {
+              Logger.info(`[WS] ${collectionSymbol}: Collection already being processed, skipping`);
+              return;
             }
-            processingTokens[collectionSymbol] = true
 
             const bidPrice = +(incomingBidAmount) + outBidAmount
             const offerData = await getBestCollectionOffer(collectionSymbol)
-            const ourOffer = offerData?.offers.find((item) => item.btcParams.makerOrdinalReceiveAddress.toLowerCase() === buyerTokenReceiveAddress.toLowerCase())
+            const ourOffer = offerData?.offers.find((item) => isOurReceiveAddress(item.btcParams.makerOrdinalReceiveAddress))
 
             if (ourOffer) {
               const offerIds = [ourOffer.id]
@@ -496,17 +688,22 @@ class EventManager {
             }
             const feeSatsPerVbyte = collection.feeSatsPerVbyte || 28
             try {
-              if (bidPrice < maxOffer || bidPrice < floorPrice) {
-                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte)
+              if (bidPrice > maxOffer) {
+                Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed max', +(incomingBidAmount), bidPrice, maxOffer);
+              } else if (bidPrice >= floorPrice) {
+                Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed floor price', +(incomingBidAmount), bidPrice, floorPrice);
+              } else {
+                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
                 bidHistory[collectionSymbol].highestCollectionOffer = {
                   price: bidPrice,
                   buyerPaymentAddress: buyerPaymentAddress
                 }
                 Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
               }
-            } catch (error) {
+            } catch (error: any) {
+              Logger.error(`[WS] Failed to place collection bid for ${collectionSymbol}`, error?.message || error);
             } finally {
-              delete processingTokens[collectionSymbol]
+              releaseTokenLock(collectionSymbol);
             }
           }
         }
@@ -514,10 +711,12 @@ class EventManager {
 
       if (message.kind === "buying_broadcasted" || message.kind === "offer_accepted_broadcasted" || message.kind === "coll_offer_fulfill_broadcasted") {
         if (incomingBuyerTokenReceiveAddress === buyerTokenReceiveAddress) {
-          bidHistory[collectionSymbol].quantity += 1
+          const newQuantity = await incrementQuantity(collectionSymbol);
+          Logger.info(`[WS] ${collectionSymbol}: Purchase confirmed, quantity now ${newQuantity}`);
         }
       }
-    } catch (error) {
+    } catch (error: any) {
+      Logger.error(`[WS] handleIncomingBid error`, error?.message || error);
     }
   }
 
@@ -559,18 +758,7 @@ class EventManager {
     const buyerPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string
 
     try {
-
-      if (!bidHistory[collectionSymbol]) {
-        bidHistory[collectionSymbol] = {
-          offerType: "ITEM",
-          topOffers: {},
-          ourBids: {},
-          topBids: {},
-          bottomListings: [],
-          lastSeenActivity: null,
-          quantity: 0
-        };
-      }
+      initBidHistory(collectionSymbol, item.offerType);
 
       const quantity = bidHistory[collectionSymbol].quantity
       if (quantity === maxBuy) {
@@ -579,34 +767,43 @@ class EventManager {
 
       balance = await getBitcoinBalance(buyerPaymentAddress)
       const collectionData = await collectionDetails(collectionSymbol)
-      if (RESTART) {
-        const offerData = await getUserOffers(buyerTokenReceiveAddress)
-        if (offerData && offerData.offers.length > 0) {
-          const offers = offerData.offers
-          offers.forEach((item) => {
-            if (!bidHistory[item.token.collectionSymbol]) {
-              bidHistory[item.token.collectionSymbol] = {
-                offerType: "ITEM",
-                topOffers: {},
-                ourBids: {},
-                topBids: {},
-                bottomListings: [],
-                lastSeenActivity: null,
-                quantity: 0
+
+      // Rehydrate bid history on startup OR periodically every REHYDRATE_INTERVAL_MS
+      // This recovers orphaned bids that may not be tracked (e.g., after crash, restart, or clock drift)
+      const now = Date.now();
+      const shouldRehydrate = RESTART || (now - lastRehydrationTime > REHYDRATE_INTERVAL_MS);
+
+      if (shouldRehydrate) {
+        const addressesToQuery = getReceiveAddressesToQuery();
+        Logger.info(`[REHYDRATE] ${RESTART ? 'Startup' : 'Periodic'} rehydration - querying ${addressesToQuery.length} wallet address(es)`);
+
+        for (const receiveAddr of addressesToQuery) {
+          const offerData = await getUserOffers(receiveAddr);
+          if (offerData && offerData.offers.length > 0) {
+            Logger.info(`[REHYDRATE] Found ${offerData.offers.length} offers for ${receiveAddr.slice(0, 10)}...`);
+            for (const offerItem of offerData.offers) {
+              // Look up offerType from collections config, default to "ITEM" if not found
+              const matchedCollection = collections.find(c => c.collectionSymbol === offerItem.token.collectionSymbol);
+              initBidHistory(offerItem.token.collectionSymbol, matchedCollection?.offerType ?? "ITEM");
+              bidHistory[offerItem.token.collectionSymbol].topBids[offerItem.tokenId] = true;
+              bidHistory[offerItem.token.collectionSymbol].ourBids[offerItem.tokenId] = {
+                price: offerItem.price,
+                expiration: offerItem.expirationDate,
+                paymentAddress: offerItem.buyerPaymentAddress
               };
+              bidHistory[offerItem.token.collectionSymbol].lastSeenActivity = Date.now();
             }
-            bidHistory[item.token.collectionSymbol].topBids[item.tokenId] = true
-            bidHistory[item.token.collectionSymbol].ourBids[item.tokenId] = {
-              price: item.price,
-              expiration: item.expirationDate
-            }
-            bidHistory[collectionSymbol].lastSeenActivity = Date.now()
-          })
+          }
         }
+        lastRehydrationTime = now;  // Update last rehydration time
       }
 
-      let tokens = await retrieveTokens(collectionSymbol, bidCount, traits)
-      tokens = tokens.slice(0, bidCount)
+      const tokensResult = await retrieveTokens(collectionSymbol, bidCount, traits)
+      if (tokensResult === null) {
+        Logger.warning(`[SCHEDULE] API error retrieving tokens for ${collectionSymbol}, skipping cycle`);
+        return;
+      }
+      let tokens = tokensResult.slice(0, bidCount)
 
       Logger.tokens.retrieved(tokens.length, bidCount);
 
@@ -642,7 +839,13 @@ class EventManager {
       const expiration = currentTime + (duration * 60 * 1000);
       const minPrice = Math.round(minBid * CONVERSION_RATE)
       const maxPrice = Math.round(maxBid * CONVERSION_RATE)
-      const floorPrice = Number(collectionData?.floorPrice) ?? 0
+
+      // Validate floor price data - skip collection if unavailable (API error)
+      if (!collectionData?.floorPrice) {
+        Logger.warning(`[SCHEDULE] No floor price data for ${collectionSymbol}, skipping cycle`);
+        return;
+      }
+      const floorPrice = Number(collectionData.floorPrice)
       const maxFloorBid = item.maxFloorBid
       const minFloorBid = item.minFloorBid
       const minOffer = Math.max(minPrice, Math.round(minFloorBid * floorPrice / 100))
@@ -701,15 +904,18 @@ class EventManager {
               const offers = offerData?.offers.filter((item) => item.buyerPaymentAddress === buyerPaymentAddress)
               // Memory leak fix: Use Promise.all instead of forEach for async operations
               await Promise.all(offers.map(async (item) => {
-                await cancelBid(
+                const cancelled = await cancelBid(
                   item,
                   privateKey,
                   collectionSymbol,
                   item.tokenId,
                   buyerPaymentAddress
                 );
-                delete bidHistory[collectionSymbol].ourBids[token.tokenId]
-                delete bidHistory[collectionSymbol].topBids[token.tokenId]
+                // FIX: Only delete from bidHistory after confirmed cancellation success
+                if (cancelled) {
+                  delete bidHistory[collectionSymbol].ourBids[token.tokenId]
+                  delete bidHistory[collectionSymbol].topBids[token.tokenId]
+                }
               }))
             }
           })
@@ -717,11 +923,10 @@ class EventManager {
       }
 
       userBids.forEach((bid) => {
-        const givenTimestamp = new Date(bid.expiration);
-        const bidExpiration = new Date();
-        bidExpiration.setMinutes(bidExpiration.getMinutes() + duration);
+        const bidExpirationTime = new Date(bid.expiration).getTime();
 
-        if (givenTimestamp.getTime() >= bidExpiration.getTime()) {
+        // Mark as expired if current time is past the bid's expiration
+        if (Date.now() >= bidExpirationTime) {
           Logger.bidCancelled(collectionSymbol, bid.tokenId, 'Expired');
           delete bidHistory[collectionSymbol].ourBids[bid.tokenId]
           delete bidHistory[collectionSymbol].topBids[bid.tokenId]
@@ -740,6 +945,7 @@ class EventManager {
       // Bid placement tracking counters
       let tokensProcessed = 0;
       let newBidsPlaced = 0;
+      let bidsAdjusted = 0;
       let alreadyHaveBids = 0;
       let skippedOfferTooHigh = 0;
       let skippedBidTooHigh = 0;
@@ -784,26 +990,29 @@ class EventManager {
                 }
 
                 const bestOffer = await getBestOffer(tokenId);
-                const ourExistingOffer = bidHistory[collectionSymbol].ourBids[tokenId]?.expiration > Date.now()
+                const ourExistingOffer = bidHistory[collectionSymbol]?.ourBids?.[tokenId]?.expiration > Date.now()
 
-                const currentExpiry = bidHistory[collectionSymbol]?.ourBids[tokenId]?.expiration
+                const currentExpiry = bidHistory[collectionSymbol]?.ourBids?.[tokenId]?.expiration
               const newExpiry = duration * 60 * 1000
               const offerData = await getOffers(tokenId, buyerTokenReceiveAddress)
               const offer = offerData?.offers.filter((item) => item.buyerPaymentAddress === buyerPaymentAddress)
 
-              if (currentExpiry - Date.now() > newExpiry) {
+              if (currentExpiry && (currentExpiry - Date.now()) > newExpiry) {
                 if (offer) {
                   // Memory leak fix: Use Promise.all instead of forEach for async operations
                   await Promise.all(offer.map(async (item) => {
-                    await cancelBid(
+                    const cancelled = await cancelBid(
                       item,
                       privateKey,
                       collectionSymbol,
                       tokenId,
                       buyerPaymentAddress
                     );
-                    delete bidHistory[collectionSymbol].ourBids[tokenId]
-                    delete bidHistory[collectionSymbol].topBids[tokenId]
+                    // FIX: Only delete from bidHistory after confirmed cancellation success
+                    if (cancelled) {
+                      delete bidHistory[collectionSymbol].ourBids[tokenId]
+                      delete bidHistory[collectionSymbol].topBids[tokenId]
+                    }
                   }))
                 }
               }
@@ -840,10 +1049,10 @@ class EventManager {
                       return;
                     }
 
-                    const bidPrice = currentPrice + (outBidMargin * CONVERSION_RATE)
+                    const bidPrice = currentPrice + Math.round(outBidMargin * CONVERSION_RATE)
                     if (bidPrice <= maxOffer) {
                       try {
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
                         if (result.success) {
                           recentBids.set(tokenId, Date.now());  // Record bid time for deduplication
                           bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -867,9 +1076,15 @@ class EventManager {
                     }
                   } else {
                     // Top offer is from one of our wallet pool addresses, but not tracked in bidHistory
-                    // This indicates an orphaned bid from a previous run
+                    // Rehydrate the orphaned bid into bidHistory so it's tracked going forward
+                    bidHistory[collectionSymbol].topBids[tokenId] = true;
+                    bidHistory[collectionSymbol].ourBids[tokenId] = {
+                      price: topOffer.price,
+                      expiration: topOffer.expirationDate || (Date.now() + duration * 60 * 1000),
+                      paymentAddress: topOffer.buyerPaymentAddress
+                    };
                     skippedAlreadyOurs++;
-                    Logger.info(`Token ${tokenId.slice(-8)}: Existing offer from our address (${topOffer?.price} sats) not in bidHistory - orphaned bid`);
+                    Logger.info(`Token ${tokenId.slice(-8)}: Rehydrated orphan (${topOffer.price} sats)`);
                   }
                 }
                 /*
@@ -881,7 +1096,7 @@ class EventManager {
                   const bidPrice = Math.max(listedPrice * 0.5, minOffer)
                   if (bidPrice <= maxOffer) {
                     try {
-                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress)
+                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
                       if (result.success) {
                         recentBids.set(tokenId, Date.now());  // Record bid time for deduplication
                         bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -935,11 +1150,11 @@ class EventManager {
                       return;
                     }
 
-                    const bidPrice = currentPrice + (outBidMargin * CONVERSION_RATE)
+                    const bidPrice = currentPrice + Math.round(outBidMargin * CONVERSION_RATE)
 
                     if (bidPrice <= maxOffer) {
                       try {
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
                         if (result.success) {
                           recentBids.set(tokenId, Date.now());  // Record bid time for deduplication
                           bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -962,13 +1177,13 @@ class EventManager {
                   } else {
                     if (secondTopOffer) {
                       const secondBestPrice = secondTopOffer.price
-                      const outBidAmount = outBidMargin * CONVERSION_RATE
+                      const outBidAmount = Math.round(outBidMargin * CONVERSION_RATE)
                       if (bestPrice - secondBestPrice > outBidAmount) {
                         const bidPrice = secondBestPrice + outBidAmount
 
                         if (bidPrice <= maxOffer) {
                           try {
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
                             if (result.success) {
                               recentBids.set(tokenId, Date.now());  // Record bid time for deduplication
                               bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -978,6 +1193,7 @@ class EventManager {
                                 paymentAddress: result.paymentAddress
                               }
                               Logger.bidAdjusted(collectionSymbol, tokenId, bestPrice, bidPrice);
+                              bidsAdjusted++;
                             }
                           } catch (error) {
                             Logger.error(`Failed to adjust bid for ${collectionSymbol} ${tokenId}`, error);
@@ -995,7 +1211,7 @@ class EventManager {
                       if (bestPrice !== bidPrice) { // self adjust bids.
                         if (bidPrice <= maxOffer) {
                           try {
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
                             if (result.success) {
                               recentBids.set(tokenId, Date.now());  // Record bid time for deduplication
                               bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -1005,6 +1221,7 @@ class EventManager {
                                 paymentAddress: result.paymentAddress
                               }
                               Logger.bidAdjusted(collectionSymbol, tokenId, bestPrice, bidPrice);
+                              bidsAdjusted++;
                             }
                           } catch (error) {
                             Logger.error(`Failed to self-adjust bid for ${collectionSymbol} ${tokenId}`, error);
@@ -1051,16 +1268,17 @@ class EventManager {
                 const offerIds = [ourOffer.id]
                 await cancelCollectionOffer(offerIds, publicKey, privateKey)
               }
-            } catch (error) {
+            } catch (error: any) {
+              Logger.error(`[COLLECTION] Failed to cancel existing offer before outbid for ${collectionSymbol}`, error?.message || error);
             }
 
             const currentPrice = topOffer.price.amount
-            const bidPrice = currentPrice + (outBidMargin * CONVERSION_RATE)
+            const bidPrice = currentPrice + Math.round(outBidMargin * CONVERSION_RATE)
 
             if (bidPrice <= maxOffer) {
               try {
                 if (bidPrice < floorPrice) {
-                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte)
+                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
                   bidHistory[collectionSymbol].offerType = "COLLECTION"
 
                   bidHistory[collectionSymbol].highestCollectionOffer = {
@@ -1079,7 +1297,7 @@ class EventManager {
           } else {
             if (secondTopOffer) {
               const secondBestPrice = secondTopOffer.price.amount
-              const outBidAmount = outBidMargin * CONVERSION_RATE
+              const outBidAmount = Math.round(outBidMargin * CONVERSION_RATE)
               if (bestPrice - secondBestPrice > outBidAmount) {
                 const bidPrice = secondBestPrice + outBidAmount
 
@@ -1088,14 +1306,14 @@ class EventManager {
                     const offerIds = [ourOffer.id]
                     await cancelCollectionOffer(offerIds, publicKey, privateKey)
                   }
-
-                } catch (error) {
+                } catch (error: any) {
+                  Logger.error(`[COLLECTION] Failed to cancel offer before adjustment for ${collectionSymbol}`, error?.message || error);
                 }
 
                 if (bidPrice <= maxOffer) {
                   try {
                     if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte)
+                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -1125,7 +1343,7 @@ class EventManager {
                 if (bidPrice <= maxOffer) {
                   try {
                     if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte)
+                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -1146,12 +1364,16 @@ class EventManager {
           const bidPrice = minOffer
           if (bidPrice <= maxOffer) {
             if (bidPrice < floorPrice) {
-              await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte)
-              bidHistory[collectionSymbol].offerType = "COLLECTION"
-
-              bidHistory[collectionSymbol].highestCollectionOffer = {
-                price: bidPrice,
-                buyerPaymentAddress: buyerPaymentAddress
+              try {
+                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
+                bidHistory[collectionSymbol].offerType = "COLLECTION"
+                bidHistory[collectionSymbol].highestCollectionOffer = {
+                  price: bidPrice,
+                  buyerPaymentAddress: buyerPaymentAddress
+                }
+                Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
+              } catch (error) {
+                Logger.error(`Failed to place initial collection offer for ${collectionSymbol}`, error);
               }
             }
           }
@@ -1166,6 +1388,7 @@ class EventManager {
       Logger.summary.bidPlacement({
         tokensProcessed,
         newBidsPlaced,
+        bidsAdjusted,
         alreadyHaveBids,
         noActionNeeded,
         skippedOfferTooHigh,
@@ -1209,6 +1432,18 @@ function connectWebSocket(): void {
   ws = new WebSocket(baseEndpoint);
 
 
+  // FIX: Register message listener OUTSIDE open handler to prevent accumulation on reconnects
+  ws.on("message", function incoming(data: string) {
+    try {
+      if (isValidJSON(data.toString())) {
+        const message: CollectOfferActivity = JSON.parse(data);
+        eventManager.receiveWebSocketEvent(message);
+      }
+    } catch (error: any) {
+      Logger.error('[WEBSOCKET] Error processing message', error?.message || error);
+    }
+  });
+
   ws.addEventListener("open", function open() {
     Logger.websocket.connected();
 
@@ -1219,30 +1454,28 @@ function connectWebSocket(): void {
     }
     if (heartbeatIntervalId !== null) {
       clearInterval(heartbeatIntervalId);
+      heartbeatIntervalId = null;
     }
     heartbeatIntervalId = setInterval(() => {
-      if (ws) {
-        ws.send(
-          JSON.stringify({
-            topic: "nfttools",
-            event: "heartbeat",
-            payload: {},
-            ref: 0,
-          })
-        );
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              topic: "nfttools",
+              event: "heartbeat",
+              payload: {},
+              ref: 0,
+            })
+          );
+        }
+      } catch (err) {
+        Logger.warning('[WEBSOCKET] Heartbeat send failed:', err);
       }
     }, 10000);
 
     if (collections.length > 0) {
       subscribeToCollections(collections)
     }
-
-    ws.on("message", function incoming(data: string) {
-      if (isValidJSON(data.toString())) {
-        const message: CollectOfferActivity = JSON.parse(data);
-        eventManager.receiveWebSocketEvent(message)
-      }
-    });
   });
 
   ws.addEventListener("close", function close() {
@@ -1255,6 +1488,7 @@ function connectWebSocket(): void {
   });
 
   ws.addEventListener("error", function error(err) {
+    Logger.websocket.error(err);
     if (ws) {
       ws.close();
     }
@@ -1262,23 +1496,35 @@ function connectWebSocket(): void {
 }
 
 const MAX_RETRIES: number = 5;
+const RECONNECT_COOLDOWN_MS: number = 5 * 60 * 1000; // 5 minutes cooldown before resetting retry count
 
 function attemptReconnect(): void {
   if (retryCount < MAX_RETRIES) {
     if (reconnectTimeoutId !== null) {
       clearTimeout(reconnectTimeoutId);
     }
-    let delay: number = Math.pow(2, retryCount) * 1000;
-    console.log(`Attempting to reconnect in ${delay / 1000} seconds...`);
-    reconnectTimeoutId = setTimeout(connectWebSocket, delay);
+    let delayMs: number = Math.pow(2, retryCount) * 1000;
+    console.log(`Attempting to reconnect in ${delayMs / 1000} seconds...`);
+    reconnectTimeoutId = setTimeout(connectWebSocket, delayMs);
     retryCount++;
   } else {
-    console.log("Max retries reached. Giving up on reconnecting.");
+    // Max retries exceeded - wait 5 minutes then try again from scratch
+    Logger.websocket.maxRetriesExceeded();
+    Logger.warning(`[WEBSOCKET] Waiting ${RECONNECT_COOLDOWN_MS / 60000} minutes before retrying...`);
+    Logger.warning('[WEBSOCKET] Counter-bidding temporarily disabled. Scheduled bidding continues.');
+
+    if (reconnectTimeoutId !== null) {
+      clearTimeout(reconnectTimeoutId);
+    }
+    reconnectTimeoutId = setTimeout(() => {
+      Logger.info('[WEBSOCKET] Cooldown complete, resetting retry count and attempting to reconnect...');
+      retryCount = 0;
+      attemptReconnect();
+    }, RECONNECT_COOLDOWN_MS);
   }
 }
 
 function subscribeToCollections(collections: CollectionData[]) {
-
   collections.forEach((item) => {
     const subscriptionMessage = {
       type: 'subscribeCollection',
@@ -1289,10 +1535,17 @@ function subscribeToCollections(collections: CollectionData[]) {
     };
 
     if (item.enableCounterBidding) {
-      ws.send(JSON.stringify(subscriptionMessage));
-      Logger.websocket.subscribed(item.collectionSymbol);
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(subscriptionMessage));
+          Logger.websocket.subscribed(item.collectionSymbol);
+        } else {
+          Logger.warning(`[WEBSOCKET] Cannot subscribe to ${item.collectionSymbol}: connection not open`);
+        }
+      } catch (err) {
+        Logger.warning(`[WEBSOCKET] Failed to subscribe to ${item.collectionSymbol}:`, err);
+      }
     }
-
   });
 }
 
@@ -1334,7 +1587,7 @@ if (ENABLE_WALLET_ROTATION) {
   try {
     if (!fs.existsSync(WALLET_CONFIG_PATH)) {
       Logger.warning(`[WALLET ROTATION] Config file not found at ${WALLET_CONFIG_PATH}`);
-      Logger.warning('[WALLET ROTATION] Copy src/config/wallets.example.json to src/config/wallets.json and configure your wallets');
+      Logger.warning('[WALLET ROTATION] Copy config/wallets.example.json to config/wallets.json and configure your wallets');
       Logger.warning('[WALLET ROTATION] Continuing with single wallet mode...');
     } else {
       const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
@@ -1356,7 +1609,10 @@ if (ENABLE_WALLET_ROTATION) {
 
 connectWebSocket();
 
-startProcessing();
+startProcessing().catch(error => {
+  Logger.error('[CRITICAL] startProcessing failed with unhandled error', error);
+  process.exit(1);
+});
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1365,14 +1621,20 @@ function delay(ms: number) {
 
 function writeBidHistoryToFile() {
   const jsonString = JSON.stringify(bidHistory, null, 2);
-  const filePath = 'bidHistory.json';
+  const filePath = path.join(DATA_DIR, 'bidHistory.json');
+  const tempPath = path.join(DATA_DIR, 'bidHistory.json.tmp');
 
-  fs.writeFile(filePath, jsonString, 'utf-8', (err) => {
+  // Atomic write: write to temp file first, then rename
+  fs.writeFile(tempPath, jsonString, 'utf-8', (err) => {
     if (err) {
-      console.error('Error writing bidHistory to file:', err);
+      console.error('Error writing bidHistory to temp file:', err);
       return;
     }
-    console.log('bidHistory has been written to bidHistory.json');
+    fs.rename(tempPath, filePath, (renameErr) => {
+      if (renameErr) {
+        console.error('Error renaming bidHistory temp file:', renameErr);
+      }
+    });
   });
 }
 
@@ -1408,7 +1670,7 @@ function writeBotStatsToFile() {
   // Count total bids being tracked
   let totalBidsTracked = 0;
   for (const collectionSymbol in bidHistory) {
-    totalBidsTracked += Object.keys(bidHistory[collectionSymbol].ourBids).length;
+    totalBidsTracked += Object.keys(bidHistory[collectionSymbol]?.ourBids || {}).length;
   }
 
   const stats = {
@@ -1450,38 +1712,90 @@ function writeBotStatsToFile() {
   };
 
   const jsonString = JSON.stringify(stats, null, 2);
-  const filePath = 'botStats.json';
+  const filePath = path.join(DATA_DIR, 'botStats.json');
+  const tempPath = path.join(DATA_DIR, 'botStats.json.tmp');
 
-  fs.writeFile(filePath, jsonString, 'utf-8', (err) => {
+  // Atomic write: write to temp file first, then rename
+  fs.writeFile(tempPath, jsonString, 'utf-8', (err) => {
     if (err) {
-      console.error('Error writing botStats to file:', err);
+      console.error('Error writing botStats to temp file:', err);
+      return;
     }
+    fs.rename(tempPath, filePath, (renameErr) => {
+      if (renameErr) {
+        console.error('Error renaming botStats temp file:', renameErr);
+      }
+    });
   });
 }
 
 // Write bot stats every 30 seconds
 const BOT_STATS_WRITE_INTERVAL_MS = 30 * 1000; // 30 seconds
-setInterval(writeBotStatsToFile, BOT_STATS_WRITE_INTERVAL_MS);
+setInterval(() => {
+  try {
+    writeBotStatsToFile();
+  } catch (err) {
+    Logger.error('[INTERVAL] writeBotStatsToFile failed:', err);
+  }
+}, BOT_STATS_WRITE_INTERVAL_MS);
 
 // Initial write after 5 seconds
-setTimeout(writeBotStatsToFile, 5000);
+setTimeout(() => {
+  try {
+    writeBotStatsToFile();
+  } catch (err) {
+    Logger.error('[TIMEOUT] Initial writeBotStatsToFile failed:', err);
+  }
+}, 5000);
+
+// Write bid history every 5 minutes for crash recovery
+const BID_HISTORY_WRITE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+setInterval(() => {
+  try {
+    writeBidHistoryToFile();
+  } catch (err) {
+    Logger.error('[INTERVAL] writeBidHistoryToFile failed:', err);
+  }
+}, BID_HISTORY_WRITE_INTERVAL_MS);
+
+// Memory leak fix: Clean up expired entries from recentBids deduplication map
+// Runs every 1 minute to prevent unbounded growth during heavy bidding
+function cleanupRecentBids() {
+  const now = Date.now();
+  let recentBidsCleaned = 0;
+
+  // First pass: Remove expired entries (2x cooldown for safety margin)
+  for (const [tokenId, timestamp] of recentBids.entries()) {
+    if (now - timestamp > RECENT_BID_COOLDOWN_MS * 2) {
+      recentBids.delete(tokenId);
+      recentBidsCleaned++;
+    }
+  }
+
+  // Second pass: Enforce max size cap - remove oldest entries if still over limit
+  if (recentBids.size > MAX_RECENT_BIDS_SIZE) {
+    // Convert to array, sort by timestamp (oldest first), and remove excess
+    const entries = Array.from(recentBids.entries()).sort((a, b) => a[1] - b[1]);
+    const toRemove = entries.slice(0, recentBids.size - MAX_RECENT_BIDS_SIZE);
+    for (const [tokenId] of toRemove) {
+      recentBids.delete(tokenId);
+      recentBidsCleaned++;
+    }
+    Logger.info(`[CLEANUP] Enforced max size cap on recentBids (removed ${toRemove.length} oldest entries)`);
+  }
+
+  if (recentBidsCleaned > 0) {
+    Logger.info(`[CLEANUP] Removed ${recentBidsCleaned} entries from recentBids map (size: ${recentBids.size})`);
+  }
+}
 
 // Memory leak fix: Clean up old bidHistory entries
 function cleanupBidHistory() {
   const now = Date.now();
   let totalCleaned = 0;
 
-  // Clean up expired entries from recentBids deduplication map
-  let recentBidsCleaned = 0;
-  for (const [tokenId, timestamp] of recentBids.entries()) {
-    if (now - timestamp > RECENT_BID_COOLDOWN_MS * 2) {  // 2x cooldown for safety margin
-      recentBids.delete(tokenId);
-      recentBidsCleaned++;
-    }
-  }
-  if (recentBidsCleaned > 0) {
-    Logger.info(`[CLEANUP] Removed ${recentBidsCleaned} expired entries from recentBids map`);
-  }
+  // Also clean recentBids during full cleanup
+  cleanupRecentBids();
 
   // Remove collections that are no longer in the config
   const activeCollectionSymbols = new Set(collections.map(c => c.collectionSymbol));
@@ -1497,10 +1811,13 @@ function cleanupBidHistory() {
   for (const collectionSymbol in bidHistory) {
     const collection = bidHistory[collectionSymbol];
 
-    // Clean expired ourBids (older than 24 hours or already expired)
+    // Clean expired ourBids - remove bids that expired more than 24 hours ago
+    // This keeps recent expired bids for reference but cleans up very old ones
     for (const tokenId in collection.ourBids) {
       const bid = collection.ourBids[tokenId];
-      if (bid.expiration < now || (now - bid.expiration) > BID_HISTORY_MAX_AGE_MS) {
+      // Remove if bid has been expired for more than BID_HISTORY_MAX_AGE_MS (24h)
+      // bid.expiration is in the past if expired, so (now - bid.expiration) = time since expiration
+      if (bid.expiration < now && (now - bid.expiration) > BID_HISTORY_MAX_AGE_MS) {
         delete collection.ourBids[tokenId];
         delete collection.topBids[tokenId];
         totalCleaned++;
@@ -1544,7 +1861,23 @@ function cleanupBidHistory() {
 }
 
 // Start periodic cleanup
-setInterval(cleanupBidHistory, BID_HISTORY_CLEANUP_INTERVAL_MS);
+setInterval(() => {
+  try {
+    cleanupBidHistory();
+  } catch (err) {
+    Logger.error('[INTERVAL] cleanupBidHistory failed:', err);
+  }
+}, BID_HISTORY_CLEANUP_INTERVAL_MS);
+
+// More frequent cleanup for recentBids to prevent memory growth during heavy bidding
+const RECENT_BIDS_CLEANUP_INTERVAL_MS = 1 * 60 * 1000; // 1 minute (reduced from 5 minutes)
+setInterval(() => {
+  try {
+    cleanupRecentBids();
+  } catch (err) {
+    Logger.error('[INTERVAL] cleanupRecentBids failed:', err);
+  }
+}, RECENT_BIDS_CLEANUP_INTERVAL_MS);
 
 // Memory leak fix: Add memory monitoring and alerting
 let lastMemoryCheck = { heapUsed: process.memoryUsage().heapUsed, timestamp: Date.now() };
@@ -1565,7 +1898,7 @@ function monitorMemoryUsage() {
   // Count total bids being tracked
   let totalBidsTracked = 0;
   for (const collectionSymbol in bidHistory) {
-    totalBidsTracked += Object.keys(bidHistory[collectionSymbol].ourBids).length;
+    totalBidsTracked += Object.keys(bidHistory[collectionSymbol]?.ourBids || {}).length;
   }
 
   Logger.memory.status(heapUsedMB, heapTotalMB, eventManager.queue.length, totalBidsTracked);
@@ -1583,53 +1916,73 @@ function monitorMemoryUsage() {
 }
 
 // Start periodic memory monitoring
-setInterval(monitorMemoryUsage, MEMORY_CHECK_INTERVAL_MS);
+setInterval(() => {
+  try {
+    monitorMemoryUsage();
+  } catch (err) {
+    Logger.error('[INTERVAL] monitorMemoryUsage failed:', err);
+  }
+}, MEMORY_CHECK_INTERVAL_MS);
 
 // Initial memory check after 1 minute
-setTimeout(monitorMemoryUsage, 60000);
+setTimeout(() => {
+  try {
+    monitorMemoryUsage();
+  } catch (err) {
+    Logger.error('[TIMEOUT] Initial monitorMemoryUsage failed:', err);
+  }
+}, 60000);
 
 // Print bid pacer progress every 30 seconds when queue has pending items
 const PACER_PROGRESS_INTERVAL_MS = 30 * 1000; // 30 seconds
 setInterval(() => {
-  if (queue.size > 0 || queue.pending > 0) {
-    const status = getBidPacerStatus();
-    Logger.queue.progress(queue.size, queue.pending, status.bidsUsed, BIDS_PER_MINUTE, status.windowResetIn, status.totalBidsPlaced);
+  try {
+    if (queue.size > 0 || queue.pending > 0) {
+      const status = getBidPacerStatus();
+      Logger.queue.progress(queue.size, queue.pending, status.bidsUsed, BIDS_PER_MINUTE, status.windowResetIn, status.totalBidsPlaced);
+    }
+  } catch (err) {
+    Logger.error('[INTERVAL] pacer progress failed:', err);
   }
 }, PACER_PROGRESS_INTERVAL_MS);
 
 // Print bid statistics every 30 minutes
 const BID_STATS_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 setInterval(() => {
-  Logger.printStats();
+  try {
+    Logger.printStats();
 
-  // Print pacer stats
-  const pacerStatus = getBidPacerStatus();
-  console.log('');
-  console.log('━'.repeat(60));
-  console.log('⏱️  BID PACER STATUS');
-  console.log('━'.repeat(60));
-  console.log(`  Bids in window:     ${pacerStatus.bidsUsed}/${BIDS_PER_MINUTE}`);
-  console.log(`  Window resets in:   ${pacerStatus.windowResetIn}s`);
-  console.log(`  Total bids placed:  ${pacerStatus.totalBidsPlaced}`);
-  console.log(`  Total waits:        ${pacerStatus.totalWaits}`);
-  console.log('━'.repeat(60));
-
-  // Print wallet pool stats if rotation is enabled
-  if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    const stats = getWalletPoolStats();
+    // Print pacer stats
+    const pacerStatus = getBidPacerStatus();
     console.log('');
     console.log('━'.repeat(60));
-    console.log('💳 WALLET POOL STATUS');
+    console.log('⏱️  BID PACER STATUS');
     console.log('━'.repeat(60));
-    console.log(`  Available wallets: ${stats.available}/${stats.total}`);
-    console.log(`  Rate limit: ${stats.bidsPerMinute} bids/min per wallet`);
-    console.log(`  Max throughput: ${stats.total * stats.bidsPerMinute} bids/min`);
-    console.log('');
-    stats.wallets.forEach(w => {
-      const statusIcon = w.isAvailable ? '✅' : '⏳';
-      console.log(`  ${statusIcon} ${w.label}: ${w.bidCount}/${stats.bidsPerMinute} bids (reset in ${w.secondsUntilReset}s)`);
-    });
+    console.log(`  Bids in window:     ${pacerStatus.bidsUsed}/${BIDS_PER_MINUTE}`);
+    console.log(`  Window resets in:   ${pacerStatus.windowResetIn}s`);
+    console.log(`  Total bids placed:  ${pacerStatus.totalBidsPlaced}`);
+    console.log(`  Total waits:        ${pacerStatus.totalWaits}`);
     console.log('━'.repeat(60));
+
+    // Print wallet pool stats if rotation is enabled
+    if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
+      const stats = getWalletPoolStats();
+      console.log('');
+      console.log('━'.repeat(60));
+      console.log('💳 WALLET POOL STATUS');
+      console.log('━'.repeat(60));
+      console.log(`  Available wallets: ${stats.available}/${stats.total}`);
+      console.log(`  Rate limit: ${stats.bidsPerMinute} bids/min per wallet`);
+      console.log(`  Max throughput: ${stats.total * stats.bidsPerMinute} bids/min`);
+      console.log('');
+      stats.wallets.forEach(w => {
+        const statusIcon = w.isAvailable ? '✅' : '⏳';
+        console.log(`  ${statusIcon} ${w.label}: ${w.bidCount}/${stats.bidsPerMinute} bids (reset in ${w.secondsUntilReset}s)`);
+      });
+      console.log('━'.repeat(60));
+    }
+  } catch (err) {
+    Logger.error('[INTERVAL] bid stats print failed:', err);
   }
 }, BID_STATS_INTERVAL_MS);
 
@@ -1640,17 +1993,34 @@ process.on('SIGINT', () => {
   process.exit(0)
 });
 
-async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol?: string, tokenId?: string, buyerPaymentAddress?: string) {
+// Global error handlers to prevent silent crashes
+process.on('uncaughtException', (error) => {
+  Logger.error('[CRITICAL] Uncaught exception:', error);
+  Logger.printStats();
+  writeBidHistoryToFile();
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  Logger.error('[CRITICAL] Unhandled rejection:', reason);
+  // Don't exit on unhandled rejection - log and continue
+  // This prevents crashes from non-critical async errors
+});
+
+async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol?: string, tokenId?: string, buyerPaymentAddress?: string): Promise<boolean> {
   try {
     const offerFormat = await retrieveCancelOfferFormat(offer.id)
     if (offerFormat) {
       const signedOfferFormat = signData(offerFormat, privateKey)
       if (signedOfferFormat) {
-        await submitCancelOfferData(offer.id, signedOfferFormat)
-
+        const result = await submitCancelOfferData(offer.id, signedOfferFormat)
+        return result === true;
       }
     }
-  } catch (error) {
+    return false;
+  } catch (error: any) {
+    Logger.error(`[CANCEL] Failed to cancel bid ${offer.id}`, error?.message || error);
+    return false;
   }
 }
 
@@ -1703,7 +2073,8 @@ async function placeBidWithRotation(
   fallbackPaymentAddress: string,
   fallbackPublicKey: string,
   fallbackPrivateKey: string,
-  sellerReceiveAddress?: string
+  sellerReceiveAddress?: string,
+  maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ): Promise<PlaceBidResult> {
   let buyerTokenReceiveAddress = fallbackReceiveAddress;
   let buyerPaymentAddress = fallbackPaymentAddress;
@@ -1712,8 +2083,9 @@ async function placeBidWithRotation(
   let walletLabel: string | undefined;
 
   // If wallet rotation is enabled, try to get a wallet from the pool
+  // Use async version with mutex to prevent race conditions
   if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    const wallet = getAvailableWallet();
+    const wallet = await getAvailableWalletAsync();
     if (!wallet) {
       Logger.wallet.allRateLimited(tokenId);
       return { success: false };
@@ -1726,6 +2098,8 @@ async function placeBidWithRotation(
     walletLabel = wallet.config.label;
 
     Logger.wallet.using(walletLabel || 'unnamed', tokenId);
+    // Note: getAvailableWalletAsync already increments bid count atomically
+    // so we don't need to call recordSuccessfulBid separately
   }
 
   try {
@@ -1743,7 +2117,8 @@ async function placeBidWithRotation(
       buyerPaymentAddress,
       publicKey,
       privateKey,
-      sellerReceiveAddress
+      sellerReceiveAddress,
+      maxAllowedPrice
     );
 
     if (success) {
@@ -1751,10 +2126,12 @@ async function placeBidWithRotation(
       if (!ENABLE_WALLET_ROTATION || !isWalletPoolInitialized()) {
         recordPacerBid();
       }
-
-      // Record to wallet pool if rotation is enabled
-      if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-        recordSuccessfulBid(buyerPaymentAddress);
+      // Note: Wallet pool bid is already recorded by getAvailableWalletAsync
+    } else {
+      // Bid failed - decrement the pre-incremented wallet bid count to recover the slot
+      // This prevents "lost" bid slots when bids fail after wallet reservation
+      if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized() && walletLabel) {
+        decrementWalletBidCount(buyerPaymentAddress);
       }
     }
 
@@ -1764,6 +2141,11 @@ async function placeBidWithRotation(
       walletLabel,
     };
   } catch (error: any) {
+    // Bid failed due to exception - decrement the pre-incremented wallet bid count
+    if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized() && walletLabel) {
+      decrementWalletBidCount(buyerPaymentAddress);
+    }
+
     // Check for rate limit errors - API returns "Rate limit exceeded, retry in 1 minute"
     // as a string directly in error.response.data, not in error.response.data.error
     const errorData = error?.response?.data;
@@ -1791,7 +2173,8 @@ async function placeBid(
   buyerPaymentAddress: string,
   publicKey: string,
   privateKey: string,
-  sellerReceiveAddress?: string
+  sellerReceiveAddress?: string,
+  maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ) {
   try {
     const price = Math.round(offerPrice)
@@ -1801,13 +2184,19 @@ async function placeBid(
 
     if (offerData && offerData.offers.length > 0) {
       const offers = offerData.offers
-      // Memory leak fix: Use Promise.all instead of forEach for async operations
-      await Promise.all(offers.map(async (item) => {
+      // Use Promise.allSettled to ensure all cancellations are attempted even if some fail
+      const results = await Promise.allSettled(offers.map(async (item) => {
         await cancelBid(item, privateKey)
-      }))
+      }));
+      // Log any failed cancellations
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          Logger.warning(`[CANCEL] Failed to cancel offer ${offers[index]?.id}: ${result.reason}`);
+        }
+      });
     }
 
-    const unsignedOffer = await createOffer(tokenId, price, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, FEE_RATE_TIER, sellerReceiveAddress)
+    const unsignedOffer = await createOffer(tokenId, price, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, FEE_RATE_TIER, sellerReceiveAddress, maxAllowedPrice)
     const signedOffer = await signData(unsignedOffer, privateKey)
     if (signedOffer) {
       await submitSignedOfferOrder(signedOffer, tokenId, offerPrice, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey, sellerReceiveAddress)
@@ -1864,6 +2253,7 @@ async function placeCollectionBid(
   publicKey: string,
   privateKey: string,
   feeSatsPerVbyte: number = 28,
+  maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ) {
   const priceSats = Math.ceil(offerPrice)
   const expirationAt = new Date(expiration).toISOString();
@@ -1873,7 +2263,7 @@ async function placeCollectionBid(
     return
   }
 
-  const unsignedCollectionOffer = await createCollectionOffer(collectionSymbol, priceSats, expirationAt, feeSatsPerVbyte, publicKey, buyerTokenReceiveAddress, privateKey)
+  const unsignedCollectionOffer = await createCollectionOffer(collectionSymbol, priceSats, expirationAt, feeSatsPerVbyte, publicKey, buyerTokenReceiveAddress, privateKey, maxAllowedPrice)
 
 
   if (unsignedCollectionOffer) {

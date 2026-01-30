@@ -39,7 +39,7 @@ export interface WalletsFile {
   lastModified?: string;
 }
 
-const WALLETS_FILE_PATH = path.join(process.cwd(), 'src/config/wallets.json');
+const WALLETS_FILE_PATH = path.join(process.cwd(), 'config/wallets.json');
 
 /**
  * Generate a new 12-word mnemonic

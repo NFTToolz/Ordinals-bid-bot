@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import axios from 'axios';
 
-const COLLECTIONS_FILE_PATH = path.join(process.cwd(), 'src/collections.json');
+const COLLECTIONS_FILE_PATH = path.join(process.cwd(), 'config/collections.json');
 const MAGIC_EDEN_API = 'https://api-mainnet.magiceden.dev/v2';
 
 export interface CollectionConfig {

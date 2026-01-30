@@ -7,7 +7,7 @@ const headers = {
   'X-NFT-API-Key': API_KEY,
 }
 
-export async function collectionDetails(collectionSymbol: string) {
+export async function collectionDetails(collectionSymbol: string): Promise<CollectionData | null> {
   try {
     const url = `https://nfttools.pro/magiceden/v2/ord/btc/stat?collectionSymbol=${collectionSymbol}`
     const { data } = await limiter.schedule(() => axiosInstance.get<CollectionData>(url, { headers }));
@@ -15,6 +15,8 @@ export async function collectionDetails(collectionSymbol: string) {
     return data
 
   } catch (error: any) {
+    console.error(`[COLLECTION] collectionDetails error for ${collectionSymbol}:`, error?.response?.data || error?.message);
+    return null;
   }
 }
 
@@ -51,7 +53,7 @@ export async function fetchCollections() {
     return collections
   } catch (error: any) {
     console.log("fetchCollectionsError: ", error.response?.data || error.message);
-    return []
+    return null;
   }
 }
 

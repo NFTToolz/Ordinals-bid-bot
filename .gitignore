@@ -155,7 +155,17 @@ dist
 # End of https://www.toptal.com/developers/gitignore/api/node
 
 # Wallet configuration (contains private keys)
-src/config/wallets.json
+config/wallets.json
+wallets.json
+*.wallet.json
+
+# Private keys and secrets
+*.wif
+*.key
+*.pem
+*secret*
+*private*
+!*.example.*
 
 # Bot process management
 .bot.pid
@@ -165,8 +175,13 @@ bot.log
 wallets-backup.enc
 *.enc
 
-# Runtime stats
+# Runtime data
+data/
+bidHistory.json
 botStats.json
 
 # Backup files
 *.backup
+
+# Documentation (generated/local)
+docs/

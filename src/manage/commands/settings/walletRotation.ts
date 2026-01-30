@@ -11,7 +11,7 @@ import { promptConfirm, promptSelect } from '../../utils/prompts';
 import { loadWallets } from '../../services/WalletGenerator';
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');
-const DEFAULT_WALLET_CONFIG_PATH = './src/config/wallets.json';
+const DEFAULT_WALLET_CONFIG_PATH = './config/wallets.json';
 
 interface EnvConfig {
   ENABLE_WALLET_ROTATION: boolean;

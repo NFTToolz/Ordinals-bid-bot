@@ -267,6 +267,21 @@ export const Logger = {
       const timestamp = getTimestamp();
       const token = tokenId ? ` | Token: ${formatTokenId(tokenId)}` : '';
       console.log(`${colors.dim}[${timestamp}] Event: ${type} | ${collectionSymbol}${token}${colors.reset}`);
+    },
+
+    error(err: any) {
+      const timestamp = getTimestamp();
+      const errorMsg = err?.message || err?.toString() || 'Unknown error';
+      console.log(`${colors.bright}${colors.red}🔌 [${timestamp}] WebSocket Error: ${errorMsg}${colors.reset}`);
+      if (err?.stack) {
+        console.log(`  ${colors.dim}${err.stack}${colors.reset}`);
+      }
+    },
+
+    maxRetriesExceeded() {
+      const timestamp = getTimestamp();
+      console.log(`${colors.bgRed}${colors.white}${colors.bright} ⚠ [${timestamp}] WEBSOCKET MAX RETRIES EXCEEDED ${colors.reset}`);
+      console.log(`${colors.red}${colors.bright}  WebSocket connection failed after maximum retry attempts.${colors.reset}`);
     }
   },
 
@@ -460,6 +475,7 @@ export const Logger = {
     bidPlacement(data: {
       tokensProcessed: number;
       newBidsPlaced: number;
+      bidsAdjusted: number;
       alreadyHaveBids: number;
       noActionNeeded: number;
       skippedOfferTooHigh: number;
@@ -476,6 +492,7 @@ export const Logger = {
       console.log(`${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
       console.log(`  Tokens processed:          ${data.tokensProcessed}`);
       console.log(`  NEW bids placed:           ${colors.green}${data.newBidsPlaced}${colors.reset}`);
+      console.log(`  Bids adjusted:             ${colors.blue}${data.bidsAdjusted}${colors.reset}`);
       console.log(`  Already have bids:         ${data.alreadyHaveBids}`);
       console.log(`  No action needed:          ${data.noActionNeeded}`);
       console.log(`  Skipped (offer > max):     ${colors.yellow}${data.skippedOfferTooHigh}${colors.reset}`);

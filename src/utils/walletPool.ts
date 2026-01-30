@@ -49,6 +49,10 @@ class WalletPool {
   private readonly BIDS_PER_MINUTE: number;
   private readonly network: bitcoin.Network;
 
+  // Mutex for wallet selection to prevent race conditions
+  private selectionLock: Promise<void> | null = null;
+  private selectionLockResolver: (() => void) | null = null;
+
   constructor(
     wallets: WalletConfig[],
     bidsPerMinute: number = 5,
@@ -138,8 +142,74 @@ class WalletPool {
   }
 
   /**
+   * Acquire selection lock to prevent race conditions
+   */
+  private async acquireSelectionLock(): Promise<void> {
+    while (this.selectionLock) {
+      await this.selectionLock;
+    }
+    this.selectionLock = new Promise<void>(resolve => {
+      this.selectionLockResolver = resolve;
+    });
+  }
+
+  /**
+   * Release selection lock
+   */
+  private releaseSelectionLock(): void {
+    if (this.selectionLockResolver) {
+      this.selectionLockResolver();
+    }
+    this.selectionLock = null;
+    this.selectionLockResolver = null;
+  }
+
+  /**
    * Get an available wallet using least-recently-used strategy
    * Returns null if all wallets are rate-limited
+   * Uses mutex to prevent race conditions when multiple callers request wallets simultaneously
+   */
+  async getAvailableWalletAsync(): Promise<WalletState | null> {
+    await this.acquireSelectionLock();
+    try {
+      const wallet = this.selectLeastRecentlyUsed();
+
+      if (!wallet) {
+        // Calculate when next wallet will be available
+        let earliestReset = Infinity;
+        for (const w of this.walletList) {
+          const resetTime = w.windowStart + this.RATE_WINDOW_MS;
+          if (resetTime < earliestReset) {
+            earliestReset = resetTime;
+          }
+        }
+        const waitTime = Math.max(0, earliestReset - Date.now());
+        console.log(`[WALLET POOL] All wallets rate-limited. Next available in ${(waitTime / 1000).toFixed(1)}s`);
+        return null;
+      }
+
+      // Pre-increment bid count to "reserve" this wallet
+      // This prevents another caller from selecting the same wallet before recordBid() is called
+      const now = Date.now();
+      if (now - wallet.windowStart >= this.RATE_WINDOW_MS) {
+        wallet.bidCount = 1;
+        wallet.windowStart = now;
+      } else {
+        wallet.bidCount++;
+      }
+      wallet.lastBidTime = now;
+      wallet.isAvailable = wallet.bidCount < this.BIDS_PER_MINUTE;
+
+      return wallet;
+    } finally {
+      this.releaseSelectionLock();
+    }
+  }
+
+  /**
+   * Get an available wallet using least-recently-used strategy (synchronous version)
+   * Returns null if all wallets are rate-limited
+   * WARNING: This version has race condition potential - prefer getAvailableWalletAsync when possible
    */
   getAvailableWallet(): WalletState | null {
     const wallet = this.selectLeastRecentlyUsed();
@@ -184,6 +254,26 @@ class WalletPool {
     wallet.isAvailable = wallet.bidCount < this.BIDS_PER_MINUTE;
 
     console.log(`[WALLET POOL] Recorded bid for "${wallet.config.label}" (${wallet.bidCount}/${this.BIDS_PER_MINUTE} in window)`);
+  }
+
+  /**
+   * Decrement bid count for a wallet when a bid attempt fails.
+   * This reverses the pre-increment done in getAvailableWalletAsync() to prevent
+   * "lost" bid slots when bids fail after wallet reservation.
+   */
+  decrementBidCount(paymentAddress: string): void {
+    const wallet = this.wallets.get(paymentAddress);
+    if (!wallet) {
+      console.warn(`[WALLET POOL] Unknown wallet address for decrement: ${paymentAddress}`);
+      return;
+    }
+
+    // Only decrement if there are bids to decrement
+    if (wallet.bidCount > 0) {
+      wallet.bidCount--;
+      wallet.isAvailable = wallet.bidCount < this.BIDS_PER_MINUTE;
+      console.log(`[WALLET POOL] Decremented bid for "${wallet.config.label}" after failure (${wallet.bidCount}/${this.BIDS_PER_MINUTE} in window)`);
+    }
   }
 
   /**
@@ -246,6 +336,13 @@ class WalletPool {
   }
 
   /**
+   * Get all wallet receive addresses
+   */
+  getAllReceiveAddresses(): string[] {
+    return this.walletList.map(w => w.config.receiveAddress);
+  }
+
+  /**
    * Reset all rate limit windows (useful for testing)
    */
   resetAllWindows(): void {
@@ -300,10 +397,19 @@ export function isWalletPoolInitialized(): boolean {
 }
 
 /**
- * Quick access: Get an available wallet from the pool
+ * Quick access: Get an available wallet from the pool (synchronous)
  */
 export function getAvailableWallet(): WalletState | null {
   return getWalletPool().getAvailableWallet();
+}
+
+/**
+ * Quick access: Get an available wallet from the pool with mutex protection (async)
+ * This version prevents race conditions when multiple callers request wallets simultaneously.
+ * The returned wallet already has its bid count incremented, so no separate recordBid() call is needed.
+ */
+export async function getAvailableWalletAsync(): Promise<WalletState | null> {
+  return getWalletPool().getAvailableWalletAsync();
 }
 
 /**
@@ -311,6 +417,14 @@ export function getAvailableWallet(): WalletState | null {
  */
 export function recordBid(paymentAddress: string): void {
   getWalletPool().recordBid(paymentAddress);
+}
+
+/**
+ * Quick access: Decrement bid count for a wallet after failed bid attempt
+ * Call this when a bid fails after getAvailableWalletAsync() was used
+ */
+export function decrementBidCount(paymentAddress: string): void {
+  getWalletPool().decrementBidCount(paymentAddress);
 }
 
 /**

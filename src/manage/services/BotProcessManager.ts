@@ -67,7 +67,7 @@ export interface BotRuntimeStats {
   bidsTracked: number;
 }
 
-const BOT_STATS_FILE = path.join(process.cwd(), 'botStats.json');
+const BOT_STATS_FILE = path.join(process.cwd(), 'data/botStats.json');
 
 /**
  * Check if the bot is currently running
@@ -289,7 +289,7 @@ export function getStats(): BotStats {
   };
 
   // Try to read bidHistory.json
-  const bidHistoryPath = path.join(process.cwd(), 'bidHistory.json');
+  const bidHistoryPath = path.join(process.cwd(), 'data/bidHistory.json');
   if (fs.existsSync(bidHistoryPath)) {
     try {
       const content = fs.readFileSync(bidHistoryPath, 'utf-8');
@@ -309,7 +309,7 @@ export function getStats(): BotStats {
   }
 
   // Count collections from config
-  const collectionsPath = path.join(process.cwd(), 'src/collections.json');
+  const collectionsPath = path.join(process.cwd(), 'config/collections.json');
   if (fs.existsSync(collectionsPath)) {
     try {
       const content = fs.readFileSync(collectionsPath, 'utf-8');

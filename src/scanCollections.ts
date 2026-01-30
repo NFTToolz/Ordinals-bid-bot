@@ -17,7 +17,7 @@ async function run() {
 
     const collections = await fetchCollections()
 
-    if (collections.length === 0) {
+    if (collections === null || collections.length === 0) {
       console.log("No collections returned. Check API_KEY and network connection.");
       return;
     }
@@ -32,6 +32,10 @@ async function run() {
       const floorPrice = collection.fp
 
       const tokens = await retrieveTokens(collectionSymbol, 100)
+      if (tokens === null) {
+        console.log(`Failed to retrieve tokens for ${collectionSymbol}, skipping`);
+        continue;
+      }
       const scannedTokens = tokens.length
 
       console.log({ collectionSymbol, count });
@@ -108,7 +112,7 @@ async function run() {
       }
       count += 1
       const collectionJSON = JSON.stringify(collectionData, null, 2);
-      const collectionDir = path.join(__dirname, 'collections');
+      const collectionDir = path.join(process.cwd(), 'data/collections');
 
       // Create the directory if it doesn't exist
       if (!fs.existsSync(collectionDir)) {

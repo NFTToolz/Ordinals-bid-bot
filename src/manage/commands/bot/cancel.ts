@@ -36,7 +36,7 @@ const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string;
 const network = bitcoin.networks.bitcoin;
 
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
-const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './src/config/wallets.json';
+const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);

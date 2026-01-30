@@ -68,7 +68,7 @@ export async function createWallets(): Promise<void> {
         return acc;
       }, [] as string[]),
       '',
-      'This will be saved to src/config/wallets.json',
+      'This will be saved to config/wallets.json',
       'Keep a backup in a safe place!',
     ]);
     console.log('');
@@ -134,7 +134,7 @@ export async function createWallets(): Promise<void> {
 
     // Save to config (always includes mnemonic)
     addWalletsToConfig(wallets, mnemonic, encrypt, password);
-    showSuccess('Wallets saved to src/config/wallets.json');
+    showSuccess('Wallets saved to config/wallets.json');
     showSuccess('Mnemonic saved to wallets.json' + (encrypt ? ' (encrypted)' : ''));
 
     console.log('');

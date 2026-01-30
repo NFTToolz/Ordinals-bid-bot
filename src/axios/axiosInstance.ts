@@ -47,6 +47,12 @@ const retryConfig: IAxiosRetryConfig = {
       return true;
     }
 
+    // Retry on server errors (502, 503, 504) - these are usually transient
+    const status = error.response?.status;
+    if (status && [502, 503, 504].includes(status)) {
+      return true;
+    }
+
     // Only retry network errors
     return axiosRetry.isNetworkError(error);
   },

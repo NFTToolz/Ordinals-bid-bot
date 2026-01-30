@@ -32,6 +32,7 @@ export async function cancelCollectionOfferRequest(offerIds: string[], makerPubl
 
   } catch (error: any) {
     Logger.offer.error('cancelCollectionOfferRequest', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
+    return null;
   }
 }
 
@@ -68,6 +69,7 @@ export async function submitCancelCollectionOffer(
 
   } catch (error: any) {
     Logger.offer.error('submitCancelCollectionOffer', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
+    return null;
   }
 }
 
@@ -95,8 +97,14 @@ export async function createCollectionOffer(
   feeSatsPerVbyte: number,
   makerPublicKey: string,
   makerReceiveAddress: string,
-  privateKey: string
+  privateKey: string,
+  maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ) {
+  // Defensive validation - throw error if price exceeds max before any API call
+  if (maxAllowedPrice !== undefined && priceSats > maxAllowedPrice) {
+    throw new Error(`[SAFETY] Collection offer price ${priceSats} sats exceeds maximum allowed ${maxAllowedPrice} sats for ${collectionSymbol}`);
+  }
+
   const params = {
     collectionSymbol,
     quantity: 1,
@@ -108,6 +116,8 @@ export async function createCollectionOffer(
     makerReceiveAddress
   };
   let errorOccurred = false;
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
   do {
     try {
       const url = 'https://nfttools.pro/magiceden/v2/ord/btc/collection-offers/psbt/create'
@@ -115,6 +125,11 @@ export async function createCollectionOffer(
       return data
     } catch (error: any) {
       if (error.response?.data?.error === "Only 1 collection offer allowed per collection.") {
+        retryCount++;
+        if (retryCount >= MAX_RETRIES) {
+          Logger.error(`[COLLECTION OFFER] Max retries (${MAX_RETRIES}) reached for ${collectionSymbol}, aborting`);
+          throw new Error(`Max retries reached for collection offer: ${collectionSymbol}`);
+        }
         await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
         const offerData = await getBestCollectionOffer(collectionSymbol);
 
@@ -162,6 +177,8 @@ export async function submitCollectionOffer(
 
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/collection-offers/psbt/create'
   let errorOccurred = false;
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
   do {
     try {
       const { data: requestData } = await limiter.schedule(() => axiosInstance.post<ISubmitCollectionOfferResponse>(url, data, { headers }))
@@ -170,6 +187,11 @@ export async function submitCollectionOffer(
     } catch (error: any) {
       Logger.offer.error('submitCollectionOffer', collectionSymbol, error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
       if (error.response?.data?.error === "Only 1 collection offer allowed per collection.") {
+        retryCount++;
+        if (retryCount >= MAX_RETRIES) {
+          Logger.error(`[COLLECTION OFFER] Max retries (${MAX_RETRIES}) reached for submit ${collectionSymbol}, aborting`);
+          throw new Error(`Max retries reached for submit collection offer: ${collectionSymbol}`);
+        }
         await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
         const offerData = await getBestCollectionOffer(collectionSymbol);
 
@@ -188,6 +210,9 @@ export async function submitCollectionOffer(
 // sign collection offerData
 
 export function signCollectionOffer(unsignedData: ICollectionOfferResponseData, privateKey: string) {
+  if (!unsignedData?.offers?.length) {
+    throw new Error('No offers returned from API to sign');
+  }
   const offers = unsignedData.offers[0]
   const offerPsbt = bitcoin.Psbt.fromBase64(offers.psbtBase64);
   const keyPair: ECPairInterface = ECPair.fromWIF(privateKey, network)
@@ -239,8 +264,14 @@ export async function createOffer(
   buyerPaymentAddress: string,
   publicKey: string,
   feerateTier: string,
-  sellerReceiveAddress?: string
+  sellerReceiveAddress?: string,
+  maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ) {
+  // Defensive validation - throw error if price exceeds max before any API call
+  if (maxAllowedPrice !== undefined && price > maxAllowedPrice) {
+    throw new Error(`[SAFETY] Bid price ${price} sats exceeds maximum allowed ${maxAllowedPrice} sats for token ${tokenId}`);
+  }
+
   const baseURL = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/create';
   const params = {
     tokenId: tokenId,
@@ -310,17 +341,20 @@ export function signData(unsignedData: any, privateKey: string) {
   }
 }
 
-async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol?: string, tokenId?: string, buyerPaymentAddress?: string) {
+async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol?: string, tokenId?: string, buyerPaymentAddress?: string): Promise<boolean> {
   try {
     const offerFormat = await retrieveCancelOfferFormat(offer.id)
     if (offerFormat) {
       const signedOfferFormat = signData(offerFormat, privateKey)
       if (signedOfferFormat) {
-        await submitCancelOfferData(offer.id, signedOfferFormat)
-
+        const result = await submitCancelOfferData(offer.id, signedOfferFormat)
+        return result === true;
       }
     }
-  } catch (error) {
+    return false;
+  } catch (error: any) {
+    Logger.error(`[CANCEL] Failed to cancel bid ${offer.id}`, error?.message || error);
+    return false;
   }
 }
 
@@ -431,7 +465,9 @@ export async function cancelBulkTokenOffers(tokenIds: string[], buyerTokenReceiv
         }
       }
     }
-  } catch (error) {
+  } catch (error: any) {
+    Logger.error(`[CANCEL BULK] Failed to cancel bulk offers`, error?.message || error);
+    throw error;
   }
 }
 
@@ -474,6 +510,8 @@ export async function retrieveCancelOfferFormat(offerId: string) {
     );
     return data
   } catch (error: any) {
+    Logger.error(`[CANCEL] retrieveCancelOfferFormat error for ${offerId}`, error?.response?.data || error?.message);
+    return null;
   }
 }
 
@@ -487,6 +525,8 @@ export async function submitCancelOfferData(offerId: string, signedPSBTBase64: s
     const response = await limiter.schedule(() => axiosInstance.post(url, data, { headers }))
     return response.data.ok
   } catch (error: any) {
+    Logger.error(`[CANCEL] submitCancelOfferData error for ${offerId}`, error?.response?.data || error?.message);
+    return false;
   }
 }
 
@@ -503,7 +543,9 @@ export async function getUserOffers(buyerPaymentAddress: string) {
 
     const { data } = await limiter.schedule(() => axiosInstance.get<UserOffer>(url, { params, headers }))
     return data
-  } catch (error) {
+  } catch (error: any) {
+    Logger.error(`[OFFERS] getUserOffers error for ${buyerPaymentAddress}`, error?.response?.data || error?.message);
+    return null;
   }
 }
 

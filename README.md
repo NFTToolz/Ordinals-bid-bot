@@ -18,17 +18,86 @@ OR
 
 `yarn scan:collections`
 
-### ACCOUNT MANAGEMENT (coming soon)
+### MANAGEMENT CLI
 
-#### Create Test Wallets
+The bot includes an interactive management console for configuring wallets, collections, and bot operations.
 
-`yarn account:create`
+```bash
+yarn manage
+```
 
-#### Delete Wallets
+#### Menu Structure
 
-`yarn account:destroy`
+The CLI provides four main categories:
 
-#### Create Offers
+| Category | Description |
+|----------|-------------|
+| **WALLETS** | Manage funding wallets and view balances |
+| **COLLECTIONS** | Configure bidding targets |
+| **BOT CONTROL** | Start/stop bot and monitor operations |
+| **SETTINGS** | Configure advanced features |
+
+#### Wallet Commands
+
+| Command | Description |
+|---------|-------------|
+| Create new wallets | Generate new funding wallets for multi-wallet rotation |
+| View wallet balances | Display BTC balance across all configured wallets |
+| View ordinals/NFTs | List ordinals held in wallet addresses |
+| Distribute funds | Send BTC from main wallet to pool wallets |
+| Consolidate funds | Sweep BTC from pool wallets back to main wallet |
+| Export/backup wallets | Export wallet configuration for backup |
+| Import wallets | Import wallets from backup or external source |
+
+#### Collection Commands
+
+| Command | Description |
+|---------|-------------|
+| List collections | View all configured collections and their settings |
+| Add collection | Add a new collection with bidding parameters |
+| Edit collection | Modify settings for an existing collection |
+| Remove collection | Remove a collection from bidding |
+| Scan for opportunities | Find profitable collections based on floor/volume |
+
+#### Bot Control Commands
+
+| Command | Description |
+|---------|-------------|
+| Start bot | Launch the bidding bot in the background |
+| Stop bot | Gracefully stop the running bot |
+| View status & stats | Display bot status, active bids, and statistics |
+| Restart bot | Stop and restart the bot (cancel offers first) |
+| View logs | Tail the bot's log output in real-time |
+| Cancel all offers | Cancel all active offers across collections |
+
+#### Settings Commands
+
+| Command | Description |
+|---------|-------------|
+| Wallet rotation | Configure multi-wallet rotation settings |
+
+#### Typical Workflows
+
+**Initial Setup:**
+1. `yarn manage` → Create new wallets
+2. Fund main wallet with BTC
+3. Distribute funds to pool wallets
+4. Add collections to bid on
+5. Start bot
+
+**Monitoring:**
+1. View status & stats to check active bids
+2. View logs to monitor real-time activity
+3. Check wallet balances periodically
+
+**Troubleshooting:**
+1. View logs to identify issues
+2. Cancel all offers if needed
+3. Restart bot to apply changes
+
+---
+
+### Create Offers
 
 - Set env variables
 
@@ -203,7 +272,7 @@ Magic Eden enforces a rate limit of ~5 bids per minute **per wallet**. With mult
 
 **Step 1: Create wallet configuration file**
 
-Create `src/config/wallets.json` (copy from `wallets.example.json`):
+Create `config/wallets.json` (copy from `wallets.example.json`):
 
 ```json
 {
@@ -246,7 +315,7 @@ Add to your `.env` file:
 ENABLE_WALLET_ROTATION=true
 
 # Path to wallet configuration file
-WALLET_CONFIG_PATH=./src/config/wallets.json
+WALLET_CONFIG_PATH=./config/wallets.json
 
 # Bids per minute PER WALLET (Magic Eden's limit)
 # With 3 wallets at 5 bids/min each = 15 bids/min total

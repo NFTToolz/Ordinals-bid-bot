@@ -19,7 +19,7 @@ const network = bitcoin.networks.bitcoin;
 
 // Multi-wallet rotation configuration
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
-const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './src/config/wallets.json';
+const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 
 // Initialize wallet pool for cancellation lookup
 if (ENABLE_WALLET_ROTATION) {
@@ -37,7 +37,9 @@ if (ENABLE_WALLET_ROTATION) {
 }
 
 
-const filePath = `${__dirname}/collections.json`
+import path from "path"
+
+const filePath = path.join(process.cwd(), 'config/collections.json')
 const collections: CollectionData[] = JSON.parse(fs.readFileSync(filePath, "utf-8"))
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
@@ -140,7 +142,11 @@ async function cancelCollectionOffers() {
       const publicKey = keyPair.publicKey.toString('hex');
 
       const bestOffers = await getBestCollectionOffer(item.collectionSymbol);
-      const ourOffers = bestOffers?.offers.find((offer) =>
+      if (!bestOffers?.offers?.length) {
+        console.log(`No collection offers found for ${item.collectionSymbol}`);
+        continue;
+      }
+      const ourOffers = bestOffers.offers.find((offer) =>
         offer.btcParams.makerOrdinalReceiveAddress.toLowerCase() === buyerTokenReceiveAddress.toLowerCase()
       ) as ICollectionOffer;
 
