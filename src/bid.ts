@@ -235,6 +235,43 @@ function initBidHistory(collectionSymbol: string, offerType: 'ITEM' | 'COLLECTIO
   }
 }
 
+/**
+ * Load bid history from persisted file on startup.
+ * Primarily used to restore quantity values to prevent exceeding limits after restart.
+ */
+function loadBidHistoryFromFile(): void {
+  const filePath = path.join(DATA_DIR, 'bidHistory.json');
+  try {
+    if (fs.existsSync(filePath)) {
+      const fileContent = fs.readFileSync(filePath, 'utf-8');
+      const savedHistory = JSON.parse(fileContent);
+
+      // Restore quantity values for collections that are still in config
+      const activeCollectionSymbols = new Set(collections.map(c => c.collectionSymbol));
+      let restoredCount = 0;
+
+      for (const collectionSymbol in savedHistory) {
+        if (activeCollectionSymbols.has(collectionSymbol)) {
+          const savedQuantity = savedHistory[collectionSymbol]?.quantity;
+          if (typeof savedQuantity === 'number' && savedQuantity > 0) {
+            const matchedCollection = collections.find(c => c.collectionSymbol === collectionSymbol);
+            initBidHistory(collectionSymbol, matchedCollection?.offerType ?? "ITEM");
+            bidHistory[collectionSymbol].quantity = savedQuantity;
+            restoredCount++;
+            Logger.info(`[STARTUP] Restored quantity for ${collectionSymbol}: ${savedQuantity}`);
+          }
+        }
+      }
+
+      if (restoredCount > 0) {
+        Logger.info(`[STARTUP] Restored quantity values for ${restoredCount} collection(s)`);
+      }
+    }
+  } catch (error: any) {
+    Logger.warning(`[STARTUP] Could not load bid history: ${error?.message || error}`);
+  }
+}
+
 // Wallet credentials interface for wallet rotation
 interface WalletCredentials {
   buyerPaymentAddress: string;
@@ -546,6 +583,11 @@ class EventManager {
                 // Use actual top offer price instead of WebSocket event price
                 const actualTopPrice = topOffer.price;
                 if (actualTopPrice !== verifiedOfferPrice) {
+                  // If actual price is lower than WebSocket price, offer was withdrawn/reduced - skip
+                  if (actualTopPrice < verifiedOfferPrice) {
+                    Logger.info(`[WS] ${tokenId.slice(-8)}: Offer reduced/withdrawn (WS: ${verifiedOfferPrice}, actual: ${actualTopPrice}), skipping`);
+                    return;
+                  }
                   Logger.info(`[WS] ${tokenId.slice(-8)}: WebSocket stale (${verifiedOfferPrice}), using actual top ${actualTopPrice}`);
                   verifiedOfferPrice = actualTopPrice;
                 }
@@ -684,7 +726,12 @@ class EventManager {
 
             if (ourOffer) {
               const offerIds = [ourOffer.id]
-              await cancelCollectionOffer(offerIds, publicKey, privateKey)
+              const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+              if (!cancelled) {
+                Logger.error(`[WS] Failed to cancel existing collection offer for ${collectionSymbol}, aborting counter-bid`);
+                releaseTokenLock(collectionSymbol);
+                return;
+              }
             }
             const feeSatsPerVbyte = collection.feeSatsPerVbyte || 28
             try {
@@ -990,7 +1037,7 @@ class EventManager {
                 }
 
                 const bestOffer = await getBestOffer(tokenId);
-                const ourExistingOffer = bidHistory[collectionSymbol]?.ourBids?.[tokenId]?.expiration > Date.now()
+                const ourExistingOffer = (bidHistory[collectionSymbol]?.ourBids?.[tokenId]?.expiration ?? 0) > Date.now()
 
                 const currentExpiry = bidHistory[collectionSymbol]?.ourBids?.[tokenId]?.expiration
               const newExpiry = duration * 60 * 1000
@@ -998,7 +1045,7 @@ class EventManager {
               const offer = offerData?.offers.filter((item) => item.buyerPaymentAddress === buyerPaymentAddress)
 
               if (currentExpiry && (currentExpiry - Date.now()) > newExpiry) {
-                if (offer) {
+                if (offer && offer.length > 0) {
                   // Memory leak fix: Use Promise.all instead of forEach for async operations
                   await Promise.all(offer.map(async (item) => {
                     const cancelled = await cancelBid(
@@ -1119,11 +1166,6 @@ class EventManager {
                     Logger.bidSkipped(collectionSymbol, tokenId, 'Calculated bid exceeds maxBid', bidPrice, bidPrice, maxOffer);
                   }
                 }
-              }
-              // Catch-all for unhandled paths in !ourExistingOffer block
-              else if (!ourExistingOffer) {
-                unhandledPath++;
-                Logger.warning(`Token ${tokenId.slice(-8)}: No existing offer but didn't match any bid placement condition`);
               }
 
               /**
@@ -1577,6 +1619,9 @@ async function startProcessing() {
     collections.map(item => startCollectionMonitoring(item))
   );
 }
+
+// Load persisted bid history (for quantity restoration after restart)
+loadBidHistoryFromFile();
 
 // Initialize bid pacer for rate limiting (5 bids/min by default)
 initializeBidPacer(BIDS_PER_MINUTE);
@@ -2130,6 +2175,7 @@ async function placeBidWithRotation(
     } else {
       // Bid failed - decrement the pre-incremented wallet bid count to recover the slot
       // This prevents "lost" bid slots when bids fail after wallet reservation
+      // Note: We use buyerPaymentAddress (not walletLabel) because the wallet pool indexes by payment address
       if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized() && walletLabel) {
         decrementWalletBidCount(buyerPaymentAddress);
       }
@@ -2142,6 +2188,7 @@ async function placeBidWithRotation(
     };
   } catch (error: any) {
     // Bid failed due to exception - decrement the pre-incremented wallet bid count
+    // Note: We use buyerPaymentAddress (not walletLabel) because the wallet pool indexes by payment address
     if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized() && walletLabel) {
       decrementWalletBidCount(buyerPaymentAddress);
     }
@@ -2254,23 +2301,28 @@ async function placeCollectionBid(
   privateKey: string,
   feeSatsPerVbyte: number = 28,
   maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
-) {
-  const priceSats = Math.ceil(offerPrice)
-  const expirationAt = new Date(expiration).toISOString();
+): Promise<boolean> {
+  try {
+    const priceSats = Math.ceil(offerPrice)
+    const expirationAt = new Date(expiration).toISOString();
 
-  if (offerPrice > Number(balance)) {
-    Logger.warning(`Insufficient BTC to place bid for ${collectionSymbol}. Balance: ${balance}, Required: ${offerPrice / 1e8} BTC`);
-    return
+    if (offerPrice > Number(balance)) {
+      Logger.warning(`Insufficient BTC to place bid for ${collectionSymbol}. Balance: ${balance}, Required: ${offerPrice / 1e8} BTC`);
+      return false;
+    }
+
+    const unsignedCollectionOffer = await createCollectionOffer(collectionSymbol, priceSats, expirationAt, feeSatsPerVbyte, publicKey, buyerTokenReceiveAddress, privateKey, maxAllowedPrice)
+
+    if (unsignedCollectionOffer) {
+      const { signedOfferPSBTBase64, signedCancelledPSBTBase64 } = signCollectionOffer(unsignedCollectionOffer, privateKey)
+      await submitCollectionOffer(signedOfferPSBTBase64, collectionSymbol, priceSats, expirationAt, publicKey, buyerTokenReceiveAddress, privateKey, signedCancelledPSBTBase64)
+      return true;
+    }
+    return false;
+  } catch (error: any) {
+    Logger.error(`[COLLECTION BID] Failed to place collection bid for ${collectionSymbol}`, error?.message || error);
+    return false;
   }
-
-  const unsignedCollectionOffer = await createCollectionOffer(collectionSymbol, priceSats, expirationAt, feeSatsPerVbyte, publicKey, buyerTokenReceiveAddress, privateKey, maxAllowedPrice)
-
-
-  if (unsignedCollectionOffer) {
-    const { signedOfferPSBTBase64, signedCancelledPSBTBase64 } = signCollectionOffer(unsignedCollectionOffer, privateKey)
-    await submitCollectionOffer(signedOfferPSBTBase64, collectionSymbol, priceSats, expirationAt, publicKey, buyerTokenReceiveAddress, privateKey, signedCancelledPSBTBase64)
-  }
-
 }
 
 function isValidJSON(str: string) {

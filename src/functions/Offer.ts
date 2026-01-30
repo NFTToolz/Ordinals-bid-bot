@@ -77,16 +77,19 @@ export async function cancelCollectionOffer(
   offerIds: string[],
   makerPublicKey: string,
   privateKey: string
-) {
+): Promise<boolean> {
   try {
     const unsignedData = await cancelCollectionOfferRequest(offerIds, makerPublicKey)
 
     if (unsignedData) {
       const signedData = signCancelCollectionOfferRequest(unsignedData, privateKey)
-      await submitCancelCollectionOffer(offerIds, makerPublicKey, signedData)
+      const result = await submitCancelCollectionOffer(offerIds, makerPublicKey, signedData)
+      return result !== null;
     }
+    return false;
   } catch (error: any) {
     Logger.offer.error('cancelCollectionOffer', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
+    return false;
   }
 }
 
@@ -385,6 +388,8 @@ export async function submitSignedOfferOrder(
   };
 
   let errorOccurred = false;
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
 
   do {
     try {
@@ -392,6 +397,11 @@ export async function submitSignedOfferOrder(
       return response.data;
     } catch (error: any) {
       if (error.response?.data?.error === "You already have an offer for this token") {
+        retryCount++;
+        if (retryCount >= MAX_RETRIES) {
+          Logger.error(`[OFFER] Max retries (${MAX_RETRIES}) reached for submitSignedOfferOrder token ${tokenId}, aborting`);
+          throw new Error(`Max retries reached for submitSignedOfferOrder: ${tokenId}`);
+        }
         await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
         const offerData = await getOffers(tokenId, buyerReceiveAddress);
         if (offerData && offerData.offers.length > 0) {
