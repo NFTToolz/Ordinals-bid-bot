@@ -401,6 +401,42 @@ When using multiple wallets, you can route all won ordinals to a single address:
 
 When enabled, all wallets send won NFTs to `TOKEN_RECEIVE_ADDRESS` instead of their individual addresses.
 
+#### Wallet Groups
+
+Wallet groups let you create isolated wallet pools for different collections. Each group has its own set of wallets and independent rate limits, preventing high-volume collections from exhausting wallets needed by others.
+
+**Config structure (`config/wallets.json`):**
+
+```json
+{
+  "groups": {
+    "default": {
+      "wallets": [],
+      "bidsPerMinute": 5
+    },
+    "high-value": {
+      "wallets": [
+        {
+          "label": "hv-wallet-1",
+          "wif": "your-private-key-wif",
+          "receiveAddress": "bc1p..."
+        }
+      ],
+      "bidsPerMinute": 5
+    }
+  },
+  "defaultGroup": "default"
+}
+```
+
+**Setup steps:**
+
+1. **Create a group:** `yarn manage` → Wallet Groups → Create wallet group
+2. **Add wallets:** Select the group → Add wallets (generate new, import WIF, or move from existing pool)
+3. **Assign to collection:** Collections → Assign to wallet group → Select collection → Choose group
+
+**Funding:** Use "Rebalance group" from the Wallet Groups menu to automatically distribute BTC across wallets based on the assigned collection's `maxBid` setting. This ensures each wallet has sufficient funds for bidding.
+
 #### Bulk cancel offers
 
 `yarn cancel`
