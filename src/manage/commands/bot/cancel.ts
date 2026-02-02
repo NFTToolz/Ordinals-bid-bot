@@ -123,14 +123,12 @@ async function cancelBid(
   try {
     const offerFormat = await retrieveCancelOfferFormat(offer.id);
     const signedOfferFormat = signData(offerFormat, signingKey);
-    if (signedOfferFormat) {
-      await submitCancelOfferData(offer.id, signedOfferFormat);
-      return true;
-    }
+    await submitCancelOfferData(offer.id, signedOfferFormat);
+    return true;
   } catch (error) {
-    // Failed to cancel
+    // Failed to cancel - error already logged by signData or submitCancelOfferData
+    return false;
   }
-  return false;
 }
 
 async function cancelAllItemOffers(
@@ -144,7 +142,7 @@ async function cancelAllItemOffers(
       const offerData = await getUserOffers(addr.address);
       const offers = offerData?.offers;
 
-      if (offers && offers.length > 0) {
+      if (Array.isArray(offers) && offers.length > 0) {
         const cancelOps = offers.map((offer: IOffer) =>
           cancelBid(offer, addr.privateKey, addr.paymentAddress)
         );
@@ -152,8 +150,10 @@ async function cancelAllItemOffers(
         const results = await Promise.all(cancelOps);
         canceled += results.filter(Boolean).length;
       }
-    } catch (error: any) {
-      errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${errorMessage}`);
+      // Continue with next address instead of stopping
     }
   }
 
@@ -184,7 +184,7 @@ async function cancelAllCollectionOffers(
 
       try {
         const bestOffers = await getBestCollectionOffer(item.collectionSymbol);
-        const ourOffer = bestOffers?.offers.find(
+        const ourOffer = bestOffers?.offers?.find(
           (offer: ICollectionOffer) =>
             offer.btcParams.makerOrdinalReceiveAddress.toLowerCase() ===
             buyerTokenReceiveAddress.toLowerCase()

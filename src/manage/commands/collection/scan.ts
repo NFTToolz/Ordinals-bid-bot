@@ -18,7 +18,11 @@ export async function scanCollections(): Promise<void> {
   showSectionHeader('SCAN FOR OPPORTUNITIES');
 
   // Get minimum volume filter
-  const minVolume = await promptNumber('Minimum 24h volume (BTC):', 0.1);
+  const minVolume = await promptNumber('Minimum 24h volume in BTC (0 to cancel):', 0.1);
+
+  if (minVolume <= 0) {
+    return;
+  }
 
   console.log('');
   console.log('Scanning Magic Eden for collections...');

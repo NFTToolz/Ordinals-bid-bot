@@ -1,5 +1,53 @@
 import chalk = require('chalk');
 
+// Cache the header width to ensure consistency between header and status bar
+let cachedHeaderWidth: number | null = null;
+
+/**
+ * Get the terminal width, clamped between min and max values
+ */
+export function getTerminalWidth(minWidth = 70, maxWidth = 150): number {
+  const cols = process.stdout.columns || 80;
+  return Math.min(Math.max(cols, minWidth), maxWidth);
+}
+
+/**
+ * Get the width for the header/status bar box
+ * Cached to ensure header and status bar use the same width
+ * Uses a fixed width of 69 to avoid line-wrapping issues with Unicode characters
+ */
+export function getHeaderWidth(): number {
+  if (cachedHeaderWidth === null) {
+    // Fixed width of 69 - just enough for the ASCII art content (64 chars)
+    // plus borders and minimal padding. This avoids wrapping issues.
+    cachedHeaderWidth = 69;
+  }
+  return cachedHeaderWidth;
+}
+
+/**
+ * Reset the cached header width (call when terminal might have resized)
+ */
+export function resetHeaderWidth(): void {
+  cachedHeaderWidth = null;
+}
+
+/**
+ * Get width for separator lines (terminal width minus margin)
+ */
+export function getSeparatorWidth(): number {
+  // Leave 4 chars margin for clean appearance
+  return getTerminalWidth(50, 120) - 4;
+}
+
+/**
+ * Calculate the visual display width of a string
+ * Most terminals render these characters as single-width
+ */
+export function getDisplayWidth(str: string): number {
+  return str.length;
+}
+
 // ASCII box characters
 const BOX = {
   topLeft: '╔',
@@ -13,15 +61,75 @@ const BOX = {
 };
 
 /**
- * Display the main header with ASCII art box
+ * Display the main header with fancy ASCII art banner
+ * Width dynamically matches terminal size for alignment with status bar
  */
 export function showHeader(): void {
-  const width = 65;
-  const title = 'ORDINALS BID BOT - MANAGEMENT CONSOLE';
-  const padding = Math.floor((width - title.length - 2) / 2);
+  // Reset and recalculate width at the start of each header display
+  resetHeaderWidth();
+  const width = getHeaderWidth();
 
+  // ASCII art for "ORDINALS"
+  const ordinals = [
+    ' ██████╗ ██████╗ ██████╗ ██╗███╗   ██╗ █████╗ ██╗     ███████╗',
+    '██╔═══██╗██╔══██╗██╔══██╗██║████╗  ██║██╔══██╗██║     ██╔════╝',
+    '██║   ██║██████╔╝██║  ██║██║██╔██╗ ██║███████║██║     ███████╗',
+    '██║   ██║██╔══██╗██║  ██║██║██║╚██╗██║██╔══██║██║     ╚════██║',
+    '╚██████╔╝██║  ██║██████╔╝██║██║ ╚████║██║  ██║███████╗███████║',
+    ' ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚══════╝',
+  ];
+
+  // ASCII art for "BID BOT"
+  const bidbot = [
+    '        ██████╗ ██╗██████╗     ██████╗  ██████╗ ████████╗',
+    '        ██╔══██╗██║██╔══██╗    ██╔══██╗██╔═══██╗╚══██╔══╝',
+    '        ██████╔╝██║██║  ██║    ██████╔╝██║   ██║   ██║   ',
+    '        ██╔══██╗██║██║  ██║    ██╔══██╗██║   ██║   ██║   ',
+    '        ██████╔╝██║██████╔╝    ██████╔╝╚██████╔╝   ██║   ',
+    '        ╚═════╝ ╚═╝╚═════╝     ╚═════╝  ╚═════╝    ╚═╝   ',
+  ];
+
+  const subtitle = 'Management Console';
+
+  // Top border
   console.log(chalk.cyan(BOX.topLeft + BOX.horizontal.repeat(width - 2) + BOX.topRight));
-  console.log(chalk.cyan(BOX.vertical) + ' '.repeat(padding) + chalk.bold.white(title) + ' '.repeat(width - padding - title.length - 2) + chalk.cyan(BOX.vertical));
+
+  // Empty line
+  console.log(chalk.cyan(BOX.vertical) + ' '.repeat(width - 2) + chalk.cyan(BOX.vertical));
+
+  // ORDINALS ASCII art
+  for (const line of ordinals) {
+    const displayWidth = getDisplayWidth(line);
+    const padding = Math.floor((width - 2 - displayWidth) / 2);
+    const rightPadding = width - 2 - padding - displayWidth;
+    console.log(chalk.cyan(BOX.vertical) + ' '.repeat(Math.max(0, padding)) + chalk.bold.cyan(line) + ' '.repeat(Math.max(0, rightPadding)) + chalk.cyan(BOX.vertical));
+  }
+
+  // Empty line between words
+  console.log(chalk.cyan(BOX.vertical) + ' '.repeat(width - 2) + chalk.cyan(BOX.vertical));
+
+  // BID BOT ASCII art
+  for (const line of bidbot) {
+    const displayWidth = getDisplayWidth(line);
+    const padding = Math.floor((width - 2 - displayWidth) / 2);
+    const rightPadding = width - 2 - padding - displayWidth;
+    console.log(chalk.cyan(BOX.vertical) + ' '.repeat(Math.max(0, padding)) + chalk.bold.white(line) + ' '.repeat(Math.max(0, rightPadding)) + chalk.cyan(BOX.vertical));
+  }
+
+  // Empty line
+  console.log(chalk.cyan(BOX.vertical) + ' '.repeat(width - 2) + chalk.cyan(BOX.vertical));
+
+  // Subtitle with dashes (ASCII-safe, renders consistently as single-width)
+  const subtitleLine = `- ${subtitle} -`;
+  const subtitleDisplayWidth = getDisplayWidth(subtitleLine);
+  const subtitlePadding = Math.floor((width - 2 - subtitleDisplayWidth) / 2);
+  const subtitleRightPadding = width - 2 - subtitlePadding - subtitleDisplayWidth;
+  console.log(chalk.cyan(BOX.vertical) + ' '.repeat(Math.max(0, subtitlePadding)) + chalk.yellow(subtitleLine) + ' '.repeat(Math.max(0, subtitleRightPadding)) + chalk.cyan(BOX.vertical));
+
+  // Empty line
+  console.log(chalk.cyan(BOX.vertical) + ' '.repeat(width - 2) + chalk.cyan(BOX.vertical));
+
+  // Bottom border (middle style to connect to status bar)
   console.log(chalk.cyan(BOX.middleLeft + BOX.horizontal.repeat(width - 2) + BOX.middleRight));
 }
 
@@ -29,7 +137,7 @@ export function showHeader(): void {
  * Display status bar with bot state, wallet count, and collection count
  */
 export function showStatusBar(botStatus: 'RUNNING' | 'STOPPED', walletCount: number, collectionCount: number): void {
-  const width = 65;
+  const width = getHeaderWidth();
   const statusIcon = botStatus === 'RUNNING' ? chalk.green('●') : chalk.red('●');
   const statusText = botStatus === 'RUNNING' ? chalk.green('RUNNING') : chalk.red('STOPPED');
 
@@ -41,14 +149,74 @@ export function showStatusBar(botStatus: 'RUNNING' | 'STOPPED', walletCount: num
   console.log('');
 }
 
+export interface EnhancedStatusData {
+  botStatus: 'RUNNING' | 'STOPPED';
+  walletCount: number;
+  collectionCount: number;
+  totalBalance: number;
+  activeOfferCount: number;
+  pendingTxCount: number;
+}
+
+/**
+ * Display enhanced status bar with two rows of information
+ */
+export function showEnhancedStatusBar(status: EnhancedStatusData): void {
+  const width = getHeaderWidth();
+  const statusIcon = status.botStatus === 'RUNNING' ? chalk.green('●') : chalk.red('●');
+  const statusText = status.botStatus === 'RUNNING' ? chalk.green('RUNNING') : chalk.red('STOPPED');
+
+  // First row: Bot status, wallets, collections
+  const line1 = `  Bot: ${statusIcon} ${statusText}    Wallets: ${status.walletCount}     Collections: ${status.collectionCount}`;
+  const padding1 = width - stripAnsi(line1).length - 2;
+
+  // Second row: Balance, offers, pending
+  const balanceStr = formatBTC(status.totalBalance);
+  const line2 = `  Balance: ${balanceStr}    Offers: ${status.activeOfferCount}    Pending: ${status.pendingTxCount}`;
+  const padding2 = width - stripAnsi(line2).length - 2;
+
+  console.log(chalk.cyan(BOX.vertical) + line1 + ' '.repeat(Math.max(0, padding1)) + chalk.cyan(BOX.vertical));
+  console.log(chalk.cyan(BOX.vertical) + line2 + ' '.repeat(Math.max(0, padding2)) + chalk.cyan(BOX.vertical));
+  console.log(chalk.cyan(BOX.bottomLeft + BOX.horizontal.repeat(width - 2) + BOX.bottomRight));
+  console.log('');
+}
+
+export type MenuLevel = 'main' | 'wallets' | 'wallet-groups' | 'collections' | 'bot' | 'settings';
+
+const MENU_LABELS: Record<MenuLevel, string> = {
+  'main': 'Main Menu',
+  'wallets': 'Wallets',
+  'wallet-groups': 'Wallet Groups',
+  'collections': 'Collections',
+  'bot': 'Bot Control',
+  'settings': 'Settings',
+};
+
+/**
+ * Display breadcrumb navigation showing current menu location
+ */
+export function showBreadcrumb(levels: MenuLevel[]): void {
+  const breadcrumb = levels.map((level, i) => {
+    const label = MENU_LABELS[level];
+    if (i === levels.length - 1) {
+      return chalk.bold.white(label);
+    }
+    return chalk.dim(label);
+  }).join(chalk.dim(' > '));
+
+  console.log(chalk.dim('  ') + breadcrumb);
+  console.log('');
+}
+
 /**
  * Display a section header
  */
-export function showSectionHeader(title: string): void {
+export function showSectionHeader(title: string, width?: number): void {
+  const separatorWidth = width ?? getSeparatorWidth();
   console.log('');
-  console.log(chalk.dim('━'.repeat(50)));
+  console.log(chalk.dim('━'.repeat(separatorWidth)));
   console.log(chalk.bold(`  ${title}`));
-  console.log(chalk.dim('━'.repeat(50)));
+  console.log(chalk.dim('━'.repeat(separatorWidth)));
   console.log('');
 }
 
@@ -151,7 +319,7 @@ export function formatAddress(address: string, length: number = 8): string {
 /**
  * Strip ANSI codes from string for length calculation
  */
-function stripAnsi(str: string): string {
+export function stripAnsi(str: string): string {
   return str.replace(/\x1b\[[0-9;]*m/g, '');
 }
 

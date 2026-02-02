@@ -1,5 +1,6 @@
 import axiosInstance from "../axios/axiosInstance"
 import limiter from "../bottleneck";
+import Logger from "../utils/logger";
 
 const API_KEY = process.env.API_KEY as string;
 const headers = {
@@ -7,6 +8,11 @@ const headers = {
   'X-NFT-API-Key': API_KEY,
 }
 
+/**
+ * Fetch collection details from API.
+ * @throws Error on API failure (network error, server error, etc.)
+ * @returns CollectionData on success, null if collection doesn't exist (404)
+ */
 export async function collectionDetails(collectionSymbol: string): Promise<CollectionData | null> {
   try {
     const url = `https://nfttools.pro/magiceden/v2/ord/btc/stat?collectionSymbol=${collectionSymbol}`
@@ -15,8 +21,13 @@ export async function collectionDetails(collectionSymbol: string): Promise<Colle
     return data
 
   } catch (error: any) {
-    console.error(`[COLLECTION] collectionDetails error for ${collectionSymbol}:`, error?.response?.data || error?.message);
-    return null;
+    // 404 means collection doesn't exist - return null (not an error)
+    if (error?.response?.status === 404) {
+      return null;
+    }
+    // All other errors should be thrown so callers know the API failed
+    Logger.error(`[COLLECTION] collectionDetails error for ${collectionSymbol}`, error?.response?.data || error?.message);
+    throw error;
   }
 }
 
@@ -31,6 +42,11 @@ interface CollectionData {
   inscriptionNumberMax: string;
   symbol: string;
 }
+/**
+ * Fetch list of collections from API.
+ * @throws Error on API failure
+ * @returns Collection data array on success
+ */
 export async function fetchCollections() {
   try {
     const url = 'https://nfttools.pro/magiceden_stats/collection_stats/search/bitcoin';
@@ -52,8 +68,8 @@ export async function fetchCollections() {
     const { data: collections } = await limiter.schedule(() => axiosInstance.get(url, { params, headers }))
     return collections
   } catch (error: any) {
-    console.log("fetchCollectionsError: ", error.response?.data || error.message);
-    return null;
+    Logger.error("[COLLECTION] fetchCollections error", error.response?.data || error.message);
+    throw error;
   }
 }
 

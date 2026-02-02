@@ -1,7 +1,7 @@
 import { config } from 'dotenv';
 import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
-import { loadWallets, getWalletFromWIF } from '../../services/WalletGenerator';
+import { loadWallets, getWalletFromWIF, isGroupsFormat, getAllWalletsFromGroups } from '../../services/WalletGenerator';
 import { getBalance, getFeeRates, AddressBalance } from '../../services/BalanceService';
 import {
   buildDistributionTransaction,
@@ -62,8 +62,16 @@ export async function distributeFunds(): Promise<void> {
   }
 
   // Get destination wallets
-  const walletsConfig = loadWallets();
-  if (!walletsConfig || walletsConfig.wallets.length === 0) {
+  const walletsData = loadWallets();
+  let walletCount = 0;
+  if (walletsData) {
+    if (isGroupsFormat(walletsData)) {
+      walletCount = getAllWalletsFromGroups().length;
+    } else if (walletsData.wallets?.length) {
+      walletCount = walletsData.wallets.length;
+    }
+  }
+  if (walletCount === 0) {
     showError('No destination wallets found');
     console.log('');
     console.log('Use "Create new wallets" to generate bidding wallets first.');
@@ -87,13 +95,18 @@ export async function distributeFunds(): Promise<void> {
   console.log('');
 
   // Distribution method
-  const method = await promptSelect<'equal' | 'custom'>(
+  const method = await promptSelect<'equal' | 'custom' | '__cancel__'>(
     'Distribution method:',
     [
       { name: 'Equal split', value: 'equal' },
       { name: 'Custom amounts per wallet', value: 'custom' },
+      { name: '← Back', value: '__cancel__' },
     ]
   );
+
+  if (method === '__cancel__') {
+    return;
+  }
 
   let recipients: TransactionRecipient[] = [];
   let totalAmount = 0;

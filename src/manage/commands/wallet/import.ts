@@ -4,6 +4,8 @@ import {
   saveWallets,
   importWalletsFromBackup,
   WalletsFile,
+  isGroupsFormat,
+  getAllWalletsFromGroups,
 } from '../../services/WalletGenerator';
 import {
   showSectionHeader,
@@ -23,7 +25,11 @@ export async function importWalletsCommand(): Promise<void> {
   showSectionHeader('IMPORT WALLETS');
 
   // Get import path
-  const importPath = await promptText('Path to backup file:');
+  const importPath = await promptText('Path to backup file (empty to cancel):');
+
+  if (!importPath.trim()) {
+    return;
+  }
 
   if (!fs.existsSync(importPath)) {
     showError('File not found');
@@ -68,9 +74,19 @@ export async function importWalletsCommand(): Promise<void> {
   // Check for existing wallets
   const existing = loadWallets();
 
-  if (existing && existing.wallets.length > 0) {
+  // Get existing wallets from either format
+  let existingWallets: Array<{ label: string; wif: string; receiveAddress: string }> = [];
+  if (existing) {
+    if (isGroupsFormat(existing)) {
+      existingWallets = getAllWalletsFromGroups();
+    } else if (existing.wallets?.length) {
+      existingWallets = existing.wallets;
+    }
+  }
+
+  if (existingWallets.length > 0) {
     console.log('');
-    showWarning(`You have ${existing.wallets.length} existing wallet(s)`);
+    showWarning(`You have ${existingWallets.length} existing wallet(s)`);
     console.log('');
 
     const action = await promptSelect<'merge' | 'replace' | 'cancel'>(
@@ -89,7 +105,7 @@ export async function importWalletsCommand(): Promise<void> {
 
     if (action === 'merge') {
       // Merge wallets
-      const mergedWallets = [...existing.wallets];
+      const mergedWallets = [...existingWallets];
 
       imported.wallets.forEach(importedWallet => {
         const exists = mergedWallets.some(
@@ -102,15 +118,14 @@ export async function importWalletsCommand(): Promise<void> {
       });
 
       const merged: WalletsFile = {
-        ...existing,
         wallets: mergedWallets,
-        mnemonic: imported.mnemonic || existing.mnemonic,
-        encryptedMnemonic: imported.encryptedMnemonic || existing.encryptedMnemonic,
+        mnemonic: imported.mnemonic || existing?.mnemonic,
+        encryptedMnemonic: imported.encryptedMnemonic || existing?.encryptedMnemonic,
       };
 
       saveWallets(merged);
 
-      const newCount = mergedWallets.length - existing.wallets.length;
+      const newCount = mergedWallets.length - existingWallets.length;
       showSuccess(`Import complete! Added ${newCount} new wallet(s).`);
       console.log(`Total wallets: ${mergedWallets.length}`);
     } else {

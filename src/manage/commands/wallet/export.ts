@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { loadWallets, exportWallets } from '../../services/WalletGenerator';
+import { loadWallets, exportWallets, isGroupsFormat, getAllWalletsFromGroups } from '../../services/WalletGenerator';
 import {
   showSectionHeader,
   showSuccess,
@@ -16,19 +16,31 @@ import {
 export async function exportWalletsCommand(): Promise<void> {
   showSectionHeader('EXPORT/BACKUP WALLETS');
 
-  const walletsConfig = loadWallets();
+  const walletsData = loadWallets();
+  let walletCount = 0;
+  if (walletsData) {
+    if (isGroupsFormat(walletsData)) {
+      walletCount = getAllWalletsFromGroups().length;
+    } else if (walletsData.wallets?.length) {
+      walletCount = walletsData.wallets.length;
+    }
+  }
 
-  if (!walletsConfig || walletsConfig.wallets.length === 0) {
+  if (walletCount === 0) {
     showError('No wallets found to export');
     return;
   }
 
-  console.log(`Found ${walletsConfig.wallets.length} wallet(s) to export.`);
+  console.log(`Found ${walletCount} wallet(s) to export.`);
   console.log('');
 
   // Get export path
   const defaultPath = path.join(process.cwd(), 'wallets-backup.enc');
-  const exportPath = await promptText('Export file path:', defaultPath);
+  const exportPath = await promptText('Export file path (empty to cancel):', defaultPath);
+
+  if (!exportPath.trim()) {
+    return;
+  }
 
   // Check if file exists
   if (fs.existsSync(exportPath)) {
@@ -62,8 +74,8 @@ export async function exportWalletsCommand(): Promise<void> {
       showSuccess(`Wallets exported to: ${exportPath}`);
       console.log('');
       console.log('This file contains:');
-      console.log(`  • ${walletsConfig.wallets.length} wallet(s)`);
-      if (walletsConfig.mnemonic || walletsConfig.encryptedMnemonic) {
+      console.log(`  • ${walletCount} wallet(s)`);
+      if (walletsData && (walletsData.mnemonic || walletsData.encryptedMnemonic)) {
         console.log('  • Master mnemonic (for wallet recovery)');
       }
       console.log('');

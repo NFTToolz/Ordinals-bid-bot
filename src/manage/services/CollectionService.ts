@@ -22,6 +22,7 @@ export interface CollectionConfig {
   traits?: Array<{ traitType: string; value: string }>;
   fundingWalletWIF?: string;
   tokenReceiveAddress?: string;
+  walletGroup?: string;  // Wallet group to use for this collection
 }
 
 export interface CollectionInfo {
@@ -296,8 +297,8 @@ export async function getPopularCollections(limit: number = 20): Promise<Collect
 /**
  * Create default collection config
  */
-export function createDefaultConfig(symbol: string, floorPrice: number = 0): CollectionConfig {
-  return {
+export function createDefaultConfig(symbol: string, floorPrice: number = 0, walletGroup?: string): CollectionConfig {
+  const config: CollectionConfig = {
     collectionSymbol: symbol,
     minBid: 0.0001,
     maxBid: floorPrice > 0 ? (floorPrice / 1e8) * 0.95 : 0.01,
@@ -312,4 +313,33 @@ export function createDefaultConfig(symbol: string, floorPrice: number = 0): Col
     quantity: 1,
     feeSatsPerVbyte: 28,
   };
+
+  if (walletGroup) {
+    config.walletGroup = walletGroup;
+  }
+
+  return config;
+}
+
+/**
+ * Assign a wallet group to a collection
+ */
+export function assignWalletGroup(symbol: string, walletGroup: string): boolean {
+  return updateCollection(symbol, { walletGroup });
+}
+
+/**
+ * Get collections without wallet group assigned
+ */
+export function getCollectionsWithoutGroup(): CollectionConfig[] {
+  const collections = loadCollections();
+  return collections.filter(c => !c.walletGroup);
+}
+
+/**
+ * Get collections assigned to a specific wallet group
+ */
+export function getCollectionsByGroup(walletGroup: string): CollectionConfig[] {
+  const collections = loadCollections();
+  return collections.filter(c => c.walletGroup === walletGroup);
 }

@@ -10,6 +10,14 @@ import {
   isWalletPoolInitialized,
   WalletConfig
 } from "./utils/walletPool";
+import {
+  deduplicateAddresses,
+  formatAddressForLog,
+  hasValidOffers,
+  isUnknownWalletOffer,
+  createAddressSet,
+  getOfferLogInfo,
+} from "./utils/cancelLogic";
 
 config()
 
@@ -105,7 +113,7 @@ async function cancelAllItemOffers() {
     try {
       const offerData = await getUserOffers(addr.address);
 
-      if (offerData && offerData.offers && offerData.offers.length > 0) {
+      if (offerData && Array.isArray(offerData.offers) && offerData.offers.length > 0) {
         const offers = offerData.offers;
         console.log('--------------------------------------------------------------------------------');
         console.log(`${offers.length} OFFERS FOUND FOR ${addr.address}${labelStr}`);
@@ -117,12 +125,18 @@ async function cancelAllItemOffers() {
           return cancelBid(offer, addr.privateKey, collectionSymbol, tokenId, addr.paymentAddress);
         });
 
-        await Promise.all(cancelOps);
+        const results = await Promise.allSettled(cancelOps);
+        const failed = results.filter(r => r.status === 'rejected');
+        if (failed.length > 0) {
+          console.error(`Failed to cancel ${failed.length} of ${results.length} offers`);
+        }
       } else {
         console.log(`No offers found for ${addr.address.slice(0, 10)}...${labelStr}`);
       }
-    } catch (error: any) {
-      console.error(`Error checking offers for ${addr.address}: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`Error checking offers for ${addr.address}: ${errorMessage}`);
+      // Continue with next address instead of stopping
     }
   }
 }
@@ -201,12 +215,10 @@ async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol: st
   try {
     const offerFormat = await retrieveCancelOfferFormat(offer.id)
     const signedOfferFormat = signData(offerFormat, signingKey)
-    if (signedOfferFormat) {
-      await submitCancelOfferData(offer.id, signedOfferFormat)
-      console.log('--------------------------------------------------------------------------------');
-      console.log(`CANCELLED OFFER FOR ${collectionSymbol} ${tokenId}`);
-      console.log('--------------------------------------------------------------------------------');
-    }
+    await submitCancelOfferData(offer.id, signedOfferFormat)
+    console.log('--------------------------------------------------------------------------------');
+    console.log(`CANCELLED OFFER FOR ${collectionSymbol} ${tokenId}`);
+    console.log('--------------------------------------------------------------------------------');
   } catch (error: any) {
     console.error(`Failed to cancel offer for ${collectionSymbol} ${tokenId}: ${error.message}`);
   }

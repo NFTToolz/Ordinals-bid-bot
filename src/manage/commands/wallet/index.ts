@@ -5,3 +5,10 @@ export { consolidateFunds } from './consolidate';
 export { viewOrdinals } from './ordinals';
 export { exportWalletsCommand } from './export';
 export { importWalletsCommand } from './import';
+
+// Wallet group commands
+export { listWalletGroups } from './groups';
+export { createWalletGroupCommand } from './groupCreate';
+export { addWalletsToGroupCommand } from './groupAdd';
+export { removeWalletFromGroupCommand, deleteWalletGroupCommand } from './groupRemove';
+export { rebalanceWalletGroup, rebalanceAllWalletGroups } from './groupRebalance';

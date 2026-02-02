@@ -484,6 +484,7 @@ export const Logger = {
       unhandledPath: number;
       currentActiveBids: number;
       bidCount: number;
+      successfulBidsPlaced?: number;
     }) {
       const timestamp = getTimestamp();
       console.log('');
@@ -491,6 +492,9 @@ export const Logger = {
       console.log(`${colors.bright}📊 [${timestamp}] BID PLACEMENT SUMMARY${colors.reset}`);
       console.log(`${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
       console.log(`  Tokens processed:          ${data.tokensProcessed}`);
+      if (data.successfulBidsPlaced !== undefined) {
+        console.log(`  Successful bids placed:    ${colors.bright}${data.successfulBidsPlaced}${colors.reset} / ${data.bidCount} target`);
+      }
       console.log(`  NEW bids placed:           ${colors.green}${data.newBidsPlaced}${colors.reset}`);
       console.log(`  Bids adjusted:             ${colors.blue}${data.bidsAdjusted}${colors.reset}`);
       console.log(`  Already have bids:         ${data.alreadyHaveBids}`);

@@ -6,6 +6,7 @@ import {
   showSuccess,
   showWarning,
   showTable,
+  getSeparatorWidth,
 } from '../../utils/display';
 import chalk = require('chalk');
 
@@ -19,9 +20,9 @@ export async function viewStatus(): Promise<void> {
   const wallets = loadWallets();
 
   // Bot Status
-  console.log('━'.repeat(50));
+  console.log('━'.repeat(getSeparatorWidth()));
   console.log('  BOT STATUS');
-  console.log('━'.repeat(50));
+  console.log('━'.repeat(getSeparatorWidth()));
 
   if (status.running) {
     console.log(`  Status:   ${chalk.green('● RUNNING')}`);
@@ -38,9 +39,9 @@ export async function viewStatus(): Promise<void> {
 
   // Session Statistics (from runtime stats)
   if (runtimeStats) {
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('  SESSION STATISTICS (since bot start)');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
 
     const bs = runtimeStats.bidStats;
     const totalActions = bs.bidsPlaced + bs.bidsSkipped;
@@ -57,9 +58,9 @@ export async function viewStatus(): Promise<void> {
     console.log('');
 
     // Rate Limiter
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('  RATE LIMITER');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
 
     const pacer = runtimeStats.pacer;
     const usedColor = pacer.bidsUsed >= pacer.bidsPerMinute ? chalk.red : chalk.green;
@@ -71,9 +72,9 @@ export async function viewStatus(): Promise<void> {
     // Wallet Pool (if enabled)
     if (runtimeStats.walletPool) {
       const wp = runtimeStats.walletPool;
-      console.log('━'.repeat(50));
+      console.log('━'.repeat(getSeparatorWidth()));
       console.log(`  WALLET POOL (${wp.available} available / ${wp.total} total)`);
-      console.log('━'.repeat(50));
+      console.log('━'.repeat(getSeparatorWidth()));
 
       wp.wallets.forEach(w => {
         const statusIcon = w.isAvailable ? chalk.green('●') : chalk.yellow('⏸');
@@ -85,9 +86,9 @@ export async function viewStatus(): Promise<void> {
     }
 
     // System
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('  SYSTEM');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
 
     const mem = runtimeStats.memory;
     const memColor = mem.percentage > 80 ? chalk.red : mem.percentage > 60 ? chalk.yellow : chalk.green;
@@ -105,18 +106,18 @@ export async function viewStatus(): Promise<void> {
   }
 
   // Configuration
-  console.log('━'.repeat(50));
+  console.log('━'.repeat(getSeparatorWidth()));
   console.log('  CONFIGURATION');
-  console.log('━'.repeat(50));
+  console.log('━'.repeat(getSeparatorWidth()));
   console.log(`  Collections:  ${collections.length}`);
-  console.log(`  Wallets:      ${wallets?.wallets.length || 0} (+ Main Wallet)`);
+  console.log(`  Wallets:      ${wallets?.wallets?.length || 0} (+ Main Wallet)`);
   console.log('');
 
   // Active Collections
   if (collections.length > 0) {
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('  ACTIVE COLLECTIONS');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
 
     const headers = ['Collection', 'Type', 'Bid Range', 'Counter-Bid'];
     const rows = collections.map(c => [
@@ -132,9 +133,9 @@ export async function viewStatus(): Promise<void> {
   // Bid History (if available)
   if (stats.bidHistory && Object.keys(stats.bidHistory).length > 0) {
     console.log('');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('  BID ACTIVITY');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
 
     for (const [symbol, data] of Object.entries(stats.bidHistory) as any) {
       const ourBids = Object.keys(data.ourBids || {}).length;
@@ -149,16 +150,15 @@ export async function viewStatus(): Promise<void> {
 
   // Environment Status
   console.log('');
-  console.log('━'.repeat(50));
+  console.log('━'.repeat(getSeparatorWidth()));
   console.log('  ENVIRONMENT');
-  console.log('━'.repeat(50));
+  console.log('━'.repeat(getSeparatorWidth()));
 
   const envChecks = [
     { name: 'FUNDING_WIF', set: !!process.env.FUNDING_WIF },
     { name: 'TOKEN_RECEIVE_ADDRESS', set: !!process.env.TOKEN_RECEIVE_ADDRESS },
     { name: 'API_KEY', set: !!process.env.API_KEY },
     { name: 'ENABLE_WALLET_ROTATION', set: process.env.ENABLE_WALLET_ROTATION === 'true' },
-    { name: 'ENABLE_ADDRESS_ROTATION', set: process.env.ENABLE_ADDRESS_ROTATION === 'true' },
   ];
 
   envChecks.forEach(check => {

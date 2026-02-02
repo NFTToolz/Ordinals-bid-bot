@@ -11,13 +11,22 @@
 		"bid": "ts-node src/bid.ts",
 		"restart": "yarn cancel && sleep 5 && yarn bid",
 		"cancel": "ts-node src/cancel.ts",
-		"scan:collections": "ts-node src/scanCollections.ts"
+		"scan:collections": "ts-node src/scanCollections.ts",
+		"start": "node dist/bid.js",
+		"start:cancel": "node dist/cancel.js",
+		"start:manage": "node dist/manage/index.js",
+		"start:scan": "node dist/scanCollections.js",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:coverage": "vitest run --coverage"
 	},
 	"keywords": [],
 	"author": "",
 	"license": "ISC",
 	"dependencies": {
 		"ajv": "^8.12.0",
+		"cli-table3": "^0.6.5",
+		"async-mutex": "^0.5.0",
 		"axios": "^1.6.8",
 		"axios-retry": "^4.1.0",
 		"bip-schnorr": "^0.6.7",
@@ -25,27 +34,29 @@
 		"bip39": "^3.1.0",
 		"bitcoinjs-lib": "^6.1.5",
 		"bottleneck": "^2.19.5",
+		"chalk": "^4.1.2",
 		"crypto": "^1.0.1",
 		"dotenv": "^16.4.5",
 		"ecpair": "^2.1.0",
 		"ecurve": "^1.0.6",
+		"inquirer": "^8.2.6",
 		"p-queue": "^6.6.2",
 		"readline-sync": "^1.4.10",
 		"secp256k1": "^5.0.0",
 		"tiny-secp256k1": "^2.2.3",
-		"ws": "^8.17.0",
-		"chalk": "^4.1.2",
-		"inquirer": "^8.2.6"
+		"ws": "^8.17.0"
 	},
 	"devDependencies": {
+		"@types/inquirer": "^8.2.10",
 		"@types/node": "^20.11.30",
 		"@types/readline-sync": "^1.4.8",
 		"@types/ws": "^8.5.10",
-		"@types/inquirer": "^8.2.10",
+		"@vitest/coverage-v8": "^4.0.18",
 		"nodemon": "^3.1.0",
 		"ts-node": "^10.9.2",
 		"tsc": "^2.0.4",
-		"typescript": "^5.4.3"
+		"typescript": "^5.4.3",
+		"vitest": "^4.0.18"
 	},
 	"description": ""
 }

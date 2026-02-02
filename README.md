@@ -1,5 +1,7 @@
 ## ORDINAL BIDDING BOT
 
+An automated bidding bot for Bitcoin Ordinals (NFTs) on Magic Eden marketplace. It monitors collections, places strategic bids, executes counter-bidding, and manages offers.
+
 #### Requirements
 
 - node version 18+
@@ -13,6 +15,41 @@
 OR
 
 `npm install`
+
+---
+
+### COMMANDS
+
+#### Development Commands
+
+| Command | Description |
+|---------|-------------|
+| `yarn bid` | Start bidding bot (ts-node) |
+| `yarn dev` | Development mode with auto-reload |
+| `yarn cancel` | Cancel all active offers |
+| `yarn restart` | Cancel and restart bidding (cancel + 5s delay + bid) |
+| `yarn scan:collections` | Scan available collections |
+| `yarn manage` | Interactive management console |
+| `yarn build` | Build TypeScript to JavaScript |
+
+#### Compiled Commands (after `yarn build`)
+
+| Command | Description |
+|---------|-------------|
+| `yarn start` | Run compiled bidding bot |
+| `yarn start:cancel` | Run compiled offer canceller |
+| `yarn start:manage` | Run compiled management CLI |
+| `yarn start:scan` | Run compiled collection scanner |
+
+#### Testing Commands
+
+| Command | Description |
+|---------|-------------|
+| `yarn test` | Run vitest test suite |
+| `yarn test:watch` | Run tests in watch mode |
+| `yarn test:coverage` | Run tests with coverage report |
+
+---
 
 ### COLLECTION SCANNER
 
@@ -49,6 +86,20 @@ The CLI provides four main categories:
 | Export/backup wallets | Export wallet configuration for backup |
 | Import wallets | Import wallets from backup or external source |
 
+#### Wallet Group Commands
+
+Wallet groups enable isolated wallet pools for different collections, each with independent rate limits.
+
+| Command | Description |
+|---------|-------------|
+| View wallet groups | List all wallet groups with balances and bid rates |
+| Create wallet group | Create new wallet group with configurable bidsPerMinute |
+| Add wallets to group | Add wallets from existing pool, generate new, or import WIF |
+| Remove wallet from group | Remove a specific wallet from a group |
+| Delete empty group | Delete a wallet group (must be empty) |
+| Rebalance group | Smart rebalance based on collection requirements |
+| Rebalance all groups | Rebalance all groups simultaneously |
+
 #### Collection Commands
 
 | Command | Description |
@@ -57,6 +108,7 @@ The CLI provides four main categories:
 | Add collection | Add a new collection with bidding parameters |
 | Edit collection | Modify settings for an existing collection |
 | Remove collection | Remove a collection from bidding |
+| Assign to wallet group | Assign collections to specific wallet groups |
 | Scan for opportunities | Find profitable collections based on floor/volume |
 
 #### Bot Control Commands
@@ -65,7 +117,7 @@ The CLI provides four main categories:
 |---------|-------------|
 | Start bot | Launch the bidding bot in the background |
 | Stop bot | Gracefully stop the running bot |
-| View status & stats | Display bot status, active bids, and statistics |
+| View status & stats | Display comprehensive bot statistics (see below) |
 | Restart bot | Stop and restart the bot (cancel offers first) |
 | View logs | Tail the bot's log output in real-time |
 | Cancel all offers | Cancel all active offers across collections |
@@ -75,6 +127,7 @@ The CLI provides four main categories:
 | Command | Description |
 |---------|-------------|
 | Wallet rotation | Configure multi-wallet rotation settings |
+| Centralize receive address | Route all won ordinals to a single address (requires wallet rotation enabled) |
 
 #### Typical Workflows
 
@@ -94,6 +147,21 @@ The CLI provides four main categories:
 1. View logs to identify issues
 2. Cancel all offers if needed
 3. Restart bot to apply changes
+
+#### Bot Status Display
+
+The `View status & stats` command displays comprehensive information:
+
+| Section | Details |
+|---------|---------|
+| Bot Status | Running/stopped, PID, uptime, start time |
+| Session Statistics | Bids placed/skipped/adjusted/cancelled, errors, success rate |
+| Rate Limiter | Current bids in window, window reset time, total waits |
+| Wallet Pool | Available/total wallets, per-wallet bid counts and reset timers |
+| System | Memory usage (heap), event queue size, WebSocket connection status |
+| Configuration | Collection count, wallet count |
+| Active Collections | Per-collection settings summary |
+| Bid Activity | Active bids, top bids, items won per collection |
 
 ---
 
@@ -122,6 +190,7 @@ The CLI provides four main categories:
 | fundingWalletWIF (OPTIONAL)     | WIF (Wallet Import Format). This overrides the value set in the env   |
 | quantity (OPTIONAL)             | the maximum number of token to buy, default to 1                      |
 | tokenReceiveAddress (OPTIONAL)  | Token receive address. This overrides the value set in the env        |
+| walletGroup (OPTIONAL)          | Name of wallet group to use for this collection                       |
 
 ```
 [
@@ -138,6 +207,7 @@ The CLI provides four main categories:
 		"outBidMargin": 1e-6,
 		"offerType": "ITEM",
 		"quantity": 1,
+		"walletGroup": "high-value"
 	}
 ]
 ```
@@ -159,6 +229,7 @@ The CLI provides four main categories:
 | fundingWalletWIF (OPTIONAL)     | WIF (Wallet Import Format). This overrides the value set in the env   |
 | feeSatsPerVbyte (OPTIONAL)      | Network fees, default to 28                                           |
 | tokenReceiveAddress (OPTIONAL)  | Token receive address. This overrides the value set in the env        |
+| walletGroup (OPTIONAL)          | Name of wallet group to use for this collection                       |
 
 ```
 [
@@ -175,7 +246,8 @@ The CLI provides four main categories:
 		"outBidMargin": 1e-6,
 		"offerType": "COLLECTION",
 		"quantity": 1,
-		"feeSatsPerVbyte": 28
+		"feeSatsPerVbyte": 28,
+		"walletGroup": "floor-sweeper"
 	}
 ]
 ```
@@ -198,6 +270,7 @@ The CLI provides four main categories:
 | quantity                        | The maximum number of tokens to buy.                                  |
 | feeSatsPerVbyte (OPTIONAL)      | Network fees, default to 28                                           |
 | traits                          | An array of trait objects specifying traitType and value.             |
+| walletGroup (OPTIONAL)          | Name of wallet group to use for this collection                       |
 
 ```
 [
@@ -228,36 +301,6 @@ The CLI provides four main categories:
 `yarn bid`
 
 ### ADVANCED FEATURES
-
-#### Address Rotation (Bypass API Rate Limits)
-
-The bot supports rotating dummy receive addresses when requesting PSBTs from the Magic Eden API, which helps bypass rate limits that are tied to the receive address. When enabled:
-
-1. **API Requests**: Uses rotating dummy addresses from a pool
-2. **PSBT Creation**: Extracts tap keys from API responses
-3. **Local PSBT**: Creates new PSBT with your **real** receive address
-4. **Blockchain**: Only your real receive address appears on-chain
-
-**Configuration (in .env file):**
-
-```bash
-# Enable address rotation
-ENABLE_ADDRESS_ROTATION=true
-
-# Number of dummy addresses to generate (default: 10)
-ADDRESS_POOL_SIZE=10
-
-# BIP39 mnemonic or hex seed for generating dummy addresses
-# These addresses don't need funding - they're only used for API requests
-# Example: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-ADDRESS_POOL_SEED="your 12 or 24 word mnemonic"
-```
-
-**Important Notes:**
-- The dummy addresses **do not need funding** - they're only used for API requests
-- Your ordinals will be delivered to your real `TOKEN_RECEIVE_ADDRESS`
-- This works in conjunction with the existing PSBT caching system
-- Completely transparent to the blockchain - only dummy addresses are visible to the API
 
 #### Multi-Wallet Rotation (Maximize Bid Throughput)
 
@@ -349,6 +392,103 @@ Each wallet needs sufficient BTC to cover:
 - Wallets are selected using least-recently-used strategy to distribute bids evenly
 - If all wallets are exhausted, the bot logs when the next wallet becomes available
 
+#### Centralized Receive Address
+
+When using multiple wallets, you can route all won ordinals to a single address:
+
+1. Enable via CLI: `yarn manage` → Settings → Centralize receive address
+2. Or set in `.env`: `CENTRALIZE_RECEIVE_ADDRESS=true`
+
+When enabled, all wallets send won NFTs to `TOKEN_RECEIVE_ADDRESS` instead of their individual addresses.
+
 #### Bulk cancel offers
 
 `yarn cancel`
+
+---
+
+### CONFIGURATION FILES
+
+| File | Purpose |
+|------|---------|
+| `.env` | Environment variables and API keys |
+| `config/collections.json` | Bidding configurations per collection |
+| `config/wallets.json` | Wallet pool configuration |
+
+---
+
+### ENVIRONMENT VARIABLES
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TOKEN_RECEIVE_ADDRESS` | Address to receive purchased ordinals | (required) |
+| `FUNDING_WIF` | Private key in Wallet Import Format | (required) |
+| `API_KEY` | Magic Eden API key | (required) |
+| `RATE_LIMIT` | HTTP requests per second | 32 |
+| `DEFAULT_OUTBID_MARGIN` | Default outbid margin in BTC | 0.00000001 |
+| `DEFAULT_COUNTER_BID_LOOP_TIME` | Counter-bid loop interval (seconds) | 30 |
+| `DEFAULT_LOOP` | Default scheduled loop interval (seconds) | 30 |
+| `ENABLE_WALLET_ROTATION` | Enable multi-wallet rotation | false |
+| `WALLET_CONFIG_PATH` | Path to wallet config file | ./config/wallets.json |
+| `BIDS_PER_MINUTE` | Per-wallet bid rate limit | 5 |
+| `SKIP_OVERLAPPING_CYCLES` | Skip cycles when previous still running | true |
+| `CENTRALIZE_RECEIVE_ADDRESS` | Route all ordinals to TOKEN_RECEIVE_ADDRESS | false |
+
+---
+
+### ARCHITECTURE
+
+#### Bid Calculation
+
+Offers are calculated within a bounded range:
+
+```
+minOffer = max(minBid, minFloorBid% × floor)
+maxOffer = min(maxBid, maxFloorBid% × floor)
+```
+
+Bidding above 100% of floor price is blocked for ITEM and COLLECTION offers (allowed for trait bidding).
+
+#### Core Flow
+
+```
+Entry (bid.ts) → EventManager → Bid Placement → Blockchain
+                    ↓
+        ┌──────────┴──────────┐
+        │                     │
+   WebSocket              Scheduled Loop
+   (counter-bid)          (periodic bid)
+        │                     │
+        └──────────┬──────────┘
+                   ↓
+             Queue Processor
+                   ↓
+         Create Offer (Magic Eden API)
+                   ↓
+         Sign → Submit to Magic Eden
+```
+
+#### Memory Management
+
+- Bid history cleanup runs hourly (24-hour TTL)
+- Event queue capped at 1000 events (FIFO drop when full)
+- Max 100 bids tracked per collection
+- Memory monitoring every 5 minutes with alerts
+
+#### Rate Limiting
+
+- HTTP requests: Bottleneck enforces `RATE_LIMIT` requests/second
+- Bid pacing: `BIDS_PER_MINUTE` per wallet with 60-second sliding window
+- Retry: Exponential backoff for 429/400 errors
+
+#### WebSocket
+
+- Counter-bidding via real-time events
+- Automatic reconnection with exponential backoff (max 5 retries)
+- Graceful degradation to scheduled-only mode on failure
+
+#### Processing Guards
+
+- `processingTokens` map prevents race conditions on same token
+- Bid deduplication with 30-second cooldown per token
+- `isScheduledRunning` and `isProcessingQueue` coordinate WebSocket vs scheduled tasks

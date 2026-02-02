@@ -12,6 +12,7 @@
 		"outBidMargin": 0.000005,
 		"offerType": "ITEM",
 		"quantity": 1,
-		"feeSatsPerVbyte": 25
+		"feeSatsPerVbyte": 25,
+		"walletGroup": "n0k"
 	}
 ]

@@ -3,6 +3,7 @@ import {
   showSectionHeader,
   showSuccess,
   showWarning,
+  getSeparatorWidth,
 } from '../../utils/display';
 import { promptInteger, promptConfirm, promptSelect } from '../../utils/prompts';
 import chalk = require('chalk');
@@ -16,17 +17,26 @@ export async function viewLogs(): Promise<void> {
   console.log('');
 
   // Options
-  const action = await promptSelect<'recent' | 'follow' | 'clear'>(
+  const action = await promptSelect<'recent' | 'follow' | 'clear' | '__cancel__'>(
     'What would you like to do?',
     [
       { name: 'View recent logs', value: 'recent' },
       { name: 'Follow logs (live)', value: 'follow' },
       { name: 'Clear logs', value: 'clear' },
+      { name: '← Back', value: '__cancel__' },
     ]
   );
 
+  if (action === '__cancel__') {
+    return;
+  }
+
   if (action === 'recent') {
-    const lines = await promptInteger('How many lines?', 50);
+    const lines = await promptInteger('How many lines? (0 to cancel)', 50);
+
+    if (lines === 0) {
+      return;
+    }
 
     const logs = getLogs(lines);
 
@@ -38,7 +48,7 @@ export async function viewLogs(): Promise<void> {
     }
 
     console.log('');
-    console.log('━'.repeat(80));
+    console.log('━'.repeat(getSeparatorWidth()));
 
     logs.forEach(line => {
       // Color code log lines
@@ -55,13 +65,13 @@ export async function viewLogs(): Promise<void> {
       }
     });
 
-    console.log('━'.repeat(80));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('');
 
   } else if (action === 'follow') {
     console.log('');
     console.log('Following logs... (Press Ctrl+C to stop)');
-    console.log('━'.repeat(80));
+    console.log('━'.repeat(getSeparatorWidth()));
 
     // Set up signal handler
     let stopFollowing: (() => void) | null = null;
@@ -71,7 +81,7 @@ export async function viewLogs(): Promise<void> {
         stopFollowing();
       }
       console.log('');
-      console.log('━'.repeat(80));
+      console.log('━'.repeat(getSeparatorWidth()));
       console.log('Stopped following logs.');
       process.removeListener('SIGINT', cleanup);
     };

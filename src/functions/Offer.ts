@@ -4,12 +4,31 @@ import { ECPairInterface, ECPairFactory, ECPairAPI, TinySecp256k1Interface } fro
 import { config } from "dotenv"
 import limiter from "../bottleneck";
 import Logger from "../utils/logger";
+import { getErrorMessage, getErrorResponseData, getErrorStatus } from "../utils/errorUtils";
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 const network = bitcoin.networks.bitcoin;
 
 config()
+
+/**
+ * Centralized retry configuration for offer-related API operations.
+ * Prevents code duplication and provides consistent retry behavior.
+ */
+export const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelayMs: 2500,
+  /**
+   * Calculate delay for exponential backoff
+   * @param attempt - Current attempt number (1-based)
+   * @returns Delay in milliseconds
+   */
+  getDelayMs(attempt: number): number {
+    // Exponential backoff: 2500ms, 5000ms, 10000ms
+    return this.baseDelayMs * Math.pow(2, attempt - 1);
+  }
+};
 
 const api_key = process.env.API_KEY as string;
 
@@ -30,9 +49,9 @@ export async function cancelCollectionOfferRequest(offerIds: string[], makerPubl
     const { data } = await limiter.schedule(() => axiosInstance.get<ICancelCollectionOfferRequest>(url, { params, headers }))
     return data
 
-  } catch (error: any) {
-    Logger.offer.error('cancelCollectionOfferRequest', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
-    return null;
+  } catch (error: unknown) {
+    Logger.offer.error('cancelCollectionOfferRequest', offerIds.join(','), getErrorMessage(error), getErrorStatus(error), getErrorResponseData(error));
+    throw error;
   }
 }
 
@@ -67,9 +86,9 @@ export async function submitCancelCollectionOffer(
 
     return response
 
-  } catch (error: any) {
-    Logger.offer.error('submitCancelCollectionOffer', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
-    return null;
+  } catch (error: unknown) {
+    Logger.offer.error('submitCancelCollectionOffer', offerIds.join(','), getErrorMessage(error), getErrorStatus(error), getErrorResponseData(error));
+    throw error;
   }
 }
 
@@ -80,15 +99,11 @@ export async function cancelCollectionOffer(
 ): Promise<boolean> {
   try {
     const unsignedData = await cancelCollectionOfferRequest(offerIds, makerPublicKey)
-
-    if (unsignedData) {
-      const signedData = signCancelCollectionOfferRequest(unsignedData, privateKey)
-      const result = await submitCancelCollectionOffer(offerIds, makerPublicKey, signedData)
-      return result !== null;
-    }
-    return false;
-  } catch (error: any) {
-    Logger.offer.error('cancelCollectionOffer', offerIds.join(','), error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
+    const signedData = signCancelCollectionOfferRequest(unsignedData, privateKey)
+    await submitCancelCollectionOffer(offerIds, makerPublicKey, signedData)
+    return true;
+  } catch (error: unknown) {
+    Logger.offer.error('cancelCollectionOffer', offerIds.join(','), getErrorMessage(error), getErrorStatus(error), getErrorResponseData(error));
     return false;
   }
 }
@@ -120,7 +135,6 @@ export async function createCollectionOffer(
   };
   let errorOccurred = false;
   let retryCount = 0;
-  const MAX_RETRIES = 3;
   do {
     try {
       const url = 'https://nfttools.pro/magiceden/v2/ord/btc/collection-offers/psbt/create'
@@ -129,20 +143,43 @@ export async function createCollectionOffer(
     } catch (error: any) {
       if (error.response?.data?.error === "Only 1 collection offer allowed per collection.") {
         retryCount++;
-        if (retryCount >= MAX_RETRIES) {
-          Logger.error(`[COLLECTION OFFER] Max retries (${MAX_RETRIES}) reached for ${collectionSymbol}, aborting`);
+        if (retryCount >= RETRY_CONFIG.maxRetries) {
+          Logger.error(`[COLLECTION OFFER] Max retries (${RETRY_CONFIG.maxRetries}) reached for ${collectionSymbol}, aborting`);
           throw new Error(`Max retries reached for collection offer: ${collectionSymbol}`);
         }
-        await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
-        const offerData = await getBestCollectionOffer(collectionSymbol);
+        const delayMs = RETRY_CONFIG.getDelayMs(retryCount);
+        Logger.info(`[COLLECTION OFFER] Retry ${retryCount}/${RETRY_CONFIG.maxRetries} for ${collectionSymbol}, waiting ${delayMs}ms`);
+        await new Promise(resolve => setTimeout(resolve, delayMs)); // Exponential backoff
 
-        const userOffer = offerData?.offers.find((item) => item.btcParams.makerOrdinalReceiveAddress.toLowerCase() === makerReceiveAddress.toLowerCase())
+        // FIX: Wrap getBestCollectionOffer in try/catch to prevent unexpected breaks from retry loop
+        let offerData;
+        try {
+          offerData = await getBestCollectionOffer(collectionSymbol);
+        } catch (fetchError: unknown) {
+          Logger.error(`[COLLECTION OFFER] Failed to fetch offers during retry for ${collectionSymbol}`, getErrorMessage(fetchError));
+          // Continue retry loop - we'll try again on next iteration
+          errorOccurred = true;
+          continue;
+        }
+
+        // FIX: Add null check - if offerData is null/undefined, skip cancellation check
+        if (!offerData?.offers) {
+          Logger.warning(`[COLLECTION OFFER] No offer data available for ${collectionSymbol}, skipping cancellation check`);
+          errorOccurred = true;
+          continue;
+        }
+
+        const userOffer = offerData.offers.find((item) => item.btcParams.makerOrdinalReceiveAddress.toLowerCase() === makerReceiveAddress.toLowerCase())
         if (userOffer) {
-          await cancelCollectionOffer([userOffer.id], makerPublicKey, privateKey)
+          const cancelled = await cancelCollectionOffer([userOffer.id], makerPublicKey, privateKey);
+          if (!cancelled) {
+            Logger.error(`[COLLECTION OFFER] Failed to cancel existing offer for ${collectionSymbol}, aborting retry`);
+            throw new Error(`Failed to cancel existing collection offer for ${collectionSymbol}`);
+          }
         }
         errorOccurred = true;
       } else {
-        Logger.offer.error('createCollectionOffer', collectionSymbol, error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
+        Logger.offer.error('createCollectionOffer', collectionSymbol, getErrorMessage(error), getErrorStatus(error), getErrorResponseData(error));
         errorOccurred = false;
         throw error;
       }
@@ -181,26 +218,48 @@ export async function submitCollectionOffer(
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/collection-offers/psbt/create'
   let errorOccurred = false;
   let retryCount = 0;
-  const MAX_RETRIES = 3;
   do {
     try {
       const { data: requestData } = await limiter.schedule(() => axiosInstance.post<ISubmitCollectionOfferResponse>(url, data, { headers }))
       Logger.info(`[OFFER] Collection offer submitted for ${collectionSymbol}`);
       return requestData
     } catch (error: any) {
-      Logger.offer.error('submitCollectionOffer', collectionSymbol, error?.message || 'Unknown error', error?.response?.status, error?.response?.data);
+      Logger.offer.error('submitCollectionOffer', collectionSymbol, getErrorMessage(error), getErrorStatus(error), getErrorResponseData(error));
       if (error.response?.data?.error === "Only 1 collection offer allowed per collection.") {
         retryCount++;
-        if (retryCount >= MAX_RETRIES) {
-          Logger.error(`[COLLECTION OFFER] Max retries (${MAX_RETRIES}) reached for submit ${collectionSymbol}, aborting`);
+        if (retryCount >= RETRY_CONFIG.maxRetries) {
+          Logger.error(`[COLLECTION OFFER] Max retries (${RETRY_CONFIG.maxRetries}) reached for submit ${collectionSymbol}, aborting`);
           throw new Error(`Max retries reached for submit collection offer: ${collectionSymbol}`);
         }
-        await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
-        const offerData = await getBestCollectionOffer(collectionSymbol);
+        const delayMs = RETRY_CONFIG.getDelayMs(retryCount);
+        Logger.info(`[COLLECTION OFFER] Submit retry ${retryCount}/${RETRY_CONFIG.maxRetries} for ${collectionSymbol}, waiting ${delayMs}ms`);
+        await new Promise(resolve => setTimeout(resolve, delayMs)); // Exponential backoff
 
-        const userOffer = offerData?.offers.find((item) => item.btcParams.makerOrdinalReceiveAddress.toLowerCase() === makerReceiveAddress.toLowerCase())
+        // FIX: Wrap getBestCollectionOffer in try/catch to prevent unexpected breaks from retry loop
+        let offerData;
+        try {
+          offerData = await getBestCollectionOffer(collectionSymbol);
+        } catch (fetchError: unknown) {
+          Logger.error(`[COLLECTION OFFER] Failed to fetch offers during submit retry for ${collectionSymbol}`, getErrorMessage(fetchError));
+          // Continue retry loop - we'll try again on next iteration
+          errorOccurred = true;
+          continue;
+        }
+
+        // FIX: Add null check - if offerData is null/undefined, skip cancellation check
+        if (!offerData?.offers) {
+          Logger.warning(`[COLLECTION OFFER] No offer data available for submit ${collectionSymbol}, skipping cancellation check`);
+          errorOccurred = true;
+          continue;
+        }
+
+        const userOffer = offerData.offers.find((item) => item.btcParams.makerOrdinalReceiveAddress.toLowerCase() === makerReceiveAddress.toLowerCase())
         if (userOffer) {
-          await cancelCollectionOffer([userOffer.id], makerPublicKey, privateKey)
+          const cancelled = await cancelCollectionOffer([userOffer.id], makerPublicKey, privateKey);
+          if (!cancelled) {
+            Logger.error(`[COLLECTION OFFER] Failed to cancel existing offer for ${collectionSymbol}, aborting submit retry`);
+            throw new Error(`Failed to cancel existing collection offer for submit: ${collectionSymbol}`);
+          }
         }
         errorOccurred = true;
       } else {
@@ -225,7 +284,7 @@ export function signCollectionOffer(unsignedData: ICollectionOfferResponseData, 
 
   if (toSignInputs.length > 1) {
     const inputs = [0, 1]
-    console.log('SIGN 2 INPUTS');
+    Logger.info('[SIGN] Signing 2 inputs');
     for (let index of inputs) {
       offerPsbt.signInput(index, keyPair);
       offerPsbt.finalizeInput(index);
@@ -244,7 +303,7 @@ export function signCollectionOffer(unsignedData: ICollectionOfferResponseData, 
     }
 
   } else {
-    console.log('SIGN 1 INPUTS');
+    Logger.info('[SIGN] Signing 1 input');
     offerPsbt.signInput(0, keyPair);
     if (offers.cancelPsbtBase64) {
       cancelPsbt = bitcoin.Psbt.fromBase64(offers.cancelPsbtBase64);
@@ -290,16 +349,19 @@ export async function createOffer(
   try {
     const { data } = await limiter.schedule(() => axiosInstance.get(baseURL, { params, headers }))
     return data
-  } catch (error: any) {
-    console.error(`[CREATE_OFFER ERROR] Token ${tokenId.slice(-8)}: ${error?.message || error}`);
+  } catch (error: unknown) {
+    Logger.error(`[CREATE_OFFER] Token ${tokenId.slice(-8)}: ${getErrorMessage(error)}`);
 
     // Log API response details if available
-    if (error?.response?.data) {
-      const errorMessage = error.response.data?.error || '';
+    const responseData = getErrorResponseData(error);
+    if (responseData) {
+      const errorMessage = typeof responseData === 'object' && responseData !== null && 'error' in responseData
+        ? String((responseData as { error: unknown }).error)
+        : '';
 
       // Check for specific error patterns
       if (errorMessage.includes('maximum number of offers')) {
-        console.error(`[CREATE_OFFER] 🚨 Hit maximum offer limit!`);
+        Logger.error(`[CREATE_OFFER] Hit maximum offer limit!`);
       }
 
       // Parse and display insufficient funds with breakdown
@@ -312,15 +374,16 @@ export async function createOffer(
           Logger.offer.insufficientFunds(tokenId, price, required, available);
         } else {
           // Fallback if parsing fails
-          console.error(`[CREATE_OFFER API] Response:`, error.response.data);
+          Logger.error(`[CREATE_OFFER] API Response:`, responseData);
         }
       } else {
         // Log other errors normally
-        console.error(`[CREATE_OFFER API] Response:`, error.response.data);
+        Logger.error(`[CREATE_OFFER] API Response:`, responseData);
       }
     }
-    if (error?.response?.status) {
-      console.error(`[CREATE_OFFER HTTP] Status: ${error.response.status}`);
+    const status = getErrorStatus(error);
+    if (status) {
+      Logger.error(`[CREATE_OFFER] HTTP Status: ${status}`);
     }
 
     // Re-throw the error so placeBid can handle it
@@ -328,8 +391,13 @@ export async function createOffer(
   }
 }
 
-export function signData(unsignedData: any, privateKey: string) {
-  if (typeof unsignedData !== "undefined") {
+export function signData(unsignedData: any, privateKey: string): string {
+  // Validate unsignedData has required properties (null, undefined, or missing fields)
+  if (!unsignedData || !unsignedData.psbtBase64 || !unsignedData.toSignInputs) {
+    throw new Error('[SIGN] Invalid unsigned data: missing psbtBase64 or toSignInputs');
+  }
+
+  try {
     const psbt = bitcoin.Psbt.fromBase64(unsignedData.psbtBase64);
     const keyPair: ECPairInterface = ECPair.fromWIF(privateKey, network)
 
@@ -341,22 +409,25 @@ export function signData(unsignedData: any, privateKey: string) {
 
     const signedBuyingPSBTBase64 = psbt.toBase64();
     return signedBuyingPSBTBase64;
+  } catch (error: unknown) {
+    const errorMsg = getErrorMessage(error);
+    Logger.error('[SIGN] Failed to sign PSBT:', errorMsg);
+    throw new Error(`[SIGN] Failed to sign PSBT: ${errorMsg}`);
   }
 }
 
 async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol?: string, tokenId?: string, buyerPaymentAddress?: string): Promise<boolean> {
   try {
     const offerFormat = await retrieveCancelOfferFormat(offer.id)
-    if (offerFormat) {
-      const signedOfferFormat = signData(offerFormat, privateKey)
-      if (signedOfferFormat) {
-        const result = await submitCancelOfferData(offer.id, signedOfferFormat)
-        return result === true;
-      }
+    if (!offerFormat) {
+      Logger.warning(`[CANCEL] No cancel format returned for offer ${offer.id}`);
+      return false;
     }
-    return false;
-  } catch (error: any) {
-    Logger.error(`[CANCEL] Failed to cancel bid ${offer.id}`, error?.message || error);
+    const signedOfferFormat = signData(offerFormat, privateKey)
+    const result = await submitCancelOfferData(offer.id, signedOfferFormat)
+    return result === true;
+  } catch (error: unknown) {
+    Logger.error(`[CANCEL] Failed to cancel bid ${offer.id}`, getErrorMessage(error));
     return false;
   }
 }
@@ -389,7 +460,6 @@ export async function submitSignedOfferOrder(
 
   let errorOccurred = false;
   let retryCount = 0;
-  const MAX_RETRIES = 3;
 
   do {
     try {
@@ -398,16 +468,41 @@ export async function submitSignedOfferOrder(
     } catch (error: any) {
       if (error.response?.data?.error === "You already have an offer for this token") {
         retryCount++;
-        if (retryCount >= MAX_RETRIES) {
-          Logger.error(`[OFFER] Max retries (${MAX_RETRIES}) reached for submitSignedOfferOrder token ${tokenId}, aborting`);
+        if (retryCount >= RETRY_CONFIG.maxRetries) {
+          Logger.error(`[OFFER] Max retries (${RETRY_CONFIG.maxRetries}) reached for submitSignedOfferOrder token ${tokenId}, aborting`);
           throw new Error(`Max retries reached for submitSignedOfferOrder: ${tokenId}`);
         }
-        await new Promise(resolve => setTimeout(resolve, 2500)); // Wait before retrying
-        const offerData = await getOffers(tokenId, buyerReceiveAddress);
-        if (offerData && offerData.offers.length > 0) {
-          for (const item of offerData.offers) {
-            await cancelBid(item, privateKey);
+        const delayMs = RETRY_CONFIG.getDelayMs(retryCount);
+        Logger.info(`[OFFER] Submit retry ${retryCount}/${RETRY_CONFIG.maxRetries} for token ${tokenId}, waiting ${delayMs}ms`);
+        await new Promise(resolve => setTimeout(resolve, delayMs)); // Exponential backoff
+        try {
+          const offerData = await getOffers(tokenId, buyerReceiveAddress);
+          if (offerData.offers.length > 0) {
+            let allCancelled = true;
+            for (const item of offerData.offers) {
+              const cancelled = await cancelBid(item, privateKey);
+              if (!cancelled) {
+                allCancelled = false;
+                Logger.warning(`[OFFER] Failed to cancel offer ${item.id} for token ${tokenId}`);
+              }
+            }
+            if (!allCancelled) {
+              Logger.error(`[OFFER] Not all offers cancelled for ${tokenId}, aborting retry`);
+              throw new Error(`Failed to cancel all existing offers for token: ${tokenId}`);
+            }
           }
+        } catch (offerError: any) {
+          const status = getErrorStatus(offerError);
+          // Transient errors (5xx, 429) - continue retry loop instead of aborting
+          if (status !== undefined && (status >= 500 || status === 429)) {
+            Logger.warning(`[OFFER] Transient error (${status}) fetching offers for ${tokenId}, will retry`);
+            await new Promise(r => setTimeout(r, 1000));
+            errorOccurred = true;
+            continue;
+          }
+          // Non-retryable errors - abort
+          Logger.error(`[OFFER] API error fetching offers for ${tokenId}, aborting retry: ${offerError?.message || offerError}`);
+          throw offerError;
         }
         errorOccurred = true;  // Signal to retry
       } else {
@@ -419,7 +514,12 @@ export async function submitSignedOfferOrder(
 }
 
 
-export async function getBestCollectionOffer(collectionSymbol: string) {
+/**
+ * Get best collection offer from API.
+ * @throws Error on API failure (network error, server error, etc.)
+ * @returns CollectionOfferData on success, null if no offers exist (404)
+ */
+export async function getBestCollectionOffer(collectionSymbol: string): Promise<CollectionOfferData | null> {
   const url = `https://nfttools.pro/magiceden/v2/ord/btc/collection-offers/collection/${collectionSymbol}`;
   const params = {
     sort: 'priceDesc',
@@ -431,13 +531,22 @@ export async function getBestCollectionOffer(collectionSymbol: string) {
   try {
     const { data } = await limiter.schedule(() => axiosInstance.get<CollectionOfferData>(url, { params, headers }));
     return data
-  } catch (error: any) {
-    Logger.error(`[COLLECTION OFFER] getBestCollectionOffer error for ${collectionSymbol}`, error?.response?.data || error?.message);
+  } catch (error: unknown) {
+    // 404 means no offers exist - return null (not an error)
+    if (getErrorStatus(error) === 404) {
+      return null;
+    }
+    Logger.error(`[COLLECTION OFFER] getBestCollectionOffer error for ${collectionSymbol}`, getErrorResponseData(error) || getErrorMessage(error));
+    throw error;
   }
-
 }
 
-export async function getBestOffer(tokenId: string) {
+/**
+ * Get best offer for a token from API.
+ * @throws Error on API failure (network error, server error, etc.)
+ * @returns OfferData on success (may have empty offers array if no offers exist)
+ */
+export async function getBestOffer(tokenId: string): Promise<OfferData> {
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/';
   const params = {
     status: 'valid',
@@ -450,38 +559,54 @@ export async function getBestOffer(tokenId: string) {
   try {
     const { data } = await limiter.schedule(() => axiosInstance.get<OfferData>(url, { params, headers }));
     return data
-  } catch (error: any) {
-    Logger.error(`[BEST OFFER] getBestOffer error for ${tokenId.slice(-8)}`, error?.response?.data || error?.message);
-    return undefined;
-  }
-
-}
-
-
-export async function cancelBulkTokenOffers(tokenIds: string[], buyerTokenReceiveAddress: string, privateKey: string) {
-  try {
-    for (const token of tokenIds) {
-      const offerData = await getOffers(token, buyerTokenReceiveAddress)
-      const offer = offerData?.offers[0]
-      if (offer) {
-        const offerFormat = await retrieveCancelOfferFormat(offer.id)
-        const signedOfferFormat = signData(offerFormat, privateKey)
-
-        if (signedOfferFormat) {
-          await submitCancelOfferData(offer.id, signedOfferFormat)
-          console.log('--------------------------------------------------------------------------------');
-          console.log(`CANCELLED OFFER FOR ${offer.token.collectionSymbol} ${offer.token.id}`);
-          console.log('--------------------------------------------------------------------------------');
-        }
-      }
-    }
-  } catch (error: any) {
-    Logger.error(`[CANCEL BULK] Failed to cancel bulk offers`, error?.message || error);
+  } catch (error: unknown) {
+    Logger.error(`[BEST OFFER] getBestOffer error for ${tokenId.slice(-8)}`, getErrorResponseData(error) || getErrorMessage(error));
     throw error;
   }
 }
 
-export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: string) {
+
+export interface BulkCancelResult {
+  successful: string[];
+  failed: { tokenId: string; error: string }[];
+}
+
+export async function cancelBulkTokenOffers(
+  tokenIds: string[],
+  buyerTokenReceiveAddress: string,
+  privateKey: string
+): Promise<BulkCancelResult> {
+  const results: BulkCancelResult = { successful: [], failed: [] };
+
+  for (const token of tokenIds) {
+    try {
+      const offerData = await getOffers(token, buyerTokenReceiveAddress)
+      const offer = offerData?.offers?.[0]
+      if (offer) {
+        const offerFormat = await retrieveCancelOfferFormat(offer.id)
+        const signedOfferFormat = signData(offerFormat, privateKey)
+        await submitCancelOfferData(offer.id, signedOfferFormat)
+        Logger.info(`[CANCEL BULK] Cancelled offer for ${offer.token.collectionSymbol} ${offer.token.id}`);
+        results.successful.push(token);
+      } else {
+        // No offer found - consider this a success (nothing to cancel)
+        results.successful.push(token);
+      }
+    } catch (error: unknown) {
+      Logger.error(`[CANCEL BULK] Failed to cancel offer for ${token}`, getErrorMessage(error));
+      results.failed.push({ tokenId: token, error: getErrorMessage(error) });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Get offers for a token from API.
+ * @throws Error on API failure (network error, server error, etc.)
+ * @returns OfferData on success (may have empty offers array if no offers exist)
+ */
+export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: string): Promise<OfferData> {
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/';
 
   let params: any = {
@@ -504,28 +629,37 @@ export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: stri
   try {
     const { data } = await limiter.schedule(() => axiosInstance.get<OfferData>(url, { params, headers }))
     return data
-  } catch (error: any) {
-    Logger.error(`[GET OFFERS] getOffers error for ${tokenId.slice(-8)}`, error?.response?.data || error?.message);
-    return { total: '0', offers: [] };
+  } catch (error: unknown) {
+    Logger.error(`[GET OFFERS] getOffers error for ${tokenId.slice(-8)}`, getErrorResponseData(error) || getErrorMessage(error));
+    throw error;
   }
 }
 
 
+/**
+ * Retrieve the cancel offer format from API.
+ * @throws Error on API failure (network error, server error, etc.)
+ * @returns Cancel offer format data on success
+ */
 export async function retrieveCancelOfferFormat(offerId: string) {
   const url = `https://nfttools.pro/magiceden/v2/ord/btc/offers/cancel?offerId=${offerId}`
   try {
-
     const { data } = await limiter.schedule({ priority: 5 }, () =>
       axiosInstance.get(url, { headers })
     );
     return data
-  } catch (error: any) {
-    Logger.error(`[CANCEL] retrieveCancelOfferFormat error for ${offerId}`, error?.response?.data || error?.message);
-    return null;
+  } catch (error: unknown) {
+    Logger.error(`[CANCEL] retrieveCancelOfferFormat error for ${offerId}`, getErrorResponseData(error) || getErrorMessage(error));
+    throw error;
   }
 }
 
-export async function submitCancelOfferData(offerId: string, signedPSBTBase64: string) {
+/**
+ * Submit cancel offer data to the API.
+ * @throws Error on API failure so caller can decide on retry strategy
+ * @returns true if cancellation was successful, false if API returned ok=false
+ */
+export async function submitCancelOfferData(offerId: string, signedPSBTBase64: string): Promise<boolean> {
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/cancel';
   const data = {
     offerId: offerId,
@@ -533,14 +667,20 @@ export async function submitCancelOfferData(offerId: string, signedPSBTBase64: s
   };
   try {
     const response = await limiter.schedule(() => axiosInstance.post(url, data, { headers }))
-    return response.data.ok
-  } catch (error: any) {
-    Logger.error(`[CANCEL] submitCancelOfferData error for ${offerId}`, error?.response?.data || error?.message);
-    return false;
+    return response?.data?.ok ?? false;
+  } catch (error: unknown) {
+    // Log the error for debugging, then re-throw so caller can handle appropriately
+    Logger.error(`[CANCEL] submitCancelOfferData error for ${offerId}`, getErrorResponseData(error) || getErrorMessage(error));
+    throw error;
   }
 }
 
-export async function getUserOffers(buyerPaymentAddress: string) {
+/**
+ * Get all offers for a user by their payment address.
+ * @throws Error on API failure (network error, server error, etc.)
+ * @returns UserOffer on success (may have empty offers array if no offers exist)
+ */
+export async function getUserOffers(buyerPaymentAddress: string): Promise<UserOffer> {
   try {
     const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/';
     const params = {
@@ -553,9 +693,9 @@ export async function getUserOffers(buyerPaymentAddress: string) {
 
     const { data } = await limiter.schedule(() => axiosInstance.get<UserOffer>(url, { params, headers }))
     return data
-  } catch (error: any) {
-    Logger.error(`[OFFERS] getUserOffers error for ${buyerPaymentAddress}`, error?.response?.data || error?.message);
-    return null;
+  } catch (error: unknown) {
+    Logger.error(`[OFFERS] getUserOffers error for ${buyerPaymentAddress}`, getErrorResponseData(error) || getErrorMessage(error));
+    throw error;
   }
 }
 
@@ -570,11 +710,6 @@ interface Offer {
   expirationDate: number;
   isValid: boolean;
   token: any;
-}
-
-interface OfferData {
-  total: string;
-  offers: Offer[];
 }
 
 interface OfferData {

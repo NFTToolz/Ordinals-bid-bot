@@ -28,7 +28,11 @@ export async function addCollectionCommand(): Promise<void> {
   showSectionHeader('ADD COLLECTION');
 
   // Get collection symbol or search
-  const query = await promptText('Enter collection symbol (or search term):');
+  const query = await promptText('Enter collection symbol or search term (empty to cancel):');
+
+  if (!query.trim()) {
+    return;
+  }
 
   // Search Magic Eden
   console.log('');
@@ -49,11 +53,16 @@ export async function addCollectionCommand(): Promise<void> {
     }));
 
     choices.push({ name: '[Enter custom symbol]', value: '__custom__' });
+    choices.push({ name: '← Back', value: '__cancel__' });
 
     const selected = await promptSelect<string>(
       'Select collection:',
       choices
     );
+
+    if (selected === '__cancel__') {
+      return;
+    }
 
     if (selected === '__custom__') {
       selectedSymbol = await promptText('Enter collection symbol:');
@@ -131,13 +140,18 @@ export async function addCollectionCommand(): Promise<void> {
     true
   );
 
-  const offerType = await promptSelect<'ITEM' | 'COLLECTION'>(
+  const offerType = await promptSelect<'ITEM' | 'COLLECTION' | '__cancel__'>(
     'Offer type:',
     [
       { name: 'ITEM (bid on individual items)', value: 'ITEM' },
       { name: 'COLLECTION (collection-wide offer)', value: 'COLLECTION' },
+      { name: '← Back', value: '__cancel__' },
     ]
   );
+
+  if (offerType === '__cancel__') {
+    return;
+  }
 
   const quantity = await promptInteger(
     'Max items to win:',

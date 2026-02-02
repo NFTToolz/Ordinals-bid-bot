@@ -1,5 +1,6 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface, ECPairInterface } from 'ecpair';
+import { Mutex } from 'async-mutex';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -49,9 +50,8 @@ class WalletPool {
   private readonly BIDS_PER_MINUTE: number;
   private readonly network: bitcoin.Network;
 
-  // Mutex for wallet selection to prevent race conditions
-  private selectionLock: Promise<void> | null = null;
-  private selectionLockResolver: (() => void) | null = null;
+  // Proper mutex for wallet selection to prevent race conditions (TOCTOU fix)
+  private readonly selectionMutex = new Mutex();
 
   constructor(
     wallets: WalletConfig[],
@@ -142,35 +142,18 @@ class WalletPool {
   }
 
   /**
-   * Acquire selection lock to prevent race conditions
-   */
-  private async acquireSelectionLock(): Promise<void> {
-    while (this.selectionLock) {
-      await this.selectionLock;
-    }
-    this.selectionLock = new Promise<void>(resolve => {
-      this.selectionLockResolver = resolve;
-    });
-  }
-
-  /**
-   * Release selection lock
-   */
-  private releaseSelectionLock(): void {
-    if (this.selectionLockResolver) {
-      this.selectionLockResolver();
-    }
-    this.selectionLock = null;
-    this.selectionLockResolver = null;
-  }
-
-  /**
    * Get an available wallet using least-recently-used strategy
    * Returns null if all wallets are rate-limited
-   * Uses mutex to prevent race conditions when multiple callers request wallets simultaneously
+   * Uses proper mutex (async-mutex) to prevent TOCTOU race conditions
+   * when multiple callers request wallets simultaneously.
+   *
+   * Previous bug: Promise-based polling lock had race condition where multiple
+   * callers could pass the while-check simultaneously after awaiting.
+   *
+   * Fix: Uses async-mutex which provides atomic acquire/release semantics.
    */
   async getAvailableWalletAsync(): Promise<WalletState | null> {
-    await this.acquireSelectionLock();
+    const release = await this.selectionMutex.acquire();
     try {
       const wallet = this.selectLeastRecentlyUsed();
 
@@ -202,33 +185,17 @@ class WalletPool {
 
       return wallet;
     } finally {
-      this.releaseSelectionLock();
+      release();
     }
   }
 
   /**
-   * Get an available wallet using least-recently-used strategy (synchronous version)
-   * Returns null if all wallets are rate-limited
-   * WARNING: This version has race condition potential - prefer getAvailableWalletAsync when possible
+   * @deprecated Use getAvailableWalletAsync() instead.
+   * Synchronous wallet selection has been removed due to race condition vulnerabilities.
+   * This method now throws an error to ensure callers migrate to the async version.
    */
   getAvailableWallet(): WalletState | null {
-    const wallet = this.selectLeastRecentlyUsed();
-
-    if (!wallet) {
-      // Calculate when next wallet will be available
-      let earliestReset = Infinity;
-      for (const w of this.walletList) {
-        const resetTime = w.windowStart + this.RATE_WINDOW_MS;
-        if (resetTime < earliestReset) {
-          earliestReset = resetTime;
-        }
-      }
-      const waitTime = Math.max(0, earliestReset - Date.now());
-      console.log(`[WALLET POOL] All wallets rate-limited. Next available in ${(waitTime / 1000).toFixed(1)}s`);
-      return null;
-    }
-
-    return wallet;
+    throw new Error('[WALLET POOL] Sync getAvailableWallet() is deprecated and removed. Use getAvailableWalletAsync() instead to prevent race conditions.');
   }
 
   /**
@@ -356,7 +323,10 @@ class WalletPool {
   }
 }
 
-// Singleton instance
+// Export the WalletPool class for use by WalletGroupManager
+export { WalletPool };
+
+// Singleton instance (for backward compatibility with single-pool mode)
 let poolInstance: WalletPool | null = null;
 
 /**
@@ -397,10 +367,11 @@ export function isWalletPoolInitialized(): boolean {
 }
 
 /**
- * Quick access: Get an available wallet from the pool (synchronous)
+ * @deprecated Use getAvailableWalletAsync() instead.
+ * Synchronous wallet selection has been removed due to race condition vulnerabilities.
  */
 export function getAvailableWallet(): WalletState | null {
-  return getWalletPool().getAvailableWallet();
+  throw new Error('[WALLET POOL] Sync getAvailableWallet() is deprecated. Use getAvailableWalletAsync() instead.');
 }
 
 /**

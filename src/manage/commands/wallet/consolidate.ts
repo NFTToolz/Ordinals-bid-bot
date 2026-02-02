@@ -1,7 +1,7 @@
 import { config } from 'dotenv';
 import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
-import { loadWallets, getWalletFromWIF } from '../../services/WalletGenerator';
+import { loadWallets, getWalletFromWIF, isGroupsFormat, getAllWalletsFromGroups } from '../../services/WalletGenerator';
 import { checkAddressesForInscriptions } from '../../services/OrdinalsService';
 import {
   buildConsolidationTransaction,
@@ -15,6 +15,7 @@ import {
   showTable,
   formatBTC,
   withSpinner,
+  getSeparatorWidth,
 } from '../../utils/display';
 import {
   promptConfirm,
@@ -76,36 +77,23 @@ export async function consolidateFunds(): Promise<void> {
   let sourceWallets = walletsWithFunds;
 
   if (!consolidateAll) {
-    // Let user select specific wallets
-    const { selectedWallets } = await require('inquirer').prompt([{
-      type: 'checkbox',
-      name: 'selectedWallets',
-      message: 'Select wallets to consolidate:',
-      choices: walletsWithFunds.map(w => ({
-        name: `${w.label} - ${formatBTC(w.balance.total)}`,
-        value: w.paymentAddress,
-        checked: true,
-      })),
-    }]);
-
-    if (selectedWallets.length === 0) {
-      showWarning('No wallets selected');
-      return;
-    }
-
-    sourceWallets = walletsWithFunds.filter(w =>
-      selectedWallets.includes(w.paymentAddress)
-    );
+    showWarning('Consolidation cancelled');
+    return;
   }
 
   // Destination selection
-  const destChoice = await promptSelect<'main' | 'other'>(
+  const destChoice = await promptSelect<'main' | 'other' | '__cancel__'>(
     'Consolidate to:',
     [
       { name: 'Main Wallet (FUNDING_WIF)', value: 'main' },
       { name: 'Another address', value: 'other' },
+      { name: '← Back', value: '__cancel__' },
     ]
   );
+
+  if (destChoice === '__cancel__') {
+    return;
+  }
 
   let destinationAddress: string;
 
@@ -186,10 +174,18 @@ export async function consolidateFunds(): Promise<void> {
     return;
   }
 
+  // Get wallets from either format
+  let configWallets: Array<{ label: string; wif: string; receiveAddress: string }> = [];
+  if (isGroupsFormat(walletsConfig)) {
+    configWallets = getAllWalletsFromGroups();
+  } else if (walletsConfig.wallets?.length) {
+    configWallets = walletsConfig.wallets;
+  }
+
   const signingWallets: Array<{ wif: string; address: string }> = [];
 
   sourceWallets.forEach(w => {
-    const walletConfig = walletsConfig.wallets.find(
+    const walletConfig = configWallets.find(
       wc => {
         try {
           const info = getWalletFromWIF(wc.wif, network);
@@ -224,17 +220,17 @@ export async function consolidateFunds(): Promise<void> {
     );
 
     console.log('');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('  CONSOLIDATION PREVIEW');
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log(`  Source wallets:    ${sourceWallets.length}`);
     console.log(`  Total inputs:      ${preview.inputs.length} UTXOs`);
     console.log(`  Input amount:      ${formatBTC(preview.totalInput)}`);
     console.log(`  Network fee:       ${formatBTC(preview.fee)}`);
     console.log(`  Output amount:     ${formatBTC(preview.totalOutput)}`);
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log(`  Destination:       ${destinationAddress.slice(0, 12)}...${destinationAddress.slice(-8)}`);
-    console.log('━'.repeat(50));
+    console.log('━'.repeat(getSeparatorWidth()));
     console.log('');
 
     // Dangerous confirmation

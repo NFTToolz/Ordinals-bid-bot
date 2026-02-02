@@ -148,12 +148,20 @@ class BidPacer {
   onRateLimitError(errorMessage?: string): void {
     let pauseDuration = this.WINDOW_MS;  // Default 60s
 
-    // Try to extract retry time from error message (e.g., "retry in 1 minute")
+    // Try to extract retry time from error message (e.g., "retry in 1 minute", "retry in 30 seconds", "retry in 1 hour")
     if (errorMessage) {
-      const match = errorMessage.match(/retry in (\d+) minute/i);
-      if (match) {
-        pauseDuration = parseInt(match[1]) * 60 * 1000;
+      const minuteMatch = errorMessage.match(/retry in (\d+) minute/i);
+      const secondMatch = errorMessage.match(/retry in (\d+) second/i);
+      const hourMatch = errorMessage.match(/retry in (\d+) hour/i);
+
+      if (minuteMatch) {
+        pauseDuration = parseInt(minuteMatch[1]) * 60 * 1000;
+      } else if (secondMatch) {
+        pauseDuration = parseInt(secondMatch[1]) * 1000;
+      } else if (hourMatch) {
+        pauseDuration = parseInt(hourMatch[1]) * 60 * 60 * 1000;
       }
+      // If no match, keep default 60s
     }
 
     // Force the count to max to trigger pause on next waitForSlot

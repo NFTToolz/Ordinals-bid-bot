@@ -3,3 +3,4 @@ export { addCollectionCommand } from './add';
 export { editCollection } from './edit';
 export { removeCollectionCommand } from './remove';
 export { scanCollections } from './scan';
+export { assignCollectionGroup } from './assignGroup';

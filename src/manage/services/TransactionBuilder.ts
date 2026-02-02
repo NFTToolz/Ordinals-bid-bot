@@ -33,7 +33,7 @@ export interface TransactionPreview {
 /**
  * Estimate transaction size for P2WPKH inputs and outputs
  */
-function estimateTransactionSize(inputCount: number, outputCount: number): number {
+export function estimateTransactionSize(inputCount: number, outputCount: number): number {
   // P2WPKH transaction size estimation
   // Header: 10 bytes (version + locktime)
   // Input: ~68 bytes each (P2WPKH)
@@ -45,7 +45,7 @@ function estimateTransactionSize(inputCount: number, outputCount: number): numbe
 /**
  * Select UTXOs for a transaction using a simple algorithm
  */
-function selectUTXOs(utxos: UTXO[], targetAmount: number, feeRate: number): { selected: UTXO[]; fee: number } | null {
+export function selectUTXOs(utxos: UTXO[], targetAmount: number, feeRate: number): { selected: UTXO[]; fee: number } | null {
   // Sort UTXOs by value (largest first)
   const sorted = [...utxos].sort((a, b) => b.value - a.value);
 

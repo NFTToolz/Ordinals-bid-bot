@@ -1,5 +1,5 @@
-export function transformTrait(jsonArray: Trait[]) {
-  const groupedObjects: any = {};
+export function transformTrait(jsonArray: Trait[]): Attribute[] {
+  const groupedObjects: Record<string, Trait[]> = {};
 
   jsonArray.forEach(obj => {
     const { traitType } = obj;

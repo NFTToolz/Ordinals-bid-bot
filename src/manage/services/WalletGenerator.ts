@@ -39,6 +39,26 @@ export interface WalletsFile {
   lastModified?: string;
 }
 
+/**
+ * Wallet group configuration
+ */
+export interface WalletGroupConfig {
+  wallets: WalletConfig[];
+  bidsPerMinute?: number;
+}
+
+/**
+ * New wallet groups file format
+ */
+export interface WalletGroupsFile {
+  groups: Record<string, WalletGroupConfig>;
+  defaultGroup?: string;
+  mnemonic?: string;
+  encryptedMnemonic?: string;
+  createdAt?: string;
+  lastModified?: string;
+}
+
 const WALLETS_FILE_PATH = path.join(process.cwd(), 'config/wallets.json');
 
 /**
@@ -343,4 +363,387 @@ export function importWalletsFromBackup(
   } catch (error) {
     return null;
   }
+}
+
+// ============================================================
+// WALLET GROUPS MANAGEMENT
+// ============================================================
+
+/**
+ * Check if the config file uses the new groups format
+ */
+export function isGroupsFormat(data: any): data is WalletGroupsFile {
+  return data && typeof data.groups === 'object' && !Array.isArray(data.groups);
+}
+
+/**
+ * Load wallet groups from config file
+ * Returns null if file doesn't exist, or legacy format data if it's the old format
+ */
+export function loadWalletGroups(): WalletGroupsFile | null {
+  try {
+    if (!fs.existsSync(WALLETS_FILE_PATH)) {
+      return null;
+    }
+    const content = fs.readFileSync(WALLETS_FILE_PATH, 'utf-8');
+    const data = JSON.parse(content);
+
+    // Check if it's already in groups format
+    if (isGroupsFormat(data)) {
+      return data;
+    }
+
+    // It's legacy format - return null to indicate migration needed
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Save wallet groups to config file
+ */
+export function saveWalletGroups(data: WalletGroupsFile): void {
+  const dir = path.dirname(WALLETS_FILE_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  data.lastModified = new Date().toISOString();
+  if (!data.createdAt) {
+    data.createdAt = data.lastModified;
+  }
+
+  fs.writeFileSync(WALLETS_FILE_PATH, JSON.stringify(data, null, 2));
+}
+
+/**
+ * Migrate from legacy flat wallets format to new groups format
+ * Creates a "default" group containing all existing wallets
+ */
+export function migrateToGroupsFormat(): WalletGroupsFile | null {
+  const legacy = loadWallets();
+  if (!legacy) {
+    return null;
+  }
+
+  const groupsData: WalletGroupsFile = {
+    groups: {
+      default: {
+        wallets: legacy.wallets,
+        bidsPerMinute: legacy.bidsPerMinute || 5,
+      },
+    },
+    defaultGroup: 'default',
+    mnemonic: legacy.mnemonic,
+    encryptedMnemonic: legacy.encryptedMnemonic,
+    createdAt: legacy.createdAt,
+    lastModified: new Date().toISOString(),
+  };
+
+  saveWalletGroups(groupsData);
+  return groupsData;
+}
+
+/**
+ * Create a new wallet group
+ */
+export function createWalletGroup(
+  groupName: string,
+  bidsPerMinute: number = 5
+): boolean {
+  let data = loadWalletGroups();
+
+  // If no groups file exists, check for legacy and migrate
+  if (!data) {
+    const legacy = loadWallets();
+    if (legacy && legacy.wallets.length > 0) {
+      data = migrateToGroupsFormat();
+    } else {
+      // Start fresh
+      data = {
+        groups: {},
+        createdAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  if (!data) {
+    data = {
+      groups: {},
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  // Check if group already exists
+  if (data.groups[groupName]) {
+    return false;
+  }
+
+  data.groups[groupName] = {
+    wallets: [],
+    bidsPerMinute,
+  };
+
+  // If this is the first group, set it as default
+  if (Object.keys(data.groups).length === 1) {
+    data.defaultGroup = groupName;
+  }
+
+  saveWalletGroups(data);
+  return true;
+}
+
+/**
+ * Delete a wallet group (only if empty)
+ */
+export function deleteWalletGroup(groupName: string): { success: boolean; error?: string } {
+  const data = loadWalletGroups();
+  if (!data) {
+    return { success: false, error: 'No wallet groups configured' };
+  }
+
+  if (!data.groups[groupName]) {
+    return { success: false, error: `Group "${groupName}" not found` };
+  }
+
+  if (data.groups[groupName].wallets.length > 0) {
+    return { success: false, error: `Group "${groupName}" is not empty. Remove all wallets first.` };
+  }
+
+  delete data.groups[groupName];
+
+  // Update default group if deleted
+  if (data.defaultGroup === groupName) {
+    const remainingGroups = Object.keys(data.groups);
+    data.defaultGroup = remainingGroups.length > 0 ? remainingGroups[0] : undefined;
+  }
+
+  saveWalletGroups(data);
+  return { success: true };
+}
+
+/**
+ * Add a wallet to a group
+ * Returns false if wallet already exists in any group
+ */
+export function addWalletToGroup(
+  groupName: string,
+  wallet: WalletConfig
+): { success: boolean; error?: string } {
+  const data = loadWalletGroups();
+  if (!data) {
+    return { success: false, error: 'No wallet groups configured. Create a group first.' };
+  }
+
+  if (!data.groups[groupName]) {
+    return { success: false, error: `Group "${groupName}" not found` };
+  }
+
+  // Check if wallet already exists in any group
+  for (const [gName, group] of Object.entries(data.groups)) {
+    const existing = group.wallets.find(
+      w => w.wif === wallet.wif || w.receiveAddress === wallet.receiveAddress
+    );
+    if (existing) {
+      return {
+        success: false,
+        error: `Wallet "${wallet.label}" already exists in group "${gName}"`,
+      };
+    }
+  }
+
+  data.groups[groupName].wallets.push(wallet);
+  saveWalletGroups(data);
+  return { success: true };
+}
+
+/**
+ * Remove a wallet from a group by label
+ */
+export function removeWalletFromGroup(
+  groupName: string,
+  walletLabel: string
+): { success: boolean; error?: string } {
+  const data = loadWalletGroups();
+  if (!data) {
+    return { success: false, error: 'No wallet groups configured' };
+  }
+
+  if (!data.groups[groupName]) {
+    return { success: false, error: `Group "${groupName}" not found` };
+  }
+
+  const initialCount = data.groups[groupName].wallets.length;
+  data.groups[groupName].wallets = data.groups[groupName].wallets.filter(
+    w => w.label !== walletLabel
+  );
+
+  if (data.groups[groupName].wallets.length === initialCount) {
+    return { success: false, error: `Wallet "${walletLabel}" not found in group "${groupName}"` };
+  }
+
+  saveWalletGroups(data);
+  return { success: true };
+}
+
+/**
+ * Move a wallet from one group to another
+ */
+export function moveWalletToGroup(
+  walletLabel: string,
+  targetGroupName: string
+): { success: boolean; error?: string } {
+  const data = loadWalletGroups();
+  if (!data) {
+    return { success: false, error: 'No wallet groups configured' };
+  }
+
+  if (!data.groups[targetGroupName]) {
+    return { success: false, error: `Target group "${targetGroupName}" not found` };
+  }
+
+  // Find wallet in any group
+  let wallet: WalletConfig | null = null;
+  let sourceGroup: string | null = null;
+
+  for (const [gName, group] of Object.entries(data.groups)) {
+    const found = group.wallets.find(w => w.label === walletLabel);
+    if (found) {
+      wallet = found;
+      sourceGroup = gName;
+      break;
+    }
+  }
+
+  if (!wallet || !sourceGroup) {
+    return { success: false, error: `Wallet "${walletLabel}" not found in any group` };
+  }
+
+  if (sourceGroup === targetGroupName) {
+    return { success: false, error: `Wallet "${walletLabel}" is already in group "${targetGroupName}"` };
+  }
+
+  // Remove from source group
+  data.groups[sourceGroup].wallets = data.groups[sourceGroup].wallets.filter(
+    w => w.label !== walletLabel
+  );
+
+  // Add to target group
+  data.groups[targetGroupName].wallets.push(wallet);
+
+  saveWalletGroups(data);
+  return { success: true };
+}
+
+/**
+ * Get a specific wallet group
+ */
+export function getWalletGroup(groupName: string): WalletGroupConfig | null {
+  const data = loadWalletGroups();
+  if (!data || !data.groups[groupName]) {
+    return null;
+  }
+  return data.groups[groupName];
+}
+
+/**
+ * Get all wallet group names
+ */
+export function getWalletGroupNames(): string[] {
+  const data = loadWalletGroups();
+  if (!data) {
+    return [];
+  }
+  return Object.keys(data.groups);
+}
+
+/**
+ * Update bidsPerMinute for a group
+ */
+export function updateGroupBidsPerMinute(
+  groupName: string,
+  bidsPerMinute: number
+): boolean {
+  const data = loadWalletGroups();
+  if (!data || !data.groups[groupName]) {
+    return false;
+  }
+
+  data.groups[groupName].bidsPerMinute = bidsPerMinute;
+  saveWalletGroups(data);
+  return true;
+}
+
+/**
+ * Set the default group
+ */
+export function setDefaultGroup(groupName: string): boolean {
+  const data = loadWalletGroups();
+  if (!data || !data.groups[groupName]) {
+    return false;
+  }
+
+  data.defaultGroup = groupName;
+  saveWalletGroups(data);
+  return true;
+}
+
+/**
+ * Find which group a wallet belongs to by label
+ */
+export function findWalletGroup(walletLabel: string): string | null {
+  const data = loadWalletGroups();
+  if (!data) return null;
+
+  for (const [groupName, group] of Object.entries(data.groups)) {
+    if (group.wallets.some(w => w.label === walletLabel)) {
+      return groupName;
+    }
+  }
+  return null;
+}
+
+/**
+ * Get all wallets from all groups (flattened)
+ */
+export function getAllWalletsFromGroups(): Array<WalletConfig & { groupName: string }> {
+  const data = loadWalletGroups();
+  if (!data) return [];
+
+  const allWallets: Array<WalletConfig & { groupName: string }> = [];
+  for (const [groupName, group] of Object.entries(data.groups)) {
+    for (const wallet of group.wallets) {
+      allWallets.push({ ...wallet, groupName });
+    }
+  }
+  return allWallets;
+}
+
+/**
+ * Get wallets not assigned to any group (from legacy format)
+ * Useful for migration scenarios
+ */
+export function getUnassignedWallets(): WalletConfig[] {
+  const legacy = loadWallets();
+  const groups = loadWalletGroups();
+
+  if (!legacy || !legacy.wallets.length) {
+    return [];
+  }
+
+  // If groups format exists, check which legacy wallets are not in any group
+  if (groups) {
+    const assignedWifs = new Set<string>();
+    for (const group of Object.values(groups.groups)) {
+      for (const wallet of group.wallets) {
+        assignedWifs.add(wallet.wif);
+      }
+    }
+
+    return legacy.wallets.filter(w => !assignedWifs.has(w.wif));
+  }
+
+  // No groups format - all legacy wallets are unassigned
+  return legacy.wallets;
 }

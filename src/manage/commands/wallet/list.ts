@@ -1,17 +1,19 @@
 import { config } from 'dotenv';
 import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
-import { loadWallets, getWalletFromWIF } from '../../services/WalletGenerator';
+import { loadWallets, getWalletFromWIF, isGroupsFormat, getAllWalletsFromGroups } from '../../services/WalletGenerator';
 import { getAllBalances, calculateTotalBalance, AddressBalance } from '../../services/BalanceService';
 import {
   showSectionHeader,
   showSuccess,
   showError,
   showWarning,
-  showTable,
   formatBTC,
   withSpinner,
+  getSeparatorWidth,
 } from '../../utils/display';
+import { TableColumn, TableData } from '../../utils/table';
+import { showInteractiveTable } from '../../utils/interactiveTable';
 
 config();
 
@@ -55,20 +57,38 @@ export async function listWallets(): Promise<void> {
   }
 
   // Add wallets from config
-  const walletsConfig = loadWallets();
-  if (walletsConfig && walletsConfig.wallets.length > 0) {
-    walletsConfig.wallets.forEach(w => {
-      try {
-        const walletInfo = getWalletFromWIF(w.wif, network);
-        allWallets.push({
-          label: w.label,
-          paymentAddress: walletInfo.paymentAddress,
-          receiveAddress: w.receiveAddress,
-        });
-      } catch (error) {
-        showWarning(`Could not load wallet: ${w.label}`);
-      }
-    });
+  const walletsData = loadWallets();
+  if (walletsData) {
+    if (isGroupsFormat(walletsData)) {
+      // Groups format - get all wallets from all groups
+      const groupWallets = getAllWalletsFromGroups();
+      groupWallets.forEach(w => {
+        try {
+          const walletInfo = getWalletFromWIF(w.wif, network);
+          allWallets.push({
+            label: w.label,
+            paymentAddress: walletInfo.paymentAddress,
+            receiveAddress: w.receiveAddress,
+          });
+        } catch (error) {
+          showWarning(`Could not load wallet: ${w.label}`);
+        }
+      });
+    } else if (walletsData.wallets?.length > 0) {
+      // Legacy format
+      walletsData.wallets.forEach(w => {
+        try {
+          const walletInfo = getWalletFromWIF(w.wif, network);
+          allWallets.push({
+            label: w.label,
+            paymentAddress: walletInfo.paymentAddress,
+            receiveAddress: w.receiveAddress,
+          });
+        } catch (error) {
+          showWarning(`Could not load wallet: ${w.label}`);
+        }
+      });
+    }
   }
 
   if (allWallets.length === 0) {
@@ -95,33 +115,49 @@ export async function listWallets(): Promise<void> {
   const balanceMap = new Map<string, AddressBalance>();
   balances.forEach(b => balanceMap.set(b.address, b));
 
-  // Display table
-  const headers = ['Label', 'Payment Address', 'Balance', 'UTXOs'];
-  const rows: string[][] = [];
+  // Build table data for interactive display
+  const columns: TableColumn[] = [
+    { key: 'label', label: 'Label', width: 30 },
+    { key: 'address', label: 'Payment Address', width: 22 },
+    { key: 'balance', label: 'Balance', width: 20, align: 'right' },
+    { key: 'balanceSats', label: 'Sats', width: 14, align: 'right' },
+    { key: 'utxos', label: 'UTXOs', width: 8, align: 'right' },
+  ];
 
-  allWallets.forEach(w => {
+  const rows = allWallets.map(w => {
     const balance = balanceMap.get(w.paymentAddress);
-    rows.push([
-      w.label.length > 25 ? w.label.slice(0, 22) + '...' : w.label,
-      w.paymentAddress.slice(0, 8) + '...' + w.paymentAddress.slice(-6),
-      balance ? formatBTC(balance.total) : '0.00000000 BTC',
-      balance ? balance.utxoCount.toString() : '0',
-    ]);
+    return {
+      label: w.label.length > 28 ? w.label.slice(0, 25) + '...' : w.label,
+      address: w.paymentAddress.slice(0, 8) + '...' + w.paymentAddress.slice(-6),
+      fullAddress: w.paymentAddress,
+      balance: balance ? formatBTC(balance.total) : '0.00000000 BTC',
+      balanceSats: balance ? balance.total : 0,
+      utxos: balance ? balance.utxoCount : 0,
+    };
   });
 
-  showTable(headers, rows, [28, 20, 18, 6]);
+  const tableData: TableData = { columns, rows };
 
-  // Summary
+  // Show summary first
   const totals = calculateTotalBalance(balances);
   console.log('');
-  console.log('━'.repeat(60));
+  console.log('━'.repeat(getSeparatorWidth()));
   console.log(`  Total Confirmed:   ${formatBTC(totals.confirmed)}`);
   if (totals.unconfirmed !== 0) {
     console.log(`  Pending:           ${formatBTC(totals.unconfirmed)}`);
   }
   console.log(`  Total:             ${formatBTC(totals.total)}`);
-  console.log('━'.repeat(60));
+  console.log('━'.repeat(getSeparatorWidth()));
   console.log('');
+
+  // Show interactive table
+  await showInteractiveTable(tableData, {
+    title: 'WALLET BALANCES',
+    pageSize: 15,
+    allowSort: true,
+    allowExport: true,
+    exportBaseName: 'wallets',
+  });
 }
 
 export async function getWalletsWithBalances(): Promise<WalletWithBalance[]> {
@@ -147,12 +183,20 @@ export async function getWalletsWithBalances(): Promise<WalletWithBalance[]> {
   }
 
   // Config wallets
-  const walletsConfig = loadWallets();
-  if (walletsConfig && walletsConfig.wallets.length > 0) {
+  const walletsData = loadWallets();
+  if (walletsData) {
     const addresses: string[] = [];
     const walletData: Array<{ label: string; paymentAddress: string; receiveAddress: string }> = [];
 
-    walletsConfig.wallets.forEach(w => {
+    // Get wallets from either groups format or legacy format
+    let configWallets: Array<{ label: string; wif: string; receiveAddress: string }> = [];
+    if (isGroupsFormat(walletsData)) {
+      configWallets = getAllWalletsFromGroups();
+    } else if (walletsData.wallets?.length > 0) {
+      configWallets = walletsData.wallets;
+    }
+
+    configWallets.forEach(w => {
       try {
         const walletInfo = getWalletFromWIF(w.wif, network);
         addresses.push(walletInfo.paymentAddress);

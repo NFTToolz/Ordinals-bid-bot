@@ -5,6 +5,8 @@ import {
   addWalletsToConfig,
   getNextWalletIndex,
   loadWallets,
+  isGroupsFormat,
+  getAllWalletsFromGroups,
 } from '../../services/WalletGenerator';
 import {
   showSectionHeader,
@@ -30,13 +32,25 @@ export async function createWallets(): Promise<void> {
 
   // Check existing wallets
   const existing = loadWallets();
-  if (existing && existing.wallets.length > 0) {
-    console.log(`You have ${existing.wallets.length} existing wallet(s).`);
-    console.log('');
+  if (existing) {
+    let existingCount = 0;
+    if (isGroupsFormat(existing)) {
+      existingCount = getAllWalletsFromGroups().length;
+    } else if (existing.wallets?.length) {
+      existingCount = existing.wallets.length;
+    }
+    if (existingCount > 0) {
+      console.log(`You have ${existingCount} existing wallet(s).`);
+      console.log('');
+    }
   }
 
   // Get number of wallets
-  const count = await promptInteger('How many wallets to create?', 5);
+  const count = await promptInteger('How many wallets to create? (0 to cancel)', 5);
+
+  if (count === 0) {
+    return;
+  }
 
   if (count < 1 || count > 100) {
     showError('Please enter a number between 1 and 100');
@@ -44,13 +58,18 @@ export async function createWallets(): Promise<void> {
   }
 
   // Mnemonic source
-  const mnemonicSource = await promptSelect<'generate' | 'existing'>(
+  const mnemonicSource = await promptSelect<'generate' | 'existing' | '__cancel__'>(
     'Use existing mnemonic or generate new?',
     [
       { name: 'Generate new mnemonic', value: 'generate' },
       { name: 'Use existing mnemonic', value: 'existing' },
+      { name: '← Back', value: '__cancel__' },
     ]
   );
+
+  if (mnemonicSource === '__cancel__') {
+    return;
+  }
 
   let mnemonic: string;
 

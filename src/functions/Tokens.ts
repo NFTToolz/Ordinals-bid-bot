@@ -12,7 +12,12 @@ const headers = {
   'X-NFT-API-Key': API_KEY,
 }
 
-export async function retrieveTokens(collectionSymbol: string, bidCount: number = 20, traits?: Trait[] | Trait): Promise<ITokenData[] | null> {
+/**
+ * Retrieve tokens for a collection from API.
+ * @throws Error on API failure (network error, server error, etc.)
+ * @returns Array of listed tokens on success (may be empty if no tokens match)
+ */
+export async function retrieveTokens(collectionSymbol: string, bidCount: number = 20, traits?: Trait[] | Trait): Promise<ITokenData[]> {
   try {
 
     const limit = getLimit(bidCount)
@@ -31,7 +36,7 @@ export async function retrieveTokens(collectionSymbol: string, bidCount: number 
 
       const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }));
 
-      const tokens = data.tokens.filter(item => item.listed === true)
+      const tokens = (data?.tokens ?? []).filter(item => item.listed === true)
 
       return tokens
     } else {
@@ -54,12 +59,12 @@ export async function retrieveTokens(collectionSymbol: string, bidCount: number 
       const url = 'https://nfttools.pro/magiceden/v2/ord/btc/attributes';
 
       const { data } = await limiter.schedule(() => axiosInstance.get<IToken>(url, { params, headers }))
-      const tokens = data.tokens.filter(item => item.listed === true)
+      const tokens = (data?.tokens ?? []).filter(item => item.listed === true)
       return tokens
     }
   } catch (error: any) {
     Logger.error(`[TOKENS] retrieveTokens error for ${collectionSymbol}`, error?.response?.data || error?.message);
-    return null;
+    throw error;
   }
 }
 
@@ -67,10 +72,10 @@ export interface IToken {
   tokens: ITokenData[]
 }
 
-function getLimit(bidCount: number): number {
-  const quotient = Math.floor((bidCount + 19) / 20);
-
-  return Math.min(quotient * 20, 100);
+export function getLimit(bidCount: number): number {
+  // Fetch 3x bidCount to have buffer for skipped tokens (when best offer > maxOffer)
+  // Minimum 60 tokens, maximum 100 (API limit)
+  return Math.min(Math.max(bidCount * 3, 60), 100);
 }
 
 interface Attribute { }
