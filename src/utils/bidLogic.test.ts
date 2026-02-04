@@ -185,28 +185,28 @@ describe('bidLogic', () => {
   });
 
   describe('calculateMinimumBidPrice', () => {
-    it('should use 50% of listed price when higher than minOffer', () => {
+    it('should always return minOffer regardless of listed price', () => {
       const listedPrice = 1000000;
       const minOffer = 100000;
 
       const result = calculateMinimumBidPrice(listedPrice, minOffer);
-      expect(result).toBe(500000); // 50% of listed
+      expect(result).toBe(100000); // always returns minOffer
     });
 
-    it('should use minOffer when higher than 50% of listed', () => {
+    it('should return minOffer even when it equals listed price', () => {
       const listedPrice = 100000;
       const minOffer = 100000;
 
       const result = calculateMinimumBidPrice(listedPrice, minOffer);
-      expect(result).toBe(100000); // minOffer is higher
+      expect(result).toBe(100000);
     });
 
-    it('should round the result', () => {
+    it('should return minOffer without any rounding', () => {
       const listedPrice = 123457;
-      const minOffer = 10000;
+      const minOffer = 10001;
 
       const result = calculateMinimumBidPrice(listedPrice, minOffer);
-      expect(Number.isInteger(result)).toBe(true);
+      expect(result).toBe(10001); // returns minOffer as-is
     });
   });
 

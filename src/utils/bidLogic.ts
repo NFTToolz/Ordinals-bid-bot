@@ -154,7 +154,7 @@ export function calculateMinimumBidPrice(
   listedPrice: number,
   minOffer: number
 ): number {
-  return Math.max(Math.round(listedPrice * 0.5), minOffer);
+  return minOffer;
 }
 
 // ============================================================================

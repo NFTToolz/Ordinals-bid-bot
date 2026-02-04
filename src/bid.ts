@@ -1751,7 +1751,7 @@ class EventManager {
                         noActionNeeded++;
                       }
                     } else {
-                      const bidPrice = Math.max(minOffer, Math.round(listedPrice * 0.5))
+                      const bidPrice = minOffer
                       if (bestPrice !== bidPrice) { // self adjust bids.
                         if (bidPrice <= maxOffer) {
                           try {
