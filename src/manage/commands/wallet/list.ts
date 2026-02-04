@@ -213,10 +213,10 @@ export async function getWalletsWithBalances(): Promise<WalletWithBalance[]> {
     if (addresses.length > 0) {
       const balances = await getAllBalances(addresses);
       const balanceMap = new Map<string, AddressBalance>();
-      balances.forEach(b => balanceMap.set(b.address, b));
+      balances.forEach(b => balanceMap.set(b.address.toLowerCase(), b));
 
       walletData.forEach(w => {
-        const balance = balanceMap.get(w.paymentAddress);
+        const balance = balanceMap.get(w.paymentAddress.toLowerCase());
         if (balance) {
           result.push({
             label: w.label,

@@ -70,23 +70,10 @@ export async function viewLogs(): Promise<void> {
 
   } else if (action === 'follow') {
     console.log('');
-    console.log('Following logs... (Press Ctrl+C to stop)');
+    console.log('Following logs... (Press Enter to return to menu)');
     console.log('━'.repeat(getSeparatorWidth()));
 
-    // Set up signal handler
     let stopFollowing: (() => void) | null = null;
-
-    const cleanup = () => {
-      if (stopFollowing) {
-        stopFollowing();
-      }
-      console.log('');
-      console.log('━'.repeat(getSeparatorWidth()));
-      console.log('Stopped following logs.');
-      process.removeListener('SIGINT', cleanup);
-    };
-
-    process.on('SIGINT', cleanup);
 
     // Start following
     stopFollowing = followLogs(line => {
@@ -104,8 +91,42 @@ export async function viewLogs(): Promise<void> {
       }
     });
 
-    // Wait indefinitely (until Ctrl+C)
-    await new Promise<void>(() => {});
+    // Wait for Enter key
+    await new Promise<void>((resolve) => {
+      const wasRaw = process.stdin.isRaw;
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+      }
+      process.stdin.resume();
+
+      const cleanup = () => {
+        process.stdin.removeListener('data', onData);
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(wasRaw ?? false);
+        }
+        if (stopFollowing) {
+          stopFollowing();
+        }
+        console.log('');
+        console.log('━'.repeat(getSeparatorWidth()));
+        console.log('Stopped following logs.');
+      };
+
+      const onData = (key: Buffer) => {
+        // Enter key (carriage return or newline)
+        if (key[0] === 13 || key[0] === 10) {
+          cleanup();
+          resolve();
+        }
+        // Also handle Ctrl+C as fallback
+        if (key[0] === 3) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      process.stdin.on('data', onData);
+    });
 
   } else if (action === 'clear') {
     const confirm = await promptConfirm('Clear all logs?', false);

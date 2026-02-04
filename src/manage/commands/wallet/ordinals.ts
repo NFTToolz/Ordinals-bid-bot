@@ -119,7 +119,9 @@ export async function viewOrdinals(): Promise<void> {
       return;
     }
 
-    selectedWallets = allWallets.filter(w => selected.includes(w.receiveAddress));
+    selectedWallets = allWallets.filter(w =>
+      selected.some(s => s.toLowerCase() === w.receiveAddress.toLowerCase())
+    );
   }
 
   // Scan for tokens/inscriptions
@@ -142,7 +144,7 @@ export async function viewOrdinals(): Promise<void> {
       );
 
       walletResults = meResults.map(result => {
-        const wallet = selectedWallets.find(w => w.receiveAddress === result.address);
+        const wallet = selectedWallets.find(w => w.receiveAddress.toLowerCase() === result.address.toLowerCase());
         return {
           address: result.address,
           label: wallet?.label || 'Unknown',
@@ -236,7 +238,7 @@ function displayHiroResults(
   let totalInscriptions = 0;
 
   results.forEach(result => {
-    const wallet = selectedWallets.find(w => w.receiveAddress === result.address);
+    const wallet = selectedWallets.find(w => w.receiveAddress.toLowerCase() === result.address.toLowerCase());
     const label = wallet?.label || 'Unknown';
 
     if (result.total > 0) {

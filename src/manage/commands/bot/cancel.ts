@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import * as bitcoin from 'bitcoinjs-lib';
 import { config } from 'dotenv';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
@@ -27,6 +28,10 @@ import {
   getWalletByPaymentAddress,
   isWalletPoolInitialized,
 } from '../../../utils/walletPool';
+import {
+  getAllOurPaymentAddresses,
+  getAllOurReceiveAddresses,
+} from '../../../utils/walletHelpers';
 import { loadCollections, CollectionConfig } from '../../services/CollectionService';
 
 config();
@@ -55,6 +60,27 @@ interface CancelResult {
   errors: string[];
 }
 
+// Reset bot data files (bid history and stats)
+function resetBotData(): { historyReset: boolean; statsReset: boolean } {
+  const dataDir = path.join(process.cwd(), 'data');
+  let historyReset = false;
+  let statsReset = false;
+
+  const historyPath = path.join(dataDir, 'bidHistory.json');
+  if (fs.existsSync(historyPath)) {
+    fs.unlinkSync(historyPath);
+    historyReset = true;
+  }
+
+  const statsPath = path.join(dataDir, 'botStats.json');
+  if (fs.existsSync(statsPath)) {
+    fs.unlinkSync(statsPath);
+    statsReset = true;
+  }
+
+  return { historyReset, statsReset };
+}
+
 function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInfo[] {
   const addresses: AddressInfo[] = [];
   const seenAddresses = new Set<string>();
@@ -63,17 +89,39 @@ function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInf
   if (ENABLE_WALLET_ROTATION && fs.existsSync(WALLET_CONFIG_PATH)) {
     try {
       const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-      for (const wallet of walletConfig.wallets || []) {
-        if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
-          const keyPair = ECPair.fromWIF(wallet.wif, network);
-          addresses.push({
-            address: wallet.receiveAddress,
-            privateKey: wallet.wif,
-            publicKey: keyPair.publicKey.toString('hex'),
-            paymentAddress: bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network }).address as string,
-            label: wallet.label,
-          });
-          seenAddresses.add(wallet.receiveAddress.toLowerCase());
+
+      // Handle groups format
+      if (walletConfig.groups && typeof walletConfig.groups === 'object') {
+        for (const groupName of Object.keys(walletConfig.groups)) {
+          const group = walletConfig.groups[groupName];
+          for (const wallet of group.wallets || []) {
+            if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
+              const keyPair = ECPair.fromWIF(wallet.wif, network);
+              addresses.push({
+                address: wallet.receiveAddress,
+                privateKey: wallet.wif,
+                publicKey: keyPair.publicKey.toString('hex'),
+                paymentAddress: bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network }).address as string,
+                label: wallet.label,
+              });
+              seenAddresses.add(wallet.receiveAddress.toLowerCase());
+            }
+          }
+        }
+      } else {
+        // Fallback for legacy flat wallets array
+        for (const wallet of walletConfig.wallets || []) {
+          if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
+            const keyPair = ECPair.fromWIF(wallet.wif, network);
+            addresses.push({
+              address: wallet.receiveAddress,
+              privateKey: wallet.wif,
+              publicKey: keyPair.publicKey.toString('hex'),
+              paymentAddress: bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network }).address as string,
+              label: wallet.label,
+            });
+            seenAddresses.add(wallet.receiveAddress.toLowerCase());
+          }
         }
       }
     } catch (error) {
@@ -108,15 +156,20 @@ async function cancelBid(
 ): Promise<boolean> {
   let signingKey = privateKey;
 
+  // Get all our payment addresses for ownership check (supports wallet groups)
+  const ourPaymentAddresses = getAllOurPaymentAddresses();
+
   // If wallet rotation is enabled, try to find the wallet that placed this bid
   if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
     const wallet = getWalletByPaymentAddress(offer.buyerPaymentAddress);
     if (wallet) {
       signingKey = wallet.config.wif;
-    } else if (offer.buyerPaymentAddress !== buyerPaymentAddress) {
+    } else if (!ourPaymentAddresses.has(offer.buyerPaymentAddress.toLowerCase())) {
+      // Bid was placed by unknown wallet (not in any of our wallet groups), skip
       return false;
     }
-  } else if (offer.buyerPaymentAddress !== buyerPaymentAddress) {
+  } else if (!ourPaymentAddresses.has(offer.buyerPaymentAddress.toLowerCase())) {
+    // Without wallet rotation, only cancel our own bids
     return false;
   }
 
@@ -170,7 +223,7 @@ async function cancelAllCollectionOffers(
     (collection, index, self) =>
       index === self.findIndex(
         (c) =>
-          c.tokenReceiveAddress === collection.tokenReceiveAddress &&
+          (c.tokenReceiveAddress || '').toLowerCase() === (collection.tokenReceiveAddress || '').toLowerCase() &&
           c.offerType === collection.offerType
       )
   );
@@ -184,10 +237,11 @@ async function cancelAllCollectionOffers(
 
       try {
         const bestOffers = await getBestCollectionOffer(item.collectionSymbol);
+        // Check all our receive addresses from all wallets (supports wallet groups)
+        const ourReceiveAddresses = getAllOurReceiveAddresses();
         const ourOffer = bestOffers?.offers?.find(
           (offer: ICollectionOffer) =>
-            offer.btcParams.makerOrdinalReceiveAddress.toLowerCase() ===
-            buyerTokenReceiveAddress.toLowerCase()
+            ourReceiveAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
         ) as ICollectionOffer | undefined;
 
         if (ourOffer) {
@@ -211,7 +265,21 @@ async function performCancellation(): Promise<CancelResult> {
     try {
       if (fs.existsSync(WALLET_CONFIG_PATH)) {
         const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-        if (walletConfig.wallets?.length > 0) {
+
+        // Handle groups format
+        if (walletConfig.groups && typeof walletConfig.groups === 'object') {
+          const allWallets: any[] = [];
+          for (const groupName of Object.keys(walletConfig.groups)) {
+            const group = walletConfig.groups[groupName];
+            if (group.wallets?.length > 0) {
+              allWallets.push(...group.wallets);
+            }
+          }
+          if (allWallets.length > 0) {
+            initializeWalletPool(allWallets, walletConfig.bidsPerMinute || 5, network);
+          }
+        } else if (walletConfig.wallets?.length > 0) {
+          // Fallback for legacy flat wallets array
           initializeWalletPool(walletConfig.wallets, walletConfig.bidsPerMinute || 5, network);
         }
       }
@@ -262,6 +330,15 @@ export async function cancelOffers(): Promise<void> {
     console.log('');
     showWarning(`${result.errors.length} error(s) occurred:`);
     result.errors.forEach((err) => showError(`  ${err}`));
+  }
+
+  // Reset bid history and stats
+  const resetResult = resetBotData();
+  if (resetResult.historyReset || resetResult.statsReset) {
+    const resetItems: string[] = [];
+    if (resetResult.historyReset) resetItems.push('bid history');
+    if (resetResult.statsReset) resetItems.push('bot stats');
+    showSuccess(`Reset ${resetItems.join(' and ')}`);
   }
 
   console.log('');

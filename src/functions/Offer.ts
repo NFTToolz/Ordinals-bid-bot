@@ -5,6 +5,7 @@ import { config } from "dotenv"
 import limiter from "../bottleneck";
 import Logger from "../utils/logger";
 import { getErrorMessage, getErrorResponseData, getErrorStatus } from "../utils/errorUtils";
+import { getAllOurReceiveAddresses } from "../utils/walletHelpers";
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -126,9 +127,9 @@ export async function createCollectionOffer(
   const params = {
     collectionSymbol,
     quantity: 1,
-    priceSats,
+    priceSats: Math.floor(priceSats),
     expirationAt,
-    feeSatsPerVbyte,
+    feeSatsPerVbyte: Math.floor(feeSatsPerVbyte),
     makerPublicKey,
     makerPaymentType: 'p2wpkh',
     makerReceiveAddress
@@ -169,7 +170,9 @@ export async function createCollectionOffer(
           continue;
         }
 
-        const userOffer = offerData.offers.find((item) => item.btcParams.makerOrdinalReceiveAddress.toLowerCase() === makerReceiveAddress.toLowerCase())
+        // Check for existing offers from ANY of our wallet group addresses (not just the current wallet)
+        const ourReceiveAddresses = getAllOurReceiveAddresses();
+        const userOffer = offerData.offers.find((item) => ourReceiveAddresses.has(item.btcParams.makerOrdinalReceiveAddress.toLowerCase()))
         if (userOffer) {
           const cancelled = await cancelCollectionOffer([userOffer.id], makerPublicKey, privateKey);
           if (!cancelled) {
@@ -253,7 +256,9 @@ export async function submitCollectionOffer(
           continue;
         }
 
-        const userOffer = offerData.offers.find((item) => item.btcParams.makerOrdinalReceiveAddress.toLowerCase() === makerReceiveAddress.toLowerCase())
+        // Check for existing offers from ANY of our wallet group addresses (not just the current wallet)
+        const ourReceiveAddresses = getAllOurReceiveAddresses();
+        const userOffer = offerData.offers.find((item) => ourReceiveAddresses.has(item.btcParams.makerOrdinalReceiveAddress.toLowerCase()))
         if (userOffer) {
           const cancelled = await cancelCollectionOffer([userOffer.id], makerPublicKey, privateKey);
           if (!cancelled) {
@@ -337,8 +342,8 @@ export async function createOffer(
   const baseURL = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/create';
   const params = {
     tokenId: tokenId,
-    price: price,
-    expirationDate: expiration,
+    price: Math.floor(price),
+    expirationDate: Math.floor(expiration),
     buyerTokenReceiveAddress: buyerTokenReceiveAddress,
     buyerPaymentAddress: buyerPaymentAddress,
     buyerPaymentPublicKey: publicKey,
@@ -450,8 +455,8 @@ export async function submitSignedOfferOrder(
     signedPSBTBase64: signedPSBTBase64,
     feerateTier: feerateTier,
     tokenId: tokenId,
-    price: price,
-    expirationDate: expiration.toString(),
+    price: Math.floor(price),
+    expirationDate: Math.floor(expiration).toString(),
     buyerPaymentAddress: buyerPaymentAddress,
     buyerPaymentPublicKey: publicKey,
     buyerReceiveAddress: buyerReceiveAddress,

@@ -159,14 +159,30 @@ export const Logger = {
   },
 
   // Bid placed
-  bidPlaced(collectionSymbol: string, tokenId: string, price: number, type: 'NEW' | 'OUTBID' | 'COUNTERBID' = 'NEW') {
+  bidPlaced(
+    collectionSymbol: string,
+    tokenId: string,
+    price: number,
+    type: 'NEW' | 'OUTBID' | 'COUNTERBID' = 'NEW',
+    details?: {
+      floorPrice?: number;
+      minOffer?: number;
+      maxOffer?: number;
+    }
+  ) {
     bidStats.increment('bidsPlaced');
     const timestamp = getTimestamp();
     const emoji = type === 'COUNTERBID' ? '⚡' : type === 'OUTBID' ? '🎯' : '📝';
     console.log(`${colors.bright}${colors.green}${emoji} [${timestamp}] BID PLACED${colors.reset}`);
     console.log(`  Collection: ${colors.bright}${collectionSymbol}${colors.reset}`);
     console.log(`  Token:      ${colors.dim}${formatTokenId(tokenId)}${colors.reset}`);
-    console.log(`  Price:      ${colors.bright}${colors.green}${formatBTC(price)}${colors.reset}`);
+    const floorPct = details?.floorPrice ? ` (${((price / details.floorPrice) * 100).toFixed(1)}% of floor)` : '';
+    console.log(`  Price:      ${colors.bright}${colors.green}${formatBTC(price)}${colors.reset}${colors.dim}${floorPct}${colors.reset}`);
+    if (details?.minOffer !== undefined && details?.maxOffer !== undefined) {
+      console.log(`  Range:      ${colors.dim}${formatBTC(details.minOffer)} - ${formatBTC(details.maxOffer)}${colors.reset}`);
+      const reason = price === details.minOffer ? 'minOffer' : price === details.maxOffer ? 'maxOffer' : 'calculated';
+      console.log(`  Reason:     ${colors.dim}${reason}${colors.reset}`);
+    }
     console.log(`  Type:       ${colors.cyan}${type}${colors.reset}\n`);
   },
 

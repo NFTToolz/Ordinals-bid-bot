@@ -5,7 +5,7 @@
 		"maxBid": 0.00025,
 		"minFloorBid": 50,
 		"maxFloorBid": 97,
-		"bidCount": 10,
+		"bidCount": 15,
 		"duration": 60,
 		"scheduledLoop": 60,
 		"enableCounterBidding": true,

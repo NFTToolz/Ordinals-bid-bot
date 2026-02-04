@@ -126,7 +126,7 @@ export async function consolidateFunds(): Promise<void> {
   console.log('');
   console.log('Checking for inscriptions (ordinals)...');
 
-  const addresses = sourceWallets.map(w => w.receiveAddress || w.paymentAddress);
+  const addresses = sourceWallets.map(w => (w.receiveAddress || w.paymentAddress).toLowerCase());
   const inscriptionCheck = await withSpinner(
     'Scanning for inscriptions...',
     () => checkAddressesForInscriptions(addresses)
@@ -134,7 +134,7 @@ export async function consolidateFunds(): Promise<void> {
 
   const walletsWithInscriptions: string[] = [];
   sourceWallets.forEach(w => {
-    const addr = w.receiveAddress || w.paymentAddress;
+    const addr = (w.receiveAddress || w.paymentAddress).toLowerCase();
     if (inscriptionCheck.get(addr)) {
       walletsWithInscriptions.push(w.label);
     }
@@ -189,7 +189,7 @@ export async function consolidateFunds(): Promise<void> {
       wc => {
         try {
           const info = getWalletFromWIF(wc.wif, network);
-          return info.paymentAddress === w.paymentAddress;
+          return info.paymentAddress.toLowerCase() === w.paymentAddress.toLowerCase();
         } catch {
           return false;
         }

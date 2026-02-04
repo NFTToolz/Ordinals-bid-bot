@@ -543,7 +543,7 @@ export function addWalletToGroup(
   // Check if wallet already exists in any group
   for (const [gName, group] of Object.entries(data.groups)) {
     const existing = group.wallets.find(
-      w => w.wif === wallet.wif || w.receiveAddress === wallet.receiveAddress
+      w => w.wif === wallet.wif || w.receiveAddress.toLowerCase() === wallet.receiveAddress.toLowerCase()
     );
     if (existing) {
       return {

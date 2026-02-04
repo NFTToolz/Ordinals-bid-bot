@@ -42,6 +42,10 @@ import {
   WalletGroupManager,
 } from "./utils/walletGroups";
 import {
+  isOurPaymentAddress,
+  isOurReceiveAddress,
+} from "./utils/walletHelpers";
+import {
   // Bid Calculation
   calculateBidPrice,
   calculateOutbidPrice,
@@ -231,6 +235,11 @@ function forceReleaseTokenLock(tokenId: string): void {
   // Don't resolve waiters - they will timeout naturally
 }
 
+// Global minimum bid interval - enforces max 5 bids/min globally regardless of wallet count
+// This prevents API rate limits when multiple wallets would otherwise allow rapid-fire bidding
+const MIN_BID_INTERVAL_MS = 12000; // 12 seconds = max 5 bids/min globally
+let lastGlobalBidTime = 0;
+
 // Rate limit deduplication: Track recently bid tokens to prevent duplicate bids
 const recentBids: Map<string, number> = new Map();
 const RECENT_BID_COOLDOWN_MS = 30000; // 30 seconds - prevents duplicate bids on same token
@@ -250,6 +259,23 @@ function addRecentBid(tokenId: string, timestamp: number): void {
     }
   }
   recentBids.set(tokenId, timestamp);
+}
+
+/**
+ * Enforce global minimum interval between ALL bids.
+ * This prevents API rate limits when multiple wallets are available,
+ * since Magic Eden's rate limit is per API key (~5/min), not per wallet.
+ */
+async function waitForGlobalBidSlot(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - lastGlobalBidTime;
+  const waitTime = MIN_BID_INTERVAL_MS - elapsed;
+
+  if (waitTime > 0) {
+    Logger.info(`[GLOBAL PACER] Waiting ${(waitTime / 1000).toFixed(1)}s before next bid`);
+    await delay(waitTime);
+  }
+  lastGlobalBidTime = Date.now();
 }
 
 // Purchase deduplication: Track processed purchase event IDs with timestamps to prevent double-counting
@@ -707,67 +733,7 @@ function recordSuccessfulBid(paymentAddress: string): void {
   }
 }
 
-/**
- * Check if a payment address belongs to one of our wallets
- * Used for WebSocket own-bid detection to skip counter-bidding on our own bids
- */
-function isOurPaymentAddress(address: string): boolean {
-  if (!address) return false;
-  const normalizedAddress = address.toLowerCase();
-
-  // Check primary wallet (derived from FUNDING_WIF)
-  const primaryKeyPair = safeECPairFromWIF(FUNDING_WIF, network, 'isOurPaymentAddress');
-  const primaryPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: primaryKeyPair.publicKey, network: network }).address as string;
-  if (normalizedAddress === primaryPaymentAddress.toLowerCase()) {
-    return true;
-  }
-
-  // Check wallet group manager (if enabled)
-  if (ENABLE_WALLET_ROTATION && isWalletGroupManagerInitialized()) {
-    const manager = getWalletGroupManager();
-    const allAddresses = manager.getAllPaymentAddresses();
-    return allAddresses.some(addr => addr.toLowerCase() === normalizedAddress);
-  }
-
-  // Check legacy wallet pool (if enabled)
-  if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    const pool = getWalletPool();
-    const allAddresses = pool.getAllPaymentAddresses();
-    return allAddresses.some(addr => addr.toLowerCase() === normalizedAddress);
-  }
-
-  return false;
-}
-
-/**
- * Check if a receive address belongs to one of our wallets
- * Used for collection offer detection to identify our own offers
- */
-function isOurReceiveAddress(address: string): boolean {
-  if (!address) return false;
-  const normalizedAddress = address.toLowerCase();
-
-  // Check primary receive address from env
-  if (normalizedAddress === TOKEN_RECEIVE_ADDRESS.toLowerCase()) {
-    return true;
-  }
-
-  // Check wallet group manager (if enabled)
-  if (ENABLE_WALLET_ROTATION && isWalletGroupManagerInitialized()) {
-    const manager = getWalletGroupManager();
-    const allAddresses = manager.getAllReceiveAddresses();
-    return allAddresses.some(addr => addr.toLowerCase() === normalizedAddress);
-  }
-
-  // Check legacy wallet pool (if enabled)
-  if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    const pool = getWalletPool();
-    const allAddresses = pool.getAllReceiveAddresses();
-    return allAddresses.some(addr => addr.toLowerCase() === normalizedAddress);
-  }
-
-  return false;
-}
+// isOurPaymentAddress and isOurReceiveAddress are imported from ./utils/walletHelpers
 
 /**
  * Get all receive addresses to query for bid rehydration
@@ -976,7 +942,8 @@ class EventManager {
           }
 
           if (bottomListings.includes(tokenId)) {
-            if (incomingBuyerTokenReceiveAddress.toLowerCase() !== buyerTokenReceiveAddress.toLowerCase()) {
+            // Check if incoming bid is from ANY of our wallet group addresses (not just single buyerTokenReceiveAddress)
+            if (!isOurReceiveAddress(incomingBuyerTokenReceiveAddress)) {
               let verifiedOfferPrice = Number(incomingBidAmount);
               if (isNaN(verifiedOfferPrice)) {
                 Logger.warning(`[WS] ${tokenId.slice(-8)}: Invalid bid amount received: ${incomingBidAmount}`);
@@ -1012,7 +979,7 @@ class EventManager {
                 const topOffer = bestOffer.offers[0];
 
                 // Skip if we already have the top bid (edge case: bidHistory not synced)
-                if (topOffer.buyerPaymentAddress === buyerPaymentAddress) {
+                if (isOurPaymentAddress(topOffer.buyerPaymentAddress)) {
                   Logger.info(`[WS] ${tokenId.slice(-8)}: We already have top bid, skipping`);
                   return;
                 }
@@ -1111,7 +1078,7 @@ class EventManager {
                         expiration: expiration,
                         paymentAddress: result.paymentAddress
                       }
-                      Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID');
+                      Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID', { floorPrice, maxOffer });
                     } else {
                       // Bid failed - remove the early deduplication entry to allow retry
                       recentBids.delete(tokenId);
@@ -1149,7 +1116,8 @@ class EventManager {
             return;
           }
 
-          if (incomingBuyerPaymentAddress.toLowerCase() !== buyerPaymentAddress.toLowerCase() && Number(incomingBidAmount) > Number(ourBidPrice)) {
+          // Address already checked at line 1147 with isOurPaymentAddress(), so we only need price comparison
+          if (Number(incomingBidAmount) > Number(ourBidPrice)) {
             Logger.websocket.event('coll_offer_created', collectionSymbol);
 
             // Atomically acquire lock for this collection to prevent race conditions
@@ -1438,7 +1406,8 @@ class EventManager {
           tokensToCancel.map(token => async () => {
             const offerData = await getOffers(token.tokenId, buyerTokenReceiveAddress)
             if (offerData && Number(offerData.total) > 0) {
-              const offers = (offerData?.offers ?? []).filter((item) => item.buyerPaymentAddress === buyerPaymentAddress)
+              // Filter to only our offers from any of our wallets (supports wallet groups)
+              const offers = (offerData?.offers ?? []).filter((item) => isOurPaymentAddress(item.buyerPaymentAddress))
               // Use Promise.allSettled to continue cancelling even if some fail
               const results = await Promise.allSettled(offers.map(async (item) => {
                 const cancelled = await cancelBid(
@@ -1554,7 +1523,8 @@ class EventManager {
 
                 const currentExpiry = bidHistory[collectionSymbol]?.ourBids?.[tokenId]?.expiration
               const newExpiry = duration * 60 * 1000
-              const offer = (offerData?.offers ?? []).filter((item) => item.buyerPaymentAddress === buyerPaymentAddress)
+              // Filter to only our offers from any of our wallets (supports wallet groups)
+              const offer = (offerData?.offers ?? []).filter((item) => isOurPaymentAddress(item.buyerPaymentAddress))
 
               if (currentExpiry && (currentExpiry - Date.now()) > newExpiry) {
                 if (offer && offer.length > 0) {
@@ -1632,7 +1602,7 @@ class EventManager {
                             expiration: expiration,
                             paymentAddress: result.paymentAddress
                           }
-                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID');
+                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID', { floorPrice, minOffer, maxOffer });
                           newBidsPlaced++;
                           successfulBidsPlaced++;
                         } else {
@@ -1678,7 +1648,7 @@ class EventManager {
                           expiration: expiration,
                           paymentAddress: result.paymentAddress
                         }
-                        Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'NEW');
+                        Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'NEW', { floorPrice, minOffer, maxOffer });
                         newBidsPlaced++;
                         successfulBidsPlaced++;
                       } else {
@@ -1733,7 +1703,7 @@ class EventManager {
                             expiration: expiration,
                             paymentAddress: result.paymentAddress
                           }
-                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID');
+                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID', { floorPrice, minOffer, maxOffer });
                           newBidsPlaced++;
                           successfulBidsPlaced++;
                         }
@@ -1843,9 +1813,9 @@ class EventManager {
             buyerPaymentAddress: topOffer.btcParams.makerPaymentAddress
           };
 
-          const ourOffer = bestOffer.offers.find((item) => item.btcParams.makerPaymentAddress.toLowerCase() === buyerPaymentAddress.toLowerCase()) as ICollectionOffer
+          const ourOffer = bestOffer.offers.find((item) => isOurPaymentAddress(item.btcParams.makerPaymentAddress)) as ICollectionOffer
 
-          if (topOffer.btcParams.makerPaymentAddress !== buyerPaymentAddress) {
+          if (!isOurPaymentAddress(topOffer.btcParams.makerPaymentAddress)) {
             try {
               if (ourOffer) {
                 const offerIds = [ourOffer.id]
@@ -2829,9 +2799,33 @@ async function placeBidWithRotation(
   // Track whether we acquired a wallet from the pool (for slot cleanup on failure)
   let usingWalletPool = false;
 
-  // If wallet rotation is enabled, try to get a wallet from the pool
+  // Priority 1: Use wallet group manager if enabled and collection has walletGroup assigned
+  if (ENABLE_WALLET_ROTATION && isWalletGroupManagerInitialized() && collectionConfig?.walletGroup) {
+    const manager = getWalletGroupManager();
+    const groupName = collectionConfig.walletGroup;
+
+    if (manager.hasGroup(groupName)) {
+      const wallet = await manager.getAvailableWalletAsync(groupName);
+      if (!wallet) {
+        Logger.wallet.allRateLimited(tokenId);
+        return { success: false };
+      }
+
+      buyerTokenReceiveAddress = CENTRALIZE_RECEIVE_ADDRESS
+        ? fallbackReceiveAddress
+        : wallet.config.receiveAddress;
+      buyerPaymentAddress = wallet.paymentAddress;
+      publicKey = wallet.publicKey;
+      privateKey = wallet.config.wif;
+      walletLabel = wallet.config.label;
+      usingWalletPool = true;
+
+      Logger.wallet.using(walletLabel || 'unnamed', tokenId);
+    }
+  }
+  // Priority 2: Legacy single wallet pool (backward compatibility)
   // Use async version with mutex to prevent race conditions
-  if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
+  else if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
     const wallet = await getAvailableWalletAsync();
     if (!wallet) {
       Logger.wallet.allRateLimited(tokenId);
@@ -2853,10 +2847,14 @@ async function placeBidWithRotation(
     // so we don't need to call recordSuccessfulBid separately
   }
 
+  // Enforce global minimum interval between ALL bids (regardless of wallet rotation)
+  // This prevents API rate limits since Magic Eden limits ~5 bids/min per API key, not per wallet
+  await waitForGlobalBidSlot();
+
   try {
-    // Only use global pacer if wallet rotation is disabled
-    // When wallet rotation is enabled, the wallet pool handles per-wallet rate limiting
-    if (!ENABLE_WALLET_ROTATION || !isWalletPoolInitialized()) {
+    // Only use per-wallet pacer if wallet rotation is disabled
+    // When wallet rotation is enabled, the wallet pool/group handles per-wallet rate limiting
+    if (!ENABLE_WALLET_ROTATION || (!isWalletPoolInitialized() && !isWalletGroupManagerInitialized())) {
       await waitForBidSlot();
     }
 
@@ -2874,16 +2872,24 @@ async function placeBidWithRotation(
 
     if (success) {
       // Record to global pacer only if wallet rotation is disabled
-      if (!ENABLE_WALLET_ROTATION || !isWalletPoolInitialized()) {
+      if (!ENABLE_WALLET_ROTATION || (!isWalletPoolInitialized() && !isWalletGroupManagerInitialized())) {
         recordPacerBid();
       }
-      // Note: Wallet pool bid is already recorded by getAvailableWalletAsync
+      // Note: Wallet pool/group bid is already recorded by getAvailableWalletAsync
     } else {
       // Bid failed - decrement the pre-incremented wallet bid count to recover the slot
       // This prevents "lost" bid slots when bids fail after wallet reservation
-      // FIX: Use usingWalletPool flag instead of walletLabel check to handle wallets without labels
       if (usingWalletPool) {
-        decrementWalletBidCount(buyerPaymentAddress);
+        // Try wallet groups first, then legacy pool
+        if (isWalletGroupManagerInitialized() && collectionConfig?.walletGroup) {
+          const manager = getWalletGroupManager();
+          const walletInfo = manager.getWalletByPaymentAddress(buyerPaymentAddress);
+          if (walletInfo) {
+            manager.decrementBidCount(walletInfo.groupName, buyerPaymentAddress);
+          }
+        } else {
+          decrementWalletBidCount(buyerPaymentAddress);
+        }
       }
     }
 
@@ -2894,9 +2900,17 @@ async function placeBidWithRotation(
     };
   } catch (error: unknown) {
     // Bid failed due to exception - decrement the pre-incremented wallet bid count
-    // FIX: Use usingWalletPool flag instead of walletLabel check to handle wallets without labels
     if (usingWalletPool) {
-      decrementWalletBidCount(buyerPaymentAddress);
+      // Try wallet groups first, then legacy pool
+      if (isWalletGroupManagerInitialized() && collectionConfig?.walletGroup) {
+        const manager = getWalletGroupManager();
+        const walletInfo = manager.getWalletByPaymentAddress(buyerPaymentAddress);
+        if (walletInfo) {
+          manager.decrementBidCount(walletInfo.groupName, buyerPaymentAddress);
+        }
+      } else {
+        decrementWalletBidCount(buyerPaymentAddress);
+      }
     }
 
     // Check for rate limit errors - API returns "Rate limit exceeded, retry in 1 minute"
@@ -2935,7 +2949,7 @@ async function placeBid(
   try {
     const price = Math.round(offerPrice)
     // check for current offers and cancel before placing the bid
-    await delay(2000);
+    // Note: delay removed - per-wallet rate limiting handles API safety
 
     // Fetch existing offers - abort on API error to prevent duplicate bids
     let offerData;

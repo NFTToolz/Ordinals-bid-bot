@@ -200,7 +200,7 @@ export async function distributeFunds(): Promise<void> {
 
     // Show preview
     const recipientDetails = recipients.map((r, i) => ({
-      label: configWallets.find(w => w.paymentAddress === r.address)?.label || `Wallet ${i + 1}`,
+      label: configWallets.find(w => w.paymentAddress.toLowerCase() === r.address.toLowerCase())?.label || `Wallet ${i + 1}`,
       address: r.address,
       amount: r.amount,
     }));

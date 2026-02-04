@@ -18,6 +18,10 @@ import {
   createAddressSet,
   getOfferLogInfo,
 } from "./utils/cancelLogic";
+import {
+  getAllOurPaymentAddresses,
+  getAllOurReceiveAddresses,
+} from "./utils/walletHelpers";
 
 config()
 
@@ -34,9 +38,18 @@ if (ENABLE_WALLET_ROTATION) {
   try {
     if (fs.existsSync(WALLET_CONFIG_PATH)) {
       const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-      if (walletConfig.wallets && walletConfig.wallets.length > 0) {
-        initializeWalletPool(walletConfig.wallets, walletConfig.bidsPerMinute || 5, network);
-        console.log(`[WALLET ROTATION] Initialized wallet pool with ${walletConfig.wallets.length} wallets for cancellation`);
+      if (walletConfig.groups) {
+        const allWallets: WalletConfig[] = [];
+        for (const groupName of Object.keys(walletConfig.groups)) {
+          const group = walletConfig.groups[groupName];
+          if (group.wallets && group.wallets.length > 0) {
+            allWallets.push(...group.wallets);
+          }
+        }
+        if (allWallets.length > 0) {
+          initializeWalletPool(allWallets, 5, network);
+          console.log(`[WALLET ROTATION] Initialized wallet pool with ${allWallets.length} wallets for cancellation`);
+        }
       }
     }
   } catch (error: any) {
@@ -60,21 +73,24 @@ function getReceiveAddressesToCheck(): { address: string; privateKey: string; pu
   const addresses: { address: string; privateKey: string; publicKey: string; paymentAddress: string; label?: string }[] = [];
   const seenAddresses = new Set<string>();
 
-  // If wallet rotation is enabled, add all wallet receive addresses
+  // If wallet rotation is enabled, add all wallet receive addresses from groups
   if (ENABLE_WALLET_ROTATION && fs.existsSync(WALLET_CONFIG_PATH)) {
     try {
       const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-      for (const wallet of walletConfig.wallets || []) {
-        if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
-          const keyPair = ECPair.fromWIF(wallet.wif, network);
-          addresses.push({
-            address: wallet.receiveAddress,
-            privateKey: wallet.wif,
-            publicKey: keyPair.publicKey.toString('hex'),
-            paymentAddress: bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string,
-            label: wallet.label
-          });
-          seenAddresses.add(wallet.receiveAddress.toLowerCase());
+      for (const groupName of Object.keys(walletConfig.groups || {})) {
+        const group = walletConfig.groups[groupName];
+        for (const wallet of group.wallets || []) {
+          if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
+            const keyPair = ECPair.fromWIF(wallet.wif, network);
+            addresses.push({
+              address: wallet.receiveAddress,
+              privateKey: wallet.wif,
+              publicKey: keyPair.publicKey.toString('hex'),
+              paymentAddress: bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string,
+              label: wallet.label
+            });
+            seenAddresses.add(wallet.receiveAddress.toLowerCase());
+          }
         }
       }
     } catch (error) {
@@ -160,8 +176,10 @@ async function cancelCollectionOffers() {
         console.log(`No collection offers found for ${item.collectionSymbol}`);
         continue;
       }
+      // Check all our receive addresses from all wallets (supports wallet groups)
+      const ourReceiveAddresses = getAllOurReceiveAddresses();
       const ourOffers = bestOffers.offers.find((offer) =>
-        offer.btcParams.makerOrdinalReceiveAddress.toLowerCase() === buyerTokenReceiveAddress.toLowerCase()
+        ourReceiveAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
       ) as ICollectionOffer;
 
       if (ourOffers) {
@@ -171,6 +189,27 @@ async function cancelCollectionOffers() {
       }
     }
   }
+}
+
+// Reset bot data files (bid history and stats)
+function resetBotData(): { historyReset: boolean; statsReset: boolean } {
+  const dataDir = path.join(process.cwd(), 'data');
+  let historyReset = false;
+  let statsReset = false;
+
+  const historyPath = path.join(dataDir, 'bidHistory.json');
+  if (fs.existsSync(historyPath)) {
+    fs.unlinkSync(historyPath);
+    historyReset = true;
+  }
+
+  const statsPath = path.join(dataDir, 'botStats.json');
+  if (fs.existsSync(statsPath)) {
+    fs.unlinkSync(statsPath);
+    statsReset = true;
+  }
+
+  return { historyReset, statsReset };
 }
 
 // Main execution
@@ -185,6 +224,20 @@ async function main() {
   await cancelAllItemOffers();
   await cancelCollectionOffers();
 
+  // Reset bid history and stats
+  const resetResult = resetBotData();
+  if (resetResult.historyReset || resetResult.statsReset) {
+    console.log('\n--------------------------------------------------------------------------------');
+    console.log('BOT DATA RESET');
+    if (resetResult.historyReset) {
+      console.log('  - Bid history cleared');
+    }
+    if (resetResult.statsReset) {
+      console.log('  - Bot stats cleared');
+    }
+    console.log('--------------------------------------------------------------------------------');
+  }
+
   console.log('\n================================================================================');
   console.log('CANCELLATION COMPLETE');
   console.log('================================================================================');
@@ -196,18 +249,21 @@ async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol: st
   // Determine which private key to use for signing the cancellation
   let signingKey = privateKey;
 
+  // Get all our payment addresses for ownership check (supports wallet groups)
+  const ourPaymentAddresses = getAllOurPaymentAddresses();
+
   // If wallet rotation is enabled, try to find the wallet that placed this bid
   if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
     const wallet = getWalletByPaymentAddress(offer.buyerPaymentAddress);
     if (wallet) {
       signingKey = wallet.config.wif;
       console.log(`[WALLET ROTATION] Using wallet "${wallet.config.label}" for cancellation`);
-    } else if (offer.buyerPaymentAddress !== buyerPaymentAddress) {
-      // Bid was placed by unknown wallet, skip
+    } else if (!ourPaymentAddresses.has(offer.buyerPaymentAddress.toLowerCase())) {
+      // Bid was placed by unknown wallet (not in any of our wallet groups), skip
       console.log(`[WALLET ROTATION] Skipping cancellation - bid placed by unknown wallet: ${offer.buyerPaymentAddress.slice(0, 10)}...`);
       return;
     }
-  } else if (offer.buyerPaymentAddress !== buyerPaymentAddress) {
+  } else if (!ourPaymentAddresses.has(offer.buyerPaymentAddress.toLowerCase())) {
     // Without wallet rotation, only cancel our own bids
     return;
   }
