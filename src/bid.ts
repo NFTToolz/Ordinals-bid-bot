@@ -486,6 +486,12 @@ function loadCollections(): CollectionData[] {
         process.exit(1);
       }
 
+      // Warn when maxFloorBid will be capped for non-trait offers
+      const hasTraits = item.traits && item.traits.length > 0;
+      if (item.maxFloorBid > 100 && !hasTraits) {
+        Logger.warning(`[STARTUP] ${item.collectionSymbol}: maxFloorBid ${item.maxFloorBid}% will be capped to 100% (non-trait offer)`);
+      }
+
       validatedCollections.push(item as CollectionData);
     }
 
@@ -897,9 +903,9 @@ class EventManager {
         : (collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100);
       const minFloorBid = collection.minFloorBid
 
-      if ((collection.offerType === "ITEM" || collection.offerType === "COLLECTION") && !collection.traits && maxFloorBid > 100) {
-        Logger.warning(`Offer for ${collection.collectionSymbol} at ${maxFloorBid}% of floor price (above 100%). Skipping bid.`);
-        return
+      // Log when maxFloorBid is capped (check original config value, not the capped one)
+      if (collection.maxFloorBid > 100 && !(collection.traits && collection.traits.length > 0)) {
+        Logger.warning(`[WS] ${collectionSymbol}: maxFloorBid ${collection.maxFloorBid}% capped to 100% (non-trait offer)`);
       }
 
       let collectionData;
@@ -1238,6 +1244,15 @@ class EventManager {
     const maxBuy = item.quantity ?? 1
     const enableCounterBidding = item.enableCounterBidding ?? false
     const buyerPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string
+
+    // Log when default values are used
+    const defaults: string[] = [];
+    if (item.bidCount === undefined) defaults.push('bidCount=20');
+    if (item.duration === undefined) defaults.push(`duration=${DEFAULT_OFFER_EXPIRATION}`);
+    if (item.quantity === undefined) defaults.push('quantity=1');
+    if (defaults.length > 0) {
+      Logger.info(`${collectionSymbol}: using defaults: ${defaults.join(', ')}`);
+    }
 
     try {
       initBidHistory(collectionSymbol, item.offerType);
