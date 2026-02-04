@@ -2,9 +2,9 @@
 	{
 		"collectionSymbol": "n0k",
 		"minBid": 0.00001,
-		"maxBid": 0.00025,
-		"minFloorBid": 50,
-		"maxFloorBid": 97,
+		"maxBid": 0.00019,
+		"minFloorBid": 10,
+		"maxFloorBid": 15,
 		"bidCount": 15,
 		"duration": 60,
 		"scheduledLoop": 60,

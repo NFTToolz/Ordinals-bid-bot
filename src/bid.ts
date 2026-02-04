@@ -1636,7 +1636,7 @@ class EventManager {
                  * we bid the minimum on that token
                 */
                 else {
-                  const bidPrice = Math.max(Math.round(listedPrice * 0.5), minOffer)
+                  const bidPrice = minOffer
                   if (bidPrice <= maxOffer) {
                     try {
                       const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
@@ -1660,7 +1660,7 @@ class EventManager {
                     }
                   } else {
                     skippedBidTooHigh++;
-                    Logger.bidSkipped(collectionSymbol, tokenId, 'Calculated bid exceeds maxBid', bidPrice, bidPrice, maxOffer);
+                    Logger.bidSkipped(collectionSymbol, tokenId, 'minOffer exceeds maxOffer (check config)', minOffer, minOffer, maxOffer);
                   }
                 }
               }
