@@ -12,6 +12,7 @@ import axiosInstance from "./axios/axiosInstance";
 import limiter from "./bottleneck";
 import WebSocket from 'ws';
 import Logger, { getBidStatsData } from "./utils/logger";
+import { printVersionBanner } from "./utils/version";
 import { getErrorMessage, getErrorResponseData, getErrorStatus } from "./utils/errorUtils";
 import {
   initializeBidPacer,
@@ -2172,6 +2173,9 @@ async function startProcessing() {
     collections.map(item => startCollectionMonitoring(item))
   );
 }
+
+// Display version banner on startup
+printVersionBanner();
 
 // Load persisted bid history (for quantity restoration after restart)
 loadBidHistoryFromFile();
