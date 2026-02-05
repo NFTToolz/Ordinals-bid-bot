@@ -1,4 +1,5 @@
 import chalk = require('chalk');
+import { VERSION_STRING } from '../../utils/version';
 
 // Cache the header width to ensure consistency between header and status bar
 let cachedHeaderWidth: number | null = null;
@@ -125,6 +126,13 @@ export function showHeader(): void {
   const subtitlePadding = Math.floor((width - 2 - subtitleDisplayWidth) / 2);
   const subtitleRightPadding = width - 2 - subtitlePadding - subtitleDisplayWidth;
   console.log(chalk.cyan(BOX.vertical) + ' '.repeat(Math.max(0, subtitlePadding)) + chalk.yellow(subtitleLine) + ' '.repeat(Math.max(0, subtitleRightPadding)) + chalk.cyan(BOX.vertical));
+
+  // Version line
+  const versionLine = `v${VERSION_STRING}`;
+  const versionDisplayWidth = getDisplayWidth(versionLine);
+  const versionPadding = Math.floor((width - 2 - versionDisplayWidth) / 2);
+  const versionRightPadding = width - 2 - versionPadding - versionDisplayWidth;
+  console.log(chalk.cyan(BOX.vertical) + ' '.repeat(Math.max(0, versionPadding)) + chalk.green(versionLine) + ' '.repeat(Math.max(0, versionRightPadding)) + chalk.cyan(BOX.vertical));
 
   // Empty line
   console.log(chalk.cyan(BOX.vertical) + ' '.repeat(width - 2) + chalk.cyan(BOX.vertical));
