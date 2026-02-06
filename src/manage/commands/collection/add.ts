@@ -186,6 +186,7 @@ export async function addCollectionCommand(): Promise<void> {
   // Show summary
   showCollectionSummary({
     symbol: config.collectionSymbol,
+    floorPrice,
     minBid: config.minBid,
     maxBid: config.maxBid,
     minFloorBid: config.minFloorBid,

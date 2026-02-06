@@ -16,6 +16,7 @@ export interface InteractiveTableOptions {
   allowSort?: boolean;
   allowExport?: boolean;
   exportBaseName?: string;
+  actions?: Array<{ name: string; value: string }>;
 }
 
 interface TableState {
@@ -31,20 +32,21 @@ interface TableState {
 export async function showInteractiveTable(
   data: TableData,
   options: InteractiveTableOptions = {}
-): Promise<void> {
+): Promise<string | null> {
   const {
     title,
     pageSize = 15,
     allowSort = true,
     allowExport = true,
     exportBaseName = 'export',
+    actions,
   } = options;
 
   const { columns, rows } = data;
 
   if (rows.length === 0) {
     showInfo('No data to display');
-    return;
+    return null;
   }
 
   const state: TableState = {
@@ -124,6 +126,14 @@ export async function showInteractiveTable(
       choices.push({ name: 'Export to JSON', value: 'export-json' });
     }
 
+    // Custom actions
+    if (actions && actions.length > 0) {
+      choices.push(new inquirer.Separator('──────────────') as any);
+      for (const action of actions) {
+        choices.push({ name: action.name, value: `action:${action.value}` });
+      }
+    }
+
     // Back
     choices.push({ name: '← Back', value: 'back' });
 
@@ -169,7 +179,13 @@ export async function showInteractiveTable(
       }
 
       case 'back':
-        return;
+        return null;
+
+      default:
+        if (action.startsWith('action:')) {
+          return action.slice('action:'.length);
+        }
+        break;
     }
   }
 }

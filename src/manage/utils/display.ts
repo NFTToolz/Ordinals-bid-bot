@@ -1,5 +1,5 @@
 import chalk = require('chalk');
-import { VERSION_STRING } from '../../utils/version';
+import { VERSION_STRING, getUpdateStatus } from '../../utils/version';
 
 // Cache the header width to ensure consistency between header and status bar
 let cachedHeaderWidth: number | null = null;
@@ -133,6 +133,19 @@ export function showHeader(): void {
   const versionPadding = Math.floor((width - 2 - versionDisplayWidth) / 2);
   const versionRightPadding = width - 2 - versionPadding - versionDisplayWidth;
   console.log(chalk.cyan(BOX.vertical) + ' '.repeat(Math.max(0, versionPadding)) + chalk.green(versionLine) + ' '.repeat(Math.max(0, versionRightPadding)) + chalk.cyan(BOX.vertical));
+
+  // Update notification (if available)
+  const updateInfo = getUpdateStatus();
+  if (updateInfo?.updateAvailable) {
+    const countLabel = updateInfo.commitsBehind > 0
+      ? `${updateInfo.commitsBehind} new`
+      : 'new version';
+    const updateLine = `Update available! (${countLabel})`;
+    const updateDisplayWidth = getDisplayWidth(updateLine);
+    const updatePadding = Math.floor((width - 2 - updateDisplayWidth) / 2);
+    const updateRightPadding = width - 2 - updatePadding - updateDisplayWidth;
+    console.log(chalk.cyan(BOX.vertical) + ' '.repeat(Math.max(0, updatePadding)) + chalk.yellow(updateLine) + ' '.repeat(Math.max(0, updateRightPadding)) + chalk.cyan(BOX.vertical));
+  }
 
   // Empty line
   console.log(chalk.cyan(BOX.vertical) + ' '.repeat(width - 2) + chalk.cyan(BOX.vertical));
@@ -385,6 +398,7 @@ export function showTransactionPreview(
  */
 export function showCollectionSummary(config: {
   symbol: string;
+  floorPrice?: number;
   minBid: number;
   maxBid: number;
   minFloorBid: number;
@@ -398,6 +412,7 @@ export function showCollectionSummary(config: {
   showSectionHeader('COLLECTION SUMMARY');
 
   console.log(`  Symbol:        ${chalk.bold(config.symbol)}`);
+  console.log(`  Floor Price:   ${config.floorPrice ? formatBTC(config.floorPrice) : '-'}`);
   console.log(`  Min Bid:       ${config.minBid} BTC`);
   console.log(`  Max Bid:       ${config.maxBid} BTC`);
   console.log(`  Floor Range:   ${config.minFloorBid}% - ${config.maxFloorBid}%`);

@@ -50,6 +50,8 @@ vi.mock('../../utils/display', () => ({
   showWarning: vi.fn(),
   showInfo: vi.fn(),
   showTable: vi.fn(),
+  getSeparatorWidth: vi.fn(() => 60),
+  formatBTC: vi.fn((sats: number) => `${(sats / 100000000).toFixed(8)} BTC`),
   withSpinner: vi.fn().mockImplementation(async (message, fn) => fn()),
 }));
 
@@ -112,10 +114,12 @@ vi.mock('fs', () => ({
     existsSync: vi.fn(() => true),
     readFileSync: vi.fn(() => JSON.stringify([])),
     writeFileSync: vi.fn(),
+    unlinkSync: vi.fn(),
   },
   existsSync: vi.fn(() => true),
   readFileSync: vi.fn(() => JSON.stringify([])),
   writeFileSync: vi.fn(),
+  unlinkSync: vi.fn(),
 }));
 
 // Mock Offer functions

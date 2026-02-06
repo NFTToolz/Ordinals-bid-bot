@@ -252,7 +252,7 @@ export function saveWallets(data: WalletsFile): void {
     data.createdAt = data.lastModified;
   }
 
-  fs.writeFileSync(WALLETS_FILE_PATH, JSON.stringify(data, null, 2));
+  fs.writeFileSync(WALLETS_FILE_PATH, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -345,7 +345,7 @@ export function exportWallets(
   if (!existing) return false;
 
   const encrypted = encryptMnemonic(JSON.stringify(existing), password);
-  fs.writeFileSync(filePath, encrypted);
+  fs.writeFileSync(filePath, encrypted, { mode: 0o600 });
   return true;
 }
 
@@ -414,7 +414,7 @@ export function saveWalletGroups(data: WalletGroupsFile): void {
     data.createdAt = data.lastModified;
   }
 
-  fs.writeFileSync(WALLETS_FILE_PATH, JSON.stringify(data, null, 2));
+  fs.writeFileSync(WALLETS_FILE_PATH, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
 /**

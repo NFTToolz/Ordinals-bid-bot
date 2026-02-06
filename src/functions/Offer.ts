@@ -293,9 +293,7 @@ export function signCollectionOffer(unsignedData: ICollectionOfferResponseData, 
     for (let index of inputs) {
       offerPsbt.signInput(index, keyPair);
       offerPsbt.finalizeInput(index);
-
     }
-    offerPsbt.signAllInputs(keyPair)
 
     if (offers.cancelPsbtBase64) {
       cancelPsbt = bitcoin.Psbt.fromBase64(offers.cancelPsbtBase64);
@@ -303,7 +301,6 @@ export function signCollectionOffer(unsignedData: ICollectionOfferResponseData, 
         cancelPsbt.signInput(index, keyPair);
         cancelPsbt.finalizeInput(index);
       }
-      cancelPsbt.signAllInputs(keyPair)
       signedCancelledPSBTBase64 = cancelPsbt.toBase64();
     }
 

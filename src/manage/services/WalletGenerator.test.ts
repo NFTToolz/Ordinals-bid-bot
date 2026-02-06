@@ -497,7 +497,7 @@ describe('WalletGenerator', () => {
       const result = exportWallets('/backup.enc', 'password123');
 
       expect(result).toBe(true);
-      expect(fs.writeFileSync).toHaveBeenCalledWith('/backup.enc', expect.any(String));
+      expect(fs.writeFileSync).toHaveBeenCalledWith('/backup.enc', expect.any(String), { mode: 0o600 });
     });
 
     it('should return false when no wallets exist', () => {

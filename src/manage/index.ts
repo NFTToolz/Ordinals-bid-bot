@@ -62,7 +62,10 @@ import {
 import {
   walletRotationSettings,
   centralizeReceiveSettings,
+  checkForUpdatesCommand,
 } from './commands/settings';
+
+import { checkForUpdates, getUpdateStatus } from '../utils/version';
 
 type ActionHandler = () => Promise<void>;
 
@@ -104,6 +107,7 @@ const actions: Record<string, ActionHandler> = {
   // Settings actions
   'settings:wallet-rotation': walletRotationSettings,
   'settings:centralize-receive': centralizeReceiveSettings,
+  'settings:check-updates': checkForUpdatesCommand,
 };
 
 // Menu configuration for hierarchical navigation
@@ -113,7 +117,7 @@ interface MenuChoice {
 }
 
 interface MenuConfig {
-  choices: MenuChoice[];
+  choices: MenuChoice[] | (() => MenuChoice[]);
 }
 
 const MENU_CONFIG: Record<MenuLevel, MenuConfig> = {
@@ -174,13 +178,21 @@ const MENU_CONFIG: Record<MenuLevel, MenuConfig> = {
     ],
   },
   settings: {
-    choices: [
-      { name: 'Wallet rotation', value: 'settings:wallet-rotation' },
-      ...(process.env.ENABLE_WALLET_ROTATION === 'true'
-        ? [{ name: 'Centralize receive address', value: 'settings:centralize-receive' }]
-        : []),
-      { name: '← Back', value: 'back' },
-    ],
+    choices: () => {
+      const updateInfo = getUpdateStatus();
+      const updateLabel = updateInfo?.updateAvailable
+        ? `\x1b[33mUpdate available! (${updateInfo.commitsBehind > 0 ? `${updateInfo.commitsBehind} commits behind` : 'new version'})\x1b[0m`
+        : 'Check for updates';
+
+      return [
+        { name: 'Wallet rotation', value: 'settings:wallet-rotation' },
+        ...(process.env.ENABLE_WALLET_ROTATION === 'true'
+          ? [{ name: 'Centralize receive address', value: 'settings:centralize-receive' }]
+          : []),
+        { name: updateLabel, value: 'settings:check-updates' },
+        { name: '← Back', value: 'back' },
+      ];
+    },
   },
 };
 
@@ -198,13 +210,14 @@ function createInitialState(): MenuState {
 
 async function showMenu(level: MenuLevel): Promise<string> {
   const config = MENU_CONFIG[level];
+  const choices = typeof config.choices === 'function' ? config.choices() : config.choices;
 
   const { action } = await inquirer.prompt([{
     type: 'list',
     name: 'action',
     message: 'Select an option:',
     pageSize: 15,
-    choices: config.choices,
+    choices,
   }]);
 
   return action;
@@ -231,8 +244,9 @@ async function main(): Promise<void> {
 
   const state = createInitialState();
 
-  // Start background refresh of offer count
+  // Start background refresh of offer count and update check
   refreshOfferCountAsync().catch(() => {});
+  checkForUpdates().catch(() => {});
 
   while (true) {
     try {

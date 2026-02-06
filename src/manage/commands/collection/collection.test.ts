@@ -17,13 +17,14 @@ vi.mock('../../utils/display', () => ({
   showInfo: vi.fn(),
   showTable: vi.fn(),
   showCollectionSummary: vi.fn(),
+  getSeparatorWidth: vi.fn(() => 60),
   formatBTC: vi.fn((sats: number) => `${(sats / 100000000).toFixed(8)} BTC`),
   withSpinner: vi.fn().mockImplementation(async (message, fn) => fn()),
   clearScreen: vi.fn(),
 }));
 
 vi.mock('../../utils/interactiveTable', () => ({
-  showInteractiveTable: vi.fn().mockResolvedValue(undefined),
+  showInteractiveTable: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../utils/prompts', () => ({

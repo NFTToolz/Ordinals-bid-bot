@@ -114,7 +114,7 @@ function createP2PKHwallet(amount: number): Wallet[] {
     const address = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string;
     const wallet = { address, privateKey };
     const isBitcoin = !!bitcoin.address.toOutputScript(address, network);
-    console.log({ address, isBitcoin, privateKey });
+    console.log({ address, isBitcoin });
     wallets.push(wallet);
   }
   return wallets;

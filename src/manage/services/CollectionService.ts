@@ -5,6 +5,7 @@ import limiter from '../../bottleneck';
 
 const COLLECTIONS_FILE_PATH = path.join(process.cwd(), 'config/collections.json');
 const MAGIC_EDEN_API = 'https://nfttools.pro/magiceden/v2';
+const MAGIC_EDEN_STATS_API = 'https://nfttools.pro/magiceden_stats';
 
 const API_KEY = process.env.API_KEY as string;
 const meHeaders = {
@@ -268,27 +269,25 @@ export async function searchCollections(query: string): Promise<CollectionSearch
 }
 
 /**
- * Get popular collections
+ * Get popular collections via Magic Eden stats API
  */
-export async function getPopularCollections(limit: number = 20): Promise<CollectionSearchResult[]> {
-  try {
-    const url = `${MAGIC_EDEN_API}/ord/btc/collections?limit=${limit}&sortBy=volume`;
-    const response = await limiter.schedule(() =>
-      axiosInstance.get(url, { headers: meHeaders })
-    );
+export async function getPopularCollections(
+  limit: number = 20,
+  timeout: number = 15000
+): Promise<CollectionSearchResult[]> {
+  const url = `${MAGIC_EDEN_STATS_API}/collection_stats/search/bitcoin?offset=0&window=1d&limit=${limit}&sort=volume&direction=desc&filter[allCollections]=false&filter[qc][isVerified]=true&filter[qc][minOwnerCount]=30&filter[qc][minTxns]=5&filter[verifiedOnly]=true`;
+  const response = await limiter.schedule(() =>
+    axiosInstance.get(url, { headers: meHeaders, timeout })
+  );
 
-    const collections = response.data.collections || response.data || [];
+  const collections = Array.isArray(response.data) ? response.data : [];
 
-    return collections.map((c: any) => ({
-      symbol: c.symbol,
-      name: c.name || c.symbol,
-      floorPrice: c.floorPrice || 0,
-      volume24h: c.volume24h,
-    }));
-  } catch (error) {
-    console.error('Failed to fetch popular collections:', error instanceof Error ? error.message : error);
-    return [];
-  }
+  return collections.map((c: any) => ({
+    symbol: c.collectionSymbol || c.symbol,
+    name: c.name || c.collectionSymbol || c.symbol,
+    floorPrice: Math.round((c.fp || 0) * 1e8),
+    volume24h: Math.round((c.vol || 0) * 1e8),
+  }));
 }
 
 /**

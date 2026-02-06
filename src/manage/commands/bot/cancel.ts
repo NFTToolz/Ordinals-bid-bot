@@ -257,36 +257,39 @@ async function cancelAllCollectionOffers(
   return { canceled, errors };
 }
 
+function ensureWalletPoolInitialized(): void {
+  if (!ENABLE_WALLET_ROTATION) return;
+
+  try {
+    if (fs.existsSync(WALLET_CONFIG_PATH)) {
+      const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
+
+      // Handle groups format
+      if (walletConfig.groups && typeof walletConfig.groups === 'object') {
+        const allWallets: any[] = [];
+        for (const groupName of Object.keys(walletConfig.groups)) {
+          const group = walletConfig.groups[groupName];
+          if (group.wallets?.length > 0) {
+            allWallets.push(...group.wallets);
+          }
+        }
+        if (allWallets.length > 0) {
+          initializeWalletPool(allWallets, walletConfig.bidsPerMinute || 5, network);
+        }
+      } else if (walletConfig.wallets?.length > 0) {
+        // Fallback for legacy flat wallets array
+        initializeWalletPool(walletConfig.wallets, walletConfig.bidsPerMinute || 5, network);
+      }
+    }
+  } catch (error) {
+    // Failed to initialize wallet pool
+  }
+}
+
 async function performCancellation(): Promise<CancelResult> {
   const collections = loadCollections();
 
-  // Initialize wallet pool if needed
-  if (ENABLE_WALLET_ROTATION) {
-    try {
-      if (fs.existsSync(WALLET_CONFIG_PATH)) {
-        const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-
-        // Handle groups format
-        if (walletConfig.groups && typeof walletConfig.groups === 'object') {
-          const allWallets: any[] = [];
-          for (const groupName of Object.keys(walletConfig.groups)) {
-            const group = walletConfig.groups[groupName];
-            if (group.wallets?.length > 0) {
-              allWallets.push(...group.wallets);
-            }
-          }
-          if (allWallets.length > 0) {
-            initializeWalletPool(allWallets, walletConfig.bidsPerMinute || 5, network);
-          }
-        } else if (walletConfig.wallets?.length > 0) {
-          // Fallback for legacy flat wallets array
-          initializeWalletPool(walletConfig.wallets, walletConfig.bidsPerMinute || 5, network);
-        }
-      }
-    } catch (error) {
-      // Failed to initialize wallet pool
-    }
-  }
+  ensureWalletPoolInitialized();
 
   const addresses = getReceiveAddressesToCheck(collections);
   const itemResult = await cancelAllItemOffers(addresses);
@@ -297,6 +300,76 @@ async function performCancellation(): Promise<CancelResult> {
     collectionOffersCanceled: collectionResult.canceled,
     errors: [...itemResult.errors, ...collectionResult.errors],
   };
+}
+
+export async function cancelOffersForCollection(
+  collectionSymbol: string,
+  offerType: string
+): Promise<CancelResult> {
+  const collections = loadCollections();
+
+  ensureWalletPoolInitialized();
+
+  let itemOffersCanceled = 0;
+  let collectionOffersCanceled = 0;
+  const errors: string[] = [];
+
+  // Cancel item offers for this collection
+  const addresses = getReceiveAddressesToCheck(collections);
+  for (const addr of addresses) {
+    try {
+      const offerData = await getUserOffers(addr.address);
+      const offers = offerData?.offers;
+
+      if (Array.isArray(offers) && offers.length > 0) {
+        const collectionOffers = offers.filter(
+          (offer: IOffer) => offer.token?.collectionSymbol === collectionSymbol
+        );
+
+        for (const offer of collectionOffers) {
+          const success = await cancelBid(offer, addr.privateKey, addr.paymentAddress);
+          if (success) {
+            itemOffersCanceled++;
+          }
+        }
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${errorMessage}`);
+    }
+  }
+
+  // Cancel collection offer if offerType is COLLECTION
+  if (offerType === 'COLLECTION') {
+    try {
+      const bestOffers = await getBestCollectionOffer(collectionSymbol);
+      const ourReceiveAddresses = getAllOurReceiveAddresses();
+      const ourOffer = bestOffers?.offers?.find(
+        (offer: ICollectionOffer) =>
+          ourReceiveAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
+      ) as ICollectionOffer | undefined;
+
+      if (ourOffer) {
+        // Determine the correct private key for cancellation
+        const collection = collections.find(c => c.collectionSymbol === collectionSymbol);
+        const privateKey = collection?.fundingWalletWIF ?? FUNDING_WIF;
+        const keyPair = ECPair.fromWIF(privateKey, network);
+        const publicKey = keyPair.publicKey.toString('hex');
+
+        const success = await cancelCollectionOffer([ourOffer.id], publicKey, privateKey);
+        if (success) {
+          collectionOffersCanceled++;
+        } else {
+          errors.push(`Failed to cancel collection offer for ${collectionSymbol}`);
+        }
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      errors.push(`Failed to cancel collection offer for ${collectionSymbol}: ${errorMessage}`);
+    }
+  }
+
+  return { itemOffersCanceled, collectionOffersCanceled, errors };
 }
 
 export async function cancelOffers(): Promise<void> {

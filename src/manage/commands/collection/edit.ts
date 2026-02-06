@@ -2,6 +2,7 @@ import {
   loadCollections,
   updateCollection,
   validateCollection,
+  fetchCollectionInfo,
   CollectionConfig,
 } from '../../services/CollectionService';
 import {
@@ -10,6 +11,7 @@ import {
   showError,
   showWarning,
   showCollectionSummary,
+  withSpinner,
 } from '../../utils/display';
 import {
   promptSelect,
@@ -52,11 +54,26 @@ export async function editCollection(): Promise<void> {
     return;
   }
 
+  // Fetch floor price
+  let floorPrice: number | undefined;
+  try {
+    const info = await withSpinner(
+      'Fetching floor price...',
+      () => fetchCollectionInfo(selectedSymbol)
+    );
+    if (info) {
+      floorPrice = info.floorPrice;
+    }
+  } catch {
+    // Non-fatal — summary will show "-" for floor price
+  }
+
   // Show current config
   console.log('');
   console.log('Current configuration:');
   showCollectionSummary({
     symbol: collection.collectionSymbol,
+    floorPrice,
     minBid: collection.minBid,
     maxBid: collection.maxBid,
     minFloorBid: collection.minFloorBid,
@@ -182,6 +199,7 @@ export async function editCollection(): Promise<void> {
   console.log('Updated configuration:');
   showCollectionSummary({
     symbol: collection.collectionSymbol,
+    floorPrice,
     minBid: collection.minBid,
     maxBid: collection.maxBid,
     minFloorBid: collection.minFloorBid,

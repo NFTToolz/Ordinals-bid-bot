@@ -3,10 +3,13 @@ import Bottleneck from "bottleneck";
 
 config()
 
-const RATE_LIMIT = Number(process.env.RATE_LIMIT) ?? 32
+const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 32
 
 const limiter = new Bottleneck({
   minTime: 1000 / RATE_LIMIT,
+  maxConcurrent: RATE_LIMIT,
+  highWater: RATE_LIMIT * 10,
+  strategy: Bottleneck.strategy.OVERFLOW,
 });
 
 export default limiter

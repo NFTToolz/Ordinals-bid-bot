@@ -488,31 +488,32 @@ describe('CollectionService', () => {
   });
 
   describe('getPopularCollections', () => {
-    it('should fetch popular collections', async () => {
+    it('should fetch popular collections from stats API', async () => {
       vi.mocked(axiosInstance.get).mockResolvedValueOnce({
-        data: {
-          collections: [
-            { symbol: 'popular-1', name: 'Popular One', floorPrice: 5000, volume24h: 100 },
-            { symbol: 'popular-2', name: 'Popular Two', floorPrice: 4000, volume24h: 80 },
-          ],
-        },
+        data: [
+          { collectionSymbol: 'popular-1', name: 'Popular One', fp: 0.00005, vol: 0.000001 },
+          { collectionSymbol: 'popular-2', name: 'Popular Two', fp: 0.00004, vol: 0.0000008 },
+        ],
       });
 
       const result = await getPopularCollections(20);
 
       expect(result).toHaveLength(2);
       expect(result[0].symbol).toBe('popular-1');
+      expect(result[0].floorPrice).toBe(5000);
+      expect(result[0].volume24h).toBe(100);
+      expect(result[1].floorPrice).toBe(4000);
+      expect(result[1].volume24h).toBe(80);
       expect(axiosInstance.get).toHaveBeenCalledWith(
         expect.stringContaining('limit=20'),
         expect.any(Object)
       );
     });
 
-    it('should return empty array on API error', async () => {
+    it('should propagate API errors to caller', async () => {
       vi.mocked(axiosInstance.get).mockRejectedValueOnce(new Error('API Error'));
 
-      const result = await getPopularCollections();
-      expect(result).toEqual([]);
+      await expect(getPopularCollections()).rejects.toThrow('API Error');
     });
   });
 

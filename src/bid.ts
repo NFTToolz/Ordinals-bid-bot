@@ -26,7 +26,6 @@ import {
 } from "./utils/bidPacer";
 import {
   initializeWalletPool,
-  getAvailableWallet,
   getAvailableWalletAsync,
   recordBid as recordWalletBid,
   decrementBidCount as decrementWalletBidCount,
@@ -105,14 +104,24 @@ import {
 
 config()
 
+// Validate required environment variables at startup
+const requiredEnvVars = ['TOKEN_RECEIVE_ADDRESS', 'FUNDING_WIF', 'API_KEY'] as const;
+const missingVars = requiredEnvVars.filter(v => !process.env[v]);
+if (missingVars.length > 0) {
+  console.error(`[STARTUP] Missing required environment variables: ${missingVars.join(', ')}`);
+  console.error('[STARTUP] Copy .env.example to .env and configure your settings');
+  process.exit(1);
+}
+
 const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string
 const FUNDING_WIF = process.env.FUNDING_WIF as string;
 const DEFAULT_OUTBID_MARGIN = Number(process.env.DEFAULT_OUTBID_MARGIN) || 0.00001
 const API_KEY = process.env.API_KEY as string;
-const RATE_LIMIT = Number(process.env.RATE_LIMIT) ?? 32
+const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 32
 const DEFAULT_OFFER_EXPIRATION = 30
 const FEE_RATE_TIER = 'halfHourFee'
-const CONVERSION_RATE = 100000000
+// M3: Use imported CONVERSION_RATE from bidLogic.ts instead of duplicate local definition
+const CONVERSION_RATE = BID_CONVERSION_RATE;
 const network = bitcoin.networks.bitcoin;
 
 // Multi-wallet rotation configuration
@@ -122,8 +131,6 @@ const CENTRALIZE_RECEIVE_ADDRESS = process.env.CENTRALIZE_RECEIVE_ADDRESS === 't
 
 // Bid pacing configuration (Magic Eden's per-wallet rate limit)
 const BIDS_PER_MINUTE = Number(process.env.BIDS_PER_MINUTE) || 5;
-const SKIP_OVERLAPPING_CYCLES = process.env.SKIP_OVERLAPPING_CYCLES !== 'false';  // Default true
-
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 
@@ -142,10 +149,19 @@ function safeECPairFromWIF(wif: string, networkParam: typeof network, context: s
   }
 }
 
-const DEFAULT_LOOP = Number(process.env.DEFAULT_LOOP) ?? 30
-let RESTART = true
+// S3: Validate FUNDING_WIF at startup - fail fast instead of crashing on first bid attempt
+try {
+  safeECPairFromWIF(FUNDING_WIF, network, 'startup');
+} catch (error: any) {
+  console.error(`[STARTUP] Invalid FUNDING_WIF: ${error.message}`);
+  console.error('[STARTUP] Check your .env file - FUNDING_WIF must be a valid Bitcoin WIF private key');
+  process.exit(1);
+}
+
+const DEFAULT_LOOP = Number(process.env.DEFAULT_LOOP) || 30
+const restartState = new Map<string, boolean>();
 let lastRehydrationTime = 0;  // Track when rehydration last ran
-let rehydrationInProgress = false;  // Prevent concurrent rehydration by multiple collection monitors
+const rehydrationMutex = new Mutex();  // Prevent concurrent rehydration by multiple collection monitors
 const REHYDRATE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour - periodic rehydration interval
 
 // Track bot start time for stats
@@ -178,20 +194,26 @@ async function acquireTokenLock(tokenId: string): Promise<boolean> {
   // If locked, add to waiter queue instead of racing
   if (processingTokens[tokenId]) {
     return new Promise<boolean>((resolve) => {
+      // B2: Prevent double-resolution when both timeout and releaseTokenLock resolve same waiter
+      let resolved = false;
+      const safeResolve = (val: boolean) => {
+        if (!resolved) { resolved = true; resolve(val); }
+      };
+
       if (!processingTokenWaiters[tokenId]) {
         processingTokenWaiters[tokenId] = [];
       }
-      processingTokenWaiters[tokenId].push(resolve);
+      processingTokenWaiters[tokenId].push(safeResolve);
 
       // Timeout handler - remove from queue and return false
       setTimeout(() => {
         const waiters = processingTokenWaiters[tokenId];
         if (waiters) {
-          const idx = waiters.indexOf(resolve);
+          const idx = waiters.indexOf(safeResolve);
           if (idx !== -1) {
             waiters.splice(idx, 1);
             Logger.warning(`[LOCK] Timeout waiting for lock on ${tokenId.slice(-8)}, skipping`);
-            resolve(false);
+            safeResolve(false);
           }
         }
       }, TOKEN_LOCK_TIMEOUT_MS);
@@ -233,7 +255,14 @@ function releaseTokenLock(tokenId: string): void {
 function forceReleaseTokenLock(tokenId: string): void {
   delete processingTokens[tokenId];
   delete processingTokenTimestamps[tokenId];
-  // Don't resolve waiters - they will timeout naturally
+  // L1: Resolve waiters with false and clean up array to prevent memory leak
+  const waiters = processingTokenWaiters[tokenId];
+  if (waiters) {
+    for (const waiter of waiters) {
+      waiter(false);
+    }
+    delete processingTokenWaiters[tokenId];
+  }
 }
 
 // Global minimum bid interval - enforces max 5 bids/min globally regardless of wallet count
@@ -296,11 +325,9 @@ const getPurchaseEventKey = createPurchaseEventKey;
 function isPurchaseEventProcessed(eventKey: string): boolean {
   const timestamp = processedPurchaseEvents.get(eventKey);
   if (!timestamp) return false;
-  // Also check if the entry has expired (TTL-based check)
-  if (Date.now() - timestamp > PURCHASE_EVENT_TTL_MS) {
-    processedPurchaseEvents.delete(eventKey);
-    return false;
-  }
+  // M5: Don't delete expired entries inline - let cleanup interval handle deletion
+  // This prevents a window where an event could be re-processed after TTL expires
+  // but before the cleanup interval runs
   return true;
 }
 
@@ -395,9 +422,8 @@ async function incrementQuantity(collectionSymbol: string): Promise<number> {
     }
   }
 
-  // If we've exhausted retries, log a warning and return current quantity without incrementing
-  Logger.warning(`[QUANTITY] Failed to acquire lock for ${collectionSymbol} after ${MAX_RETRIES} attempts`);
-  return bidHistory[collectionSymbol]?.quantity ?? 0;
+  // B3: Throw instead of silently returning wrong value when lock acquisition fails
+  throw new Error(`[QUANTITY] Failed to acquire lock for ${collectionSymbol} after ${MAX_RETRIES} attempts`);
 }
 
 const headers = {
@@ -407,10 +433,13 @@ const headers = {
 
 import path from "path"
 
-// Ensure data directory exists for persistence files
+// Ensure data directory exists for persistence files with restricted permissions
 const DATA_DIR = path.join(process.cwd(), 'data');
 if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+} else {
+  // Ensure existing directory has correct permissions
+  try { fs.chmodSync(DATA_DIR, 0o700); } catch {}
 }
 
 const filePath = path.join(process.cwd(), 'config/collections.json')
@@ -454,11 +483,28 @@ function loadCollections(): CollectionData[] {
       if (!item.collectionSymbol || typeof item.collectionSymbol !== 'string') {
         errors.push('collectionSymbol (string) is required');
       }
+      // L2: Collection symbol format validation
+      if (typeof item.collectionSymbol === 'string') {
+        if (item.collectionSymbol.trim().length === 0) {
+          errors.push('collectionSymbol cannot be empty or whitespace');
+        } else if (/\s/.test(item.collectionSymbol)) {
+          errors.push('collectionSymbol cannot contain whitespace');
+        } else if (item.collectionSymbol.length > 200) {
+          errors.push('collectionSymbol is too long (max 200 characters)');
+        }
+      }
       if (typeof item.minBid !== 'number' || item.minBid < 0) {
         errors.push('minBid (non-negative number) is required');
       }
       if (typeof item.maxBid !== 'number' || item.maxBid < 0) {
         errors.push('maxBid (non-negative number) is required');
+      }
+      // L1: Upper bounds validation for bid amounts
+      if (typeof item.minBid === 'number' && item.minBid >= 1) {
+        errors.push(`minBid (${item.minBid}) must be less than 1 BTC`);
+      }
+      if (typeof item.maxBid === 'number' && item.maxBid >= 1) {
+        errors.push(`maxBid (${item.maxBid}) must be less than 1 BTC`);
       }
       if (typeof item.minFloorBid !== 'number') {
         errors.push('minFloorBid (number) is required');
@@ -480,6 +526,13 @@ function loadCollections(): CollectionData[] {
       if (item.bidCount !== undefined && (typeof item.bidCount !== 'number' || item.bidCount <= 0)) {
         errors.push('bidCount must be a positive number');
       }
+      // L1: Upper bounds for bidCount and scheduledLoop
+      if (typeof item.bidCount === 'number' && item.bidCount > 1000) {
+        errors.push(`bidCount (${item.bidCount}) must be <= 1000`);
+      }
+      if (item.scheduledLoop !== undefined && (typeof item.scheduledLoop !== 'number' || item.scheduledLoop <= 0)) {
+        errors.push('scheduledLoop must be a positive number');
+      }
 
       if (errors.length > 0) {
         Logger.error(`[STARTUP] Invalid configuration for collection "${item.collectionSymbol || `index ${i}`}":`);
@@ -497,7 +550,9 @@ function loadCollections(): CollectionData[] {
     }
 
     if (validatedCollections.length === 0) {
-      Logger.warning('[STARTUP] No collections configured in collections.json - bot will have nothing to monitor');
+      Logger.error('[STARTUP] No collections configured in collections.json - nothing to monitor');
+      Logger.error('[STARTUP] Add at least one collection to config/collections.json');
+      process.exit(1);
     }
 
     return validatedCollections;
@@ -508,7 +563,9 @@ function loadCollections(): CollectionData[] {
 }
 
 const collections: CollectionData[] = loadCollections();
-let balance: number | undefined;
+Logger.info(`[STARTUP] Loaded ${collections.length} collection(s): ${collections.map(c => c.collectionSymbol).join(', ')}`);
+Logger.info(`[STARTUP] Environment: API_KEY=${API_KEY ? 'set' : 'MISSING'}, FUNDING_WIF=${FUNDING_WIF ? 'set' : 'MISSING'}, RATE_LIMIT=${RATE_LIMIT}`);
+// M3: balance moved to local scope in processScheduledLoop() and placeCollectionBid()
 
 interface BidHistory {
   [collectionSymbol: string]: {
@@ -810,6 +867,8 @@ class EventManager {
   private droppedEventsCount = 0;
 
 
+  private queueMutex = new Mutex();
+
   constructor() {
     this.queue = [];
     this.isScheduledRunning = false;
@@ -839,30 +898,37 @@ class EventManager {
   }
 
   async processQueue(): Promise<void> {
-    // Ensure that the queue is not currently being processed and that there is something to process
-    if (!this.isProcessingQueue && this.queue.length > 0) {
-      this.isProcessingQueue = true;
-      try {
-        // Process the queue
-        while (this.queue.length > 0) {
-          // Wait until `this.isScheduledRunning` is false before starting processing
-          while (this.isScheduledRunning) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-          const event = this.queue.shift();
-          if (event) {
-            try {
-              await this.handleIncomingBid(event);
-            } catch (err: any) {
-              // Log error but continue processing queue - don't let one bad event stop all processing
-              Logger.error(`[EVENT QUEUE] Error processing event for ${event?.collectionSymbol || 'unknown'}`, err?.message || err);
-            }
+    if (this.queue.length === 0) return;
+
+    // Use mutex to prevent concurrent queue processing (fixes race condition C5)
+    if (this.queueMutex.isLocked()) return;
+
+    const release = await this.queueMutex.acquire();
+    this.isProcessingQueue = true;
+    try {
+      while (this.queue.length > 0) {
+        // M1: Timeout guard to prevent infinite wait if scheduled task hangs
+        let waitedMs = 0;
+        while (this.isScheduledRunning) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          waitedMs += 500;
+          if (waitedMs >= 30000) {
+            Logger.warning('[EVENT QUEUE] Waited 30s for scheduled task to finish, proceeding anyway');
+            break;
           }
         }
-      } finally {
-        // Ensure flag is always reset even if handleIncomingBid throws
-        this.isProcessingQueue = false;
+        const event = this.queue.shift();
+        if (event) {
+          try {
+            await this.handleIncomingBid(event);
+          } catch (err: any) {
+            Logger.error(`[EVENT QUEUE] Error processing event for ${event?.collectionSymbol || 'unknown'}`, err?.message || err);
+          }
+        }
       }
+    } finally {
+      this.isProcessingQueue = false;
+      release();
     }
   }
 
@@ -870,17 +936,7 @@ class EventManager {
     try {
       const { newOwner: incomingBuyerTokenReceiveAddress, collectionSymbol, tokenId, listedPrice: incomingBidAmount, createdAt } = message
 
-      const watchedEvents = [
-        "offer_placed",
-        "coll_offer_created",
-        "offer_cancelled",
-        "buying_broadcasted",
-        "offer_accepted_broadcasted",
-        "coll_offer_created",
-        "coll_offer_fulfill_broadcasted"
-      ]
-
-      if (!watchedEvents.includes(message.kind)) return
+      if (!isWatchedEvent(message.kind)) return
       const collection = collections.find((item) => item.collectionSymbol === collectionSymbol)
       if (!collection) return
 
@@ -1014,10 +1070,11 @@ class EventManager {
               const bidPrice = Math.round(verifiedOfferPrice + outBidAmount);
 
               try {
-                const userBids = Object.entries(bidHistory).flatMap(([collectionSymbol, bidData]) => {
-                  return Object.entries(bidData.ourBids).map(([tokenId, bidInfo]) => ({
-                    collectionSymbol,
-                    tokenId,
+                // L4: Use colSymbol/bidTokenId to avoid shadowing outer collectionSymbol/tokenId
+                const userBids = Object.entries(bidHistory).flatMap(([colSymbol, bidData]) => {
+                  return Object.entries(bidData.ourBids).map(([bidTokenId, bidInfo]) => ({
+                    collectionSymbol: colSymbol,
+                    tokenId: bidTokenId,
                     price: bidInfo.price,
                     expiration: new Date(bidInfo.expiration).toISOString(),
                   }));
@@ -1029,7 +1086,6 @@ class EventManager {
                   // Mark as expired if current time is past the bid's expiration
                   if (Date.now() >= bidExpirationTime) {
                     Logger.bidCancelled(bid.collectionSymbol, bid.tokenId, 'Expired');
-                    // Use bid.collectionSymbol (not outer scope collectionSymbol) and null-check
                     if (bidHistory[bid.collectionSymbol]?.ourBids) {
                       delete bidHistory[bid.collectionSymbol].ourBids[bid.tokenId]
                     }
@@ -1134,42 +1190,43 @@ class EventManager {
               return;
             }
 
-            // Round after arithmetic to prevent floating-point drift
-            const bidPrice = Math.round(+(incomingBidAmount) + outBidAmount)
-            let offerData;
             try {
-              offerData = await getBestCollectionOffer(collectionSymbol);
-            } catch (offerError: any) {
-              Logger.warning(`[WS] API error fetching collection offers for ${collectionSymbol}, skipping: ${offerError?.message || offerError}`);
-              return;
-            }
-            const ourOffer = offerData?.offers?.find((item) => isOurReceiveAddress(item.btcParams.makerOrdinalReceiveAddress))
-
-            if (ourOffer) {
-              const offerIds = [ourOffer.id]
-              const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
-              if (!cancelled) {
-                Logger.error(`[WS] Failed to cancel existing collection offer for ${collectionSymbol}, aborting counter-bid`);
-                // Note: Lock will be released in the finally block below
+              // Round after arithmetic to prevent floating-point drift
+              const bidPrice = Math.round(+(incomingBidAmount) + outBidAmount)
+              let offerData;
+              try {
+                offerData = await getBestCollectionOffer(collectionSymbol);
+              } catch (offerError: any) {
+                Logger.warning(`[WS] API error fetching collection offers for ${collectionSymbol}, skipping: ${offerError?.message || offerError}`);
                 return;
               }
-            }
-            const feeSatsPerVbyte = collection.feeSatsPerVbyte || 28
-            try {
-              if (bidPrice > maxOffer) {
-                Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed max', +(incomingBidAmount), bidPrice, maxOffer);
-              } else if (bidPrice >= floorPrice) {
-                Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed floor price', +(incomingBidAmount), bidPrice, floorPrice);
-              } else {
-                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
-                bidHistory[collectionSymbol].highestCollectionOffer = {
-                  price: bidPrice,
-                  buyerPaymentAddress: buyerPaymentAddress
+              const ourOffer = offerData?.offers?.find((item) => isOurReceiveAddress(item.btcParams.makerOrdinalReceiveAddress))
+
+              if (ourOffer) {
+                const offerIds = [ourOffer.id]
+                const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                if (!cancelled) {
+                  Logger.error(`[WS] Failed to cancel existing collection offer for ${collectionSymbol}, aborting counter-bid`);
+                  return;
                 }
-                Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
               }
-            } catch (error: unknown) {
-              Logger.error(`[WS] Failed to place collection bid for ${collectionSymbol}`, getErrorMessage(error));
+              const feeSatsPerVbyte = collection.feeSatsPerVbyte || 28
+              try {
+                if (bidPrice > maxOffer) {
+                  Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed max', +(incomingBidAmount), bidPrice, maxOffer);
+                } else if (bidPrice >= floorPrice) {
+                  Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed floor price', +(incomingBidAmount), bidPrice, floorPrice);
+                } else {
+                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, undefined)
+                  bidHistory[collectionSymbol].highestCollectionOffer = {
+                    price: bidPrice,
+                    buyerPaymentAddress: buyerPaymentAddress
+                  }
+                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
+                }
+              } catch (error: unknown) {
+                Logger.error(`[WS] Failed to place collection bid for ${collectionSymbol}`, getErrorMessage(error));
+              }
             } finally {
               releaseTokenLock(collectionSymbol);
             }
@@ -1178,7 +1235,7 @@ class EventManager {
       }
 
       if (message.kind === "buying_broadcasted" || message.kind === "offer_accepted_broadcasted" || message.kind === "coll_offer_fulfill_broadcasted") {
-        if (incomingBuyerTokenReceiveAddress === buyerTokenReceiveAddress) {
+        if (isOurReceiveAddress(incomingBuyerTokenReceiveAddress)) {
           // FIX: Deduplication to prevent race condition where same purchase event
           // increments quantity multiple times if WebSocket delivers duplicate events
           const eventKey = getPurchaseEventKey(collectionSymbol, tokenId, message.kind, message.createdAt);
@@ -1195,7 +1252,7 @@ class EventManager {
             Logger.info(`[WS] ${collectionSymbol}: Purchase confirmed for ${tokenId.slice(-8)}, quantity now ${newQuantity}`);
             // Immediately persist quantity to prevent loss on crash
             // This is critical because quantity controls purchase limits
-            writeBidHistoryToFile();
+            await writeBidHistoryToFile();
           } catch (quantityError: unknown) {
             Logger.error(`[WS] ${collectionSymbol}: Failed to increment quantity for ${tokenId.slice(-8)}`, getErrorMessage(quantityError));
             // Continue processing - purchase event is marked, but quantity wasn't updated
@@ -1209,8 +1266,15 @@ class EventManager {
   }
 
   async runScheduledTask(item: CollectionData): Promise<void> {
+    // M1: Timeout guard to prevent infinite wait if queue processing hangs
+    let waitedMs = 0;
     while (this.isProcessingQueue) {
-      await new Promise(resolve => setTimeout(resolve, 100)); // Wait for queue processing to pause
+      await new Promise(resolve => setTimeout(resolve, 100));
+      waitedMs += 100;
+      if (waitedMs >= 30000) {
+        Logger.warning(`[SCHEDULE] Waited 30s for queue processing to finish for ${item.collectionSymbol}, proceeding anyway`);
+        break;
+      }
     }
     this.isScheduledRunning = true;
     try {
@@ -1231,8 +1295,8 @@ class EventManager {
     const collectionSymbol = item.collectionSymbol
     const traits = item.traits
     const feeSatsPerVbyte = item.feeSatsPerVbyte
-    // offerType is validated at startup by loadCollections(), but add defensive check
-    const offerType = (item.offerType ?? 'ITEM').toUpperCase()
+    // L3: offerType is validated as uppercase at startup by loadCollections()
+    const offerType = item.offerType ?? 'ITEM'
     const minBid = item.minBid
     const maxBid = item.maxBid
     const bidCount = item.bidCount ?? 20
@@ -1245,6 +1309,7 @@ class EventManager {
     const maxBuy = item.quantity ?? 1
     const enableCounterBidding = item.enableCounterBidding ?? false
     const buyerPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string
+    let balance: number | undefined;
 
     // Log when default values are used
     const defaults: string[] = [];
@@ -1275,41 +1340,44 @@ class EventManager {
       // Rehydrate bid history on startup OR periodically every REHYDRATE_INTERVAL_MS
       // This recovers orphaned bids that may not be tracked (e.g., after crash, restart, or clock drift)
       const now = Date.now();
-      const shouldRehydrate = (RESTART || (now - lastRehydrationTime > REHYDRATE_INTERVAL_MS)) && !rehydrationInProgress;
+      const isCollectionRestart = restartState.get(item.collectionSymbol) !== false;
+      const shouldRehydrate = isCollectionRestart || (now - lastRehydrationTime > REHYDRATE_INTERVAL_MS);
 
-      if (shouldRehydrate) {
-        rehydrationInProgress = true;  // Prevent concurrent rehydration by other collection monitors
+      if (shouldRehydrate && !rehydrationMutex.isLocked()) {
+        const releaseRehydration = await rehydrationMutex.acquire();
         try {
-          const addressesToQuery = getReceiveAddressesToQuery();
-          Logger.info(`[REHYDRATE] ${RESTART ? 'Startup' : 'Periodic'} rehydration - querying ${addressesToQuery.length} wallet address(es)`);
+          // Double-check after acquiring lock (another monitor may have just completed rehydration)
+          const recheckNow = Date.now();
+          if (isCollectionRestart || (recheckNow - lastRehydrationTime > REHYDRATE_INTERVAL_MS)) {
+            const addressesToQuery = getReceiveAddressesToQuery();
+            Logger.info(`[REHYDRATE] ${isCollectionRestart ? 'Startup' : 'Periodic'} rehydration - querying ${addressesToQuery.length} wallet address(es)`);
 
-          for (const receiveAddr of addressesToQuery) {
-            try {
-              const offerData = await getUserOffers(receiveAddr);
-              if (offerData && Array.isArray(offerData.offers) && offerData.offers.length > 0) {
-                Logger.info(`[REHYDRATE] Found ${offerData.offers.length} offers for ${receiveAddr.slice(0, 10)}...`);
-                for (const offerItem of offerData.offers) {
-                  // Look up offerType from collections config, default to "ITEM" if not found
-                  const matchedCollection = collections.find(c => c.collectionSymbol === offerItem.token.collectionSymbol);
-                  initBidHistory(offerItem.token.collectionSymbol, matchedCollection?.offerType ?? "ITEM");
-                  bidHistory[offerItem.token.collectionSymbol].topBids[offerItem.tokenId] = true;
-                  bidHistory[offerItem.token.collectionSymbol].ourBids[offerItem.tokenId] = {
-                    price: offerItem.price,
-                    expiration: offerItem.expirationDate,
-                    paymentAddress: offerItem.buyerPaymentAddress
-                  };
-                  bidHistory[offerItem.token.collectionSymbol].lastSeenActivity = Date.now();
+            for (const receiveAddr of addressesToQuery) {
+              try {
+                const offerData = await getUserOffers(receiveAddr);
+                if (offerData && Array.isArray(offerData.offers) && offerData.offers.length > 0) {
+                  Logger.info(`[REHYDRATE] Found ${offerData.offers.length} offers for ${receiveAddr.slice(0, 10)}...`);
+                  for (const offerItem of offerData.offers) {
+                    const matchedCollection = collections.find(c => c.collectionSymbol === offerItem.token.collectionSymbol);
+                    initBidHistory(offerItem.token.collectionSymbol, matchedCollection?.offerType ?? "ITEM");
+                    bidHistory[offerItem.token.collectionSymbol].topBids[offerItem.tokenId] = true;
+                    bidHistory[offerItem.token.collectionSymbol].ourBids[offerItem.tokenId] = {
+                      price: offerItem.price,
+                      expiration: typeof offerItem.expirationDate === 'string' ? new Date(offerItem.expirationDate).getTime() : offerItem.expirationDate,
+                      paymentAddress: offerItem.buyerPaymentAddress
+                    };
+                    bidHistory[offerItem.token.collectionSymbol].lastSeenActivity = Date.now();
+                  }
                 }
+              } catch (error: unknown) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                Logger.warning(`[REHYDRATE] Failed to fetch offers for ${receiveAddr.slice(0, 10)}...: ${errorMessage}`);
               }
-            } catch (error: unknown) {
-              const errorMessage = error instanceof Error ? error.message : String(error);
-              Logger.warning(`[REHYDRATE] Failed to fetch offers for ${receiveAddr.slice(0, 10)}...: ${errorMessage}`);
-              // Continue with next address
             }
+            lastRehydrationTime = Date.now();
           }
-          lastRehydrationTime = now;  // Update last rehydration time
         } finally {
-          rehydrationInProgress = false;  // Always release lock
+          releaseRehydration();
         }
       }
 
@@ -1370,7 +1438,10 @@ class EventManager {
         Logger.warning(`[SCHEDULE] Invalid floor price "${collectionData.floorPrice}" for ${collectionSymbol}, skipping cycle`);
         return;
       }
-      const maxFloorBid = item.maxFloorBid
+      // H3: Cap maxFloorBid at 100% for non-trait offers (matching WS handler at line 951-953)
+      const maxFloorBid = item.offerType === "ITEM" && item.traits && item.traits.length > 0
+        ? item.maxFloorBid
+        : (item.maxFloorBid <= 100 ? item.maxFloorBid : 100);
       const minFloorBid = item.minFloorBid
       const minOffer = Math.max(minPrice, Math.round(minFloorBid * floorPrice / 100))
       const maxOffer = Math.min(maxPrice, Math.round(maxFloorBid * floorPrice / 100))
@@ -1397,15 +1468,16 @@ class EventManager {
         return
       }
 
-      if ((item.offerType === "ITEM" || item.offerType === "COLLECTION") && !item.traits && maxFloorBid > 100) {
+      if ((item.offerType === "ITEM" || item.offerType === "COLLECTION") && (!item.traits || item.traits.length === 0) && maxFloorBid > 100) {
         Logger.warning(`Offer for ${item.collectionSymbol} at ${maxFloorBid}% of floor price (above 100%). Skipping bid.`);
         return
       }
 
-      const userBids = Object.entries(bidHistory).flatMap(([collectionSymbol, bidData]) => {
-        return Object.entries(bidData.ourBids).map(([tokenId, bidInfo]) => ({
-          collectionSymbol,
-          tokenId,
+      // L4: Use colSymbol/bidTokenId to avoid shadowing outer collectionSymbol/tokenId
+      const userBids = Object.entries(bidHistory).flatMap(([colSymbol, bidData]) => {
+        return Object.entries(bidData.ourBids).map(([bidTokenId, bidInfo]) => ({
+          collectionSymbol: colSymbol,
+          tokenId: bidTokenId,
           price: bidInfo.price,
           expiration: new Date(bidInfo.expiration).toISOString(),
         }));
@@ -1456,9 +1528,11 @@ class EventManager {
 
         // Mark as expired if current time is past the bid's expiration
         if (Date.now() >= bidExpirationTime) {
-          Logger.bidCancelled(collectionSymbol, bid.tokenId, 'Expired');
-          delete bidHistory[collectionSymbol].ourBids[bid.tokenId]
-          delete bidHistory[collectionSymbol].topBids[bid.tokenId]
+          Logger.bidCancelled(bid.collectionSymbol, bid.tokenId, 'Expired');
+          if (bidHistory[bid.collectionSymbol]) {
+            delete bidHistory[bid.collectionSymbol].ourBids[bid.tokenId]
+            delete bidHistory[bid.collectionSymbol].topBids[bid.tokenId]
+          }
         }
       })
 
@@ -1835,10 +1909,15 @@ class EventManager {
             try {
               if (ourOffer) {
                 const offerIds = [ourOffer.id]
-                await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                if (!cancelled) {
+                  Logger.error(`[COLLECTION] Failed to cancel existing offer before outbid for ${collectionSymbol}, skipping bid`);
+                  return;
+                }
               }
             } catch (error: any) {
               Logger.error(`[COLLECTION] Failed to cancel existing offer before outbid for ${collectionSymbol}`, error?.message || error);
+              return;
             }
 
             const currentPrice = topOffer.price.amount
@@ -1847,7 +1926,7 @@ class EventManager {
             if (bidPrice <= maxOffer) {
               try {
                 if (bidPrice < floorPrice) {
-                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
+                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
                   bidHistory[collectionSymbol].offerType = "COLLECTION"
 
                   bidHistory[collectionSymbol].highestCollectionOffer = {
@@ -1874,16 +1953,21 @@ class EventManager {
                 try {
                   if (ourOffer) {
                     const offerIds = [ourOffer.id]
-                    await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                    const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                    if (!cancelled) {
+                      Logger.error(`[COLLECTION] Failed to cancel offer before adjustment for ${collectionSymbol}, skipping bid`);
+                      return;
+                    }
                   }
                 } catch (error: any) {
                   Logger.error(`[COLLECTION] Failed to cancel offer before adjustment for ${collectionSymbol}`, error?.message || error);
+                  return;
                 }
 
                 if (bidPrice <= maxOffer) {
                   try {
                     if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
+                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -1904,16 +1988,21 @@ class EventManager {
                 try {
                   if (ourOffer) {
                     const offerIds = [ourOffer.id]
-                    await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                    const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                    if (!cancelled) {
+                      Logger.error(`[COLLECTION] Failed to cancel collection offer for ${collectionSymbol}, skipping bid`);
+                      return;
+                    }
                   }
                 } catch (error) {
                   Logger.error(`Failed to cancel collection offer for ${collectionSymbol}`, error);
+                  return;
                 }
 
                 if (bidPrice <= maxOffer) {
                   try {
                     if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
+                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -1935,7 +2024,7 @@ class EventManager {
           if (bidPrice <= maxOffer) {
             if (bidPrice < floorPrice) {
               try {
-                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer)
+                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
                 bidHistory[collectionSymbol].offerType = "COLLECTION"
                 bidHistory[collectionSymbol].highestCollectionOffer = {
                   price: bidPrice,
@@ -1970,7 +2059,7 @@ class EventManager {
         successfulBidsPlaced,
       });
 
-      RESTART = false
+      restartState.set(item.collectionSymbol, false);
       const scheduleDuration = (Date.now() - startTime) / 1000;
       Logger.scheduleComplete(item.collectionSymbol, scheduleDuration);
     } catch (error) {
@@ -1984,6 +2073,12 @@ const eventManager = new EventManager();
 
 function connectWebSocket(): void {
   const baseEndpoint: string = 'wss://wss-mainnet.magiceden.io/CJMw7IPrGPUb13adEQYW2ASbR%2FIWToagGUCr02hWp1oWyLAtf5CS0XF69WNXj0MbO6LEQLrFQMQoEqlX7%2Fny2BP08wjFc9MxzEmM5v2c5huTa3R1DPqGSbuO2TXKEEneIc4FMEm5ZJruhU8y4cyfIDzGqhWDhxK3iRnXtYzI0FGG1%2BMKyx9WWOpp3lLA3Gm2BgNpHHp3wFEas5TqVdJn0GtBrptg8ZEveG8c44CGqfWtEsS0iI8LZDR7tbrZ9fZpbrngDaimEYEH6MgvhWPTlKrsGw%3D%3D'
+
+  // L2: Defensive clear of heartbeat interval on reconnect to prevent race
+  if (heartbeatIntervalId !== null) {
+    clearInterval(heartbeatIntervalId);
+    heartbeatIntervalId = null;
+  }
 
   // Memory leak fix: Clean up existing WebSocket before creating new one
   if (ws) {
@@ -2002,16 +2097,24 @@ function connectWebSocket(): void {
 
   ws = new WebSocket(baseEndpoint);
 
+  // M2: Connection timeout - trigger reconnect if connection doesn't open within 30s
+  const wsConnectTimeout = setTimeout(() => {
+    if (ws && ws.readyState === WebSocket.CONNECTING) {
+      Logger.warning('[WEBSOCKET] Connection timeout after 30s, triggering reconnect');
+      try { ws.close(); } catch {}
+    }
+  }, 30000);
 
   // FIX: Register message listener OUTSIDE open handler to prevent accumulation on reconnects
   ws.on("message", function incoming(data: string) {
     try {
       const dataStr = data.toString();
-      if (!isValidJSON(dataStr)) {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(dataStr);
+      } catch {
         return; // Silently skip non-JSON messages (heartbeat responses, etc.)
       }
-
-      const parsed = JSON.parse(dataStr);
 
       // Validate message has required fields before processing
       if (!isValidWebSocketMessage(parsed)) {
@@ -2028,8 +2131,9 @@ function connectWebSocket(): void {
     }
   });
 
-  ws.addEventListener("open", function open() {
+  ws.on("open", function open() {
     Logger.websocket.connected();
+    clearTimeout(wsConnectTimeout); // M2: Cancel connection timeout on successful open
 
     retryCount = 0;
     if (reconnectTimeoutId !== null) {
@@ -2052,20 +2156,22 @@ function connectWebSocket(): void {
             })
           );
         } else {
-          // FIX: Clear interval if WebSocket is not open to prevent sending on closed connection
           Logger.warning('[WEBSOCKET] Heartbeat skipped - connection not open');
           if (heartbeatIntervalId !== null) {
             clearInterval(heartbeatIntervalId);
             heartbeatIntervalId = null;
           }
+          // Trigger reconnect to recover dead connection
+          attemptReconnect();
         }
       } catch (err) {
-        // FIX: Clear interval on error to prevent further attempts on broken connection
         Logger.warning('[WEBSOCKET] Heartbeat send failed, clearing interval:', err);
         if (heartbeatIntervalId !== null) {
           clearInterval(heartbeatIntervalId);
           heartbeatIntervalId = null;
         }
+        // Trigger reconnect to recover from broken connection
+        attemptReconnect();
       }
     }, 10000);
 
@@ -2074,8 +2180,9 @@ function connectWebSocket(): void {
     }
   });
 
-  ws.addEventListener("close", function close() {
+  ws.on("close", function close() {
     Logger.websocket.disconnected();
+    clearTimeout(wsConnectTimeout); // M2: Cancel connection timeout on close
     if (heartbeatIntervalId !== null) {
       clearInterval(heartbeatIntervalId);
       heartbeatIntervalId = null;
@@ -2083,7 +2190,8 @@ function connectWebSocket(): void {
     attemptReconnect();
   });
 
-  ws.addEventListener("error", function error(err) {
+  ws.on("error", function error(err: any) {
+    clearTimeout(wsConnectTimeout); // H4: Clear connection timeout on error
     Logger.websocket.error(err);
     if (ws) {
       ws.close();
@@ -2177,6 +2285,21 @@ async function startProcessing() {
 // Display version banner on startup
 printVersionBanner();
 
+// S1: Fix permissions on sensitive config files at startup
+const WALLET_CONFIG_FULL_PATH = path.resolve(WALLET_CONFIG_PATH);
+const CONFIG_DIR = path.join(process.cwd(), 'config');
+try {
+  if (fs.existsSync(CONFIG_DIR)) {
+    fs.chmodSync(CONFIG_DIR, 0o700);
+  }
+  if (fs.existsSync(WALLET_CONFIG_FULL_PATH)) {
+    fs.chmodSync(WALLET_CONFIG_FULL_PATH, 0o600);
+    Logger.info(`[STARTUP] Set secure permissions on ${WALLET_CONFIG_FULL_PATH}`);
+  }
+} catch (err: any) {
+  Logger.warning(`[STARTUP] Could not set file permissions: ${err?.message || err}`);
+}
+
 // Load persisted bid history (for quantity restoration after restart)
 loadBidHistoryFromFile();
 
@@ -2235,6 +2358,21 @@ if (ENABLE_WALLET_ROTATION) {
 
         Logger.success('[STARTUP] All collections have valid walletGroup assignments');
 
+        // M5: Validate all wallet WIFs at startup (fail-fast before bot loop)
+        for (const groupName of groupNames) {
+          const group = walletConfig.groups[groupName];
+          if (group && group.wallets) {
+            for (const wallet of group.wallets) {
+              try {
+                ECPair.fromWIF(wallet.fundingWalletWIF, network);
+              } catch (wifError: any) {
+                Logger.error(`[STARTUP] Invalid WIF for wallet in group "${groupName}": ${wifError.message}`);
+                process.exit(1);
+              }
+            }
+          }
+        }
+
       } else if (walletConfig.wallets && walletConfig.wallets.length > 0) {
         // Legacy flat wallets format - use single pool for backward compatibility
         initializeWalletPool(walletConfig.wallets, walletConfig.bidsPerMinute || 5, network);
@@ -2242,6 +2380,16 @@ if (ENABLE_WALLET_ROTATION) {
         Logger.info(`[WALLET ROTATION] Each wallet limited to ${walletConfig.bidsPerMinute || 5} bids/min`);
         Logger.info(`[WALLET ROTATION] Maximum throughput: ${walletConfig.wallets.length * (walletConfig.bidsPerMinute || 5)} bids/min`);
         Logger.warning('[WALLET ROTATION] Consider migrating to wallet groups for per-collection wallet assignment');
+
+        // M5: Validate all wallet WIFs at startup (fail-fast before bot loop)
+        for (const wallet of walletConfig.wallets) {
+          try {
+            ECPair.fromWIF(wallet.fundingWalletWIF, network);
+          } catch (wifError: any) {
+            Logger.error(`[STARTUP] Invalid WIF for wallet in legacy pool: ${wifError.message}`);
+            process.exit(1);
+          }
+        }
       } else {
         Logger.warning('[WALLET GROUPS] No wallets configured in wallets.json');
         Logger.warning('[WALLET GROUPS] Continuing with single wallet mode...');
@@ -2580,7 +2728,7 @@ function cleanupStaleLocks() {
     const lockTimestamp = processingTokenTimestamps[tokenId];
     if (lockTimestamp && now - lockTimestamp > TOKEN_LOCK_TIMEOUT_MS) {
       Logger.warning(`[LOCK CLEANUP] Removing stale lock for ${tokenId.slice(-8)} (held for ${Math.round((now - lockTimestamp) / 1000)}s)`);
-      releaseTokenLock(tokenId);
+      forceReleaseTokenLock(tokenId);
       staleLocksRemoved++;
     }
   }
@@ -2711,35 +2859,48 @@ const bidStatsIntervalId = setInterval(() => {
   }
 }, BID_STATS_INTERVAL_MS);
 
-process.on('SIGINT', () => {
-  Logger.info('Received SIGINT signal. Shutting down...');
+// B6: Shared graceful shutdown with timeout guard and WebSocket cleanup
+async function gracefulShutdown(signal: string): Promise<void> {
+  Logger.info(`Received ${signal} signal. Shutting down...`);
 
-  // Clear all intervals to prevent data corruption during shutdown
-  clearInterval(botStatsIntervalId);
-  clearInterval(bidHistoryIntervalId);
-  clearInterval(cleanupBidHistoryIntervalId);
-  clearInterval(cleanupRecentBidsIntervalId);
-  clearInterval(cleanupPurchaseEventsIntervalId);
-  clearInterval(memoryMonitorIntervalId);
-  clearInterval(pacerProgressIntervalId);
-  clearInterval(bidStatsIntervalId);
-  if (heartbeatIntervalId !== null) {
-    clearInterval(heartbeatIntervalId);
+  // B6: Safety net - force exit if shutdown hangs
+  const forceExitTimer = setTimeout(() => {
+    console.error('[SHUTDOWN] Graceful shutdown timed out after 5s, forcing exit');
+    process.exit(1);
+  }, 5000);
+  forceExitTimer.unref(); // Don't keep process alive just for this timer
+
+  // M6: Wrap each clearInterval in try-catch so one failure doesn't skip the rest
+  const intervals = [botStatsIntervalId, bidHistoryIntervalId, cleanupBidHistoryIntervalId,
+    cleanupRecentBidsIntervalId, cleanupPurchaseEventsIntervalId, memoryMonitorIntervalId,
+    pacerProgressIntervalId, bidStatsIntervalId, cleanupStaleLocksIntervalId];
+  for (const id of intervals) {
+    try { clearInterval(id); } catch {}
   }
-  if (reconnectTimeoutId !== null) {
-    clearTimeout(reconnectTimeoutId);
+  try { if (heartbeatIntervalId !== null) clearInterval(heartbeatIntervalId); } catch {}
+  try { if (reconnectTimeoutId !== null) clearTimeout(reconnectTimeoutId); } catch {}
+
+  // B5: Close WebSocket cleanly before exit
+  if (ws) {
+    try {
+      ws.removeAllListeners();
+      ws.close();
+    } catch {}
   }
 
   Logger.printStats();
-  writeBidHistoryToFile();
-  process.exit(0)
-});
+  await writeBidHistoryToFile();
+  process.exit(0);
+}
+
+process.on('SIGINT', () => { gracefulShutdown('SIGINT'); });
+process.on('SIGTERM', () => { gracefulShutdown('SIGTERM'); });
 
 // Global error handlers to prevent silent crashes
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', async (error) => {
   Logger.error('[CRITICAL] Uncaught exception:', error);
   Logger.printStats();
-  writeBidHistoryToFile();
+  await writeBidHistoryToFile();
   process.exit(1);
 });
 
@@ -2866,6 +3027,16 @@ async function placeBidWithRotation(
     // so we don't need to call recordSuccessfulBid separately
   }
 
+  // M4: Validate offer price before proceeding to API call
+  if (offerPrice <= 0) {
+    Logger.warning(`[BID] Rejected zero/negative offer price (${offerPrice}) for ${tokenId.slice(-8)}`);
+    return { success: false };
+  }
+  if (maxAllowedPrice && offerPrice > maxAllowedPrice) {
+    Logger.warning(`[BID] Rejected offer price ${offerPrice} exceeding max ${maxAllowedPrice} for ${tokenId.slice(-8)}`);
+    return { success: false };
+  }
+
   // Enforce global minimum interval between ALL bids (regardless of wallet rotation)
   // This prevents API rate limits since Magic Eden limits ~5 bids/min per API key, not per wallet
   await waitForGlobalBidSlot();
@@ -2890,11 +3061,8 @@ async function placeBidWithRotation(
     );
 
     if (success) {
-      // Record to global pacer only if wallet rotation is disabled
-      if (!ENABLE_WALLET_ROTATION || (!isWalletPoolInitialized() && !isWalletGroupManagerInitialized())) {
-        recordPacerBid();
-      }
-      // Note: Wallet pool/group bid is already recorded by getAvailableWalletAsync
+      // Always record to global pacer so manage console shows accurate stats
+      recordPacerBid();
     } else {
       // Bid failed - decrement the pre-incremented wallet bid count to recover the slot
       // This prevents "lost" bid slots when bids fail after wallet reservation
@@ -3059,7 +3227,8 @@ async function placeCollectionBid(
   publicKey: string,
   privateKey: string,
   feeSatsPerVbyte: number = 28,
-  maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
+  maxAllowedPrice?: number,  // Safety cap - last line of defense against overbidding
+  balance?: number  // M3: Pass balance explicitly instead of using global
 ): Promise<boolean> {
   try {
     const priceSats = Math.round(offerPrice)
@@ -3114,8 +3283,8 @@ function isValidWebSocketMessage(message: unknown): message is CollectOfferActiv
     return false;
   }
 
-  // For offer_placed and buying events, tokenId is required
-  const tokenEvents = ['offer_placed', 'buying_broadcasted', 'offer_accepted_broadcasted'];
+  // For offer_placed, buying, and fulfillment events, tokenId is required
+  const tokenEvents = ['offer_placed', 'buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
   if (tokenEvents.includes(msg.kind) && typeof msg.tokenId !== 'string') {
     return false;
   }
