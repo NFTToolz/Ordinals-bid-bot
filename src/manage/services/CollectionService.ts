@@ -1,9 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import axios from 'axios';
+import axiosInstance from '../../axios/axiosInstance';
+import limiter from '../../bottleneck';
 
 const COLLECTIONS_FILE_PATH = path.join(process.cwd(), 'config/collections.json');
-const MAGIC_EDEN_API = 'https://api-mainnet.magiceden.dev/v2';
+const MAGIC_EDEN_API = 'https://nfttools.pro/magiceden/v2';
+
+const API_KEY = process.env.API_KEY as string;
+const meHeaders = {
+  'Accept': 'application/json',
+  'X-NFT-API-Key': API_KEY,
+};
 
 export interface CollectionConfig {
   collectionSymbol: string;
@@ -206,14 +213,9 @@ export function validateCollection(config: Partial<CollectionConfig>): string[] 
  */
 export async function fetchCollectionInfo(symbol: string): Promise<CollectionInfo | null> {
   try {
-    // Use the ordinals API endpoint
-    const response = await axios.get(
-      `https://api-mainnet.magiceden.dev/v2/ord/btc/stat?collectionSymbol=${symbol}`,
-      {
-        headers: {
-          'Accept': 'application/json',
-        },
-      }
+    const url = `${MAGIC_EDEN_API}/ord/btc/stat?collectionSymbol=${symbol}`;
+    const response = await limiter.schedule(() =>
+      axiosInstance.get(url, { headers: meHeaders })
     );
 
     const data = response.data;
@@ -230,6 +232,7 @@ export async function fetchCollectionInfo(symbol: string): Promise<CollectionInf
       listedCount: data.listed,
     };
   } catch (error) {
+    console.error(`Failed to fetch collection info for ${symbol}:`, error instanceof Error ? error.message : error);
     return null;
   }
 }
@@ -239,13 +242,9 @@ export async function fetchCollectionInfo(symbol: string): Promise<CollectionInf
  */
 export async function searchCollections(query: string): Promise<CollectionSearchResult[]> {
   try {
-    const response = await axios.get(
-      `https://api-mainnet.magiceden.dev/v2/ord/btc/collections?limit=20`,
-      {
-        headers: {
-          'Accept': 'application/json',
-        },
-      }
+    const url = `${MAGIC_EDEN_API}/ord/btc/collections?limit=20`;
+    const response = await limiter.schedule(() =>
+      axiosInstance.get(url, { headers: meHeaders })
     );
 
     const collections = response.data.collections || response.data || [];
@@ -263,6 +262,7 @@ export async function searchCollections(query: string): Promise<CollectionSearch
       volume24h: c.volume24h,
     }));
   } catch (error) {
+    console.error('Failed to search collections:', error instanceof Error ? error.message : error);
     return [];
   }
 }
@@ -272,13 +272,9 @@ export async function searchCollections(query: string): Promise<CollectionSearch
  */
 export async function getPopularCollections(limit: number = 20): Promise<CollectionSearchResult[]> {
   try {
-    const response = await axios.get(
-      `https://api-mainnet.magiceden.dev/v2/ord/btc/collections?limit=${limit}&sortBy=volume`,
-      {
-        headers: {
-          'Accept': 'application/json',
-        },
-      }
+    const url = `${MAGIC_EDEN_API}/ord/btc/collections?limit=${limit}&sortBy=volume`;
+    const response = await limiter.schedule(() =>
+      axiosInstance.get(url, { headers: meHeaders })
     );
 
     const collections = response.data.collections || response.data || [];
@@ -290,6 +286,7 @@ export async function getPopularCollections(limit: number = 20): Promise<Collect
       volume24h: c.volume24h,
     }));
   } catch (error) {
+    console.error('Failed to fetch popular collections:', error instanceof Error ? error.message : error);
     return [];
   }
 }

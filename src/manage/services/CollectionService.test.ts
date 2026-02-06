@@ -25,15 +25,23 @@ vi.mock('fs', () => ({
   copyFileSync: vi.fn(),
 }));
 
-// Mock axios
-vi.mock('axios', () => ({
+// Mock axiosInstance
+vi.mock('../../axios/axiosInstance', () => ({
   default: {
     get: vi.fn(),
   },
 }));
 
+// Mock bottleneck limiter
+vi.mock('../../bottleneck', () => ({
+  default: {
+    schedule: vi.fn((fn: () => any) => fn()),
+  },
+}));
+
 import * as fs from 'fs';
-import axios from 'axios';
+import axiosInstance from '../../axios/axiosInstance';
+import limiter from '../../bottleneck';
 
 describe('CollectionService', () => {
   beforeEach(() => {
@@ -384,7 +392,7 @@ describe('CollectionService', () => {
 
   describe('fetchCollectionInfo', () => {
     it('should fetch collection info from API', async () => {
-      vi.mocked(axios.get).mockResolvedValueOnce({
+      vi.mocked(axiosInstance.get).mockResolvedValueOnce({
         data: {
           symbol: 'test-collection',
           name: 'Test Collection',
@@ -406,14 +414,14 @@ describe('CollectionService', () => {
     });
 
     it('should return null on API error', async () => {
-      vi.mocked(axios.get).mockRejectedValueOnce(new Error('API Error'));
+      vi.mocked(axiosInstance.get).mockRejectedValueOnce(new Error('API Error'));
 
       const result = await fetchCollectionInfo('test-collection');
       expect(result).toBeNull();
     });
 
     it('should use symbol as fallback for missing name', async () => {
-      vi.mocked(axios.get).mockResolvedValueOnce({
+      vi.mocked(axiosInstance.get).mockResolvedValueOnce({
         data: { symbol: 'test' },
       });
 
@@ -422,7 +430,7 @@ describe('CollectionService', () => {
     });
 
     it('should handle missing floor price', async () => {
-      vi.mocked(axios.get).mockResolvedValueOnce({
+      vi.mocked(axiosInstance.get).mockResolvedValueOnce({
         data: { symbol: 'test', name: 'Test' },
       });
 
@@ -433,7 +441,7 @@ describe('CollectionService', () => {
 
   describe('searchCollections', () => {
     it('should search collections by query', async () => {
-      vi.mocked(axios.get).mockResolvedValueOnce({
+      vi.mocked(axiosInstance.get).mockResolvedValueOnce({
         data: {
           collections: [
             { symbol: 'test-1', name: 'Test One', floorPrice: 1000 },
@@ -451,14 +459,14 @@ describe('CollectionService', () => {
     });
 
     it('should return empty array on API error', async () => {
-      vi.mocked(axios.get).mockRejectedValueOnce(new Error('API Error'));
+      vi.mocked(axiosInstance.get).mockRejectedValueOnce(new Error('API Error'));
 
       const result = await searchCollections('test');
       expect(result).toEqual([]);
     });
 
     it('should handle response as direct array', async () => {
-      vi.mocked(axios.get).mockResolvedValueOnce({
+      vi.mocked(axiosInstance.get).mockResolvedValueOnce({
         data: [{ symbol: 'test', name: 'Test', floorPrice: 1000 }],
       });
 
@@ -472,7 +480,7 @@ describe('CollectionService', () => {
         name: `Test ${i}`,
         floorPrice: 1000,
       }));
-      vi.mocked(axios.get).mockResolvedValueOnce({ data: { collections } });
+      vi.mocked(axiosInstance.get).mockResolvedValueOnce({ data: { collections } });
 
       const result = await searchCollections('test');
       expect(result).toHaveLength(10);
@@ -481,7 +489,7 @@ describe('CollectionService', () => {
 
   describe('getPopularCollections', () => {
     it('should fetch popular collections', async () => {
-      vi.mocked(axios.get).mockResolvedValueOnce({
+      vi.mocked(axiosInstance.get).mockResolvedValueOnce({
         data: {
           collections: [
             { symbol: 'popular-1', name: 'Popular One', floorPrice: 5000, volume24h: 100 },
@@ -494,14 +502,14 @@ describe('CollectionService', () => {
 
       expect(result).toHaveLength(2);
       expect(result[0].symbol).toBe('popular-1');
-      expect(axios.get).toHaveBeenCalledWith(
+      expect(axiosInstance.get).toHaveBeenCalledWith(
         expect.stringContaining('limit=20'),
         expect.any(Object)
       );
     });
 
     it('should return empty array on API error', async () => {
-      vi.mocked(axios.get).mockRejectedValueOnce(new Error('API Error'));
+      vi.mocked(axiosInstance.get).mockRejectedValueOnce(new Error('API Error'));
 
       const result = await getPopularCollections();
       expect(result).toEqual([]);
