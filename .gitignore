@@ -154,8 +154,12 @@ dist
 
 # End of https://www.toptal.com/developers/gitignore/api/node
 
+# npm lockfile (this project uses yarn)
+package-lock.json
+
 # Wallet configuration (contains private keys)
 config/wallets.json
+config/collections.json
 wallets.json
 *.wallet.json
 

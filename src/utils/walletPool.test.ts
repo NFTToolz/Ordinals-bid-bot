@@ -69,14 +69,6 @@ describe('WalletPool', () => {
     });
   });
 
-  describe('getAvailableWallet (deprecated)', () => {
-    it('should throw error indicating deprecation', () => {
-      const pool = new WalletPool(testWallets, 5);
-      // Sync method is deprecated and should throw
-      expect(() => pool.getAvailableWallet()).toThrow('deprecated');
-    });
-  });
-
   describe('getAvailableWalletAsync', () => {
     it('should return wallet with mutex protection', async () => {
       const pool = new WalletPool(testWallets, 5);

@@ -110,7 +110,7 @@ export function formatTokenId(tokenId: string): string {
 
 export const Logger = {
   // Success - Bids placed, adjusted
-  success(message: string, details?: any) {
+  success(message: string, details?: unknown) {
     const timestamp = getTimestamp();
     console.log(`${colors.bright}${colors.green}✓ [${timestamp}]${colors.reset} ${colors.green}${message}${colors.reset}`);
     if (details) {
@@ -119,7 +119,7 @@ export const Logger = {
   },
 
   // Info - General information
-  info(message: string, details?: any) {
+  info(message: string, details?: unknown) {
     const timestamp = getTimestamp();
     console.log(`${colors.bright}${colors.cyan}ℹ [${timestamp}]${colors.reset} ${message}`);
     if (details) {
@@ -128,7 +128,7 @@ export const Logger = {
   },
 
   // Warning - Skipped bids, thresholds exceeded
-  warning(message: string, details?: any) {
+  warning(message: string, details?: unknown) {
     const timestamp = getTimestamp();
     console.log(`${colors.bright}${colors.yellow}⚠ [${timestamp}]${colors.reset} ${colors.yellow}${message}${colors.reset}`);
     if (details) {
@@ -137,11 +137,11 @@ export const Logger = {
   },
 
   // Error - Failed operations
-  error(message: string, error?: any) {
+  error(message: string, error?: unknown) {
     const timestamp = getTimestamp();
     console.log(`${colors.bright}${colors.red}✗ [${timestamp}]${colors.reset} ${colors.red}${message}${colors.reset}`);
     if (error) {
-      if (error.stack) {
+      if (error instanceof Error && error.stack) {
         console.log(`  ${colors.dim}${error.stack}${colors.reset}`);
       } else {
         console.log(`  ${colors.dim}${JSON.stringify(error, null, 2)}${colors.reset}`);
@@ -150,7 +150,7 @@ export const Logger = {
   },
 
   // Critical - System issues, memory warnings
-  critical(message: string, details?: any) {
+  critical(message: string, details?: unknown) {
     const timestamp = getTimestamp();
     console.log(`${colors.bgRed}${colors.bright}${colors.white} ⚠ CRITICAL [${timestamp}] ${colors.reset} ${colors.red}${colors.bright}${message}${colors.reset}`);
     if (details) {
@@ -285,11 +285,11 @@ export const Logger = {
       console.log(`${colors.dim}[${timestamp}] Event: ${type} | ${collectionSymbol}${token}${colors.reset}`);
     },
 
-    error(err: any) {
+    error(err: unknown) {
       const timestamp = getTimestamp();
-      const errorMsg = err?.message || err?.toString() || 'Unknown error';
+      const errorMsg = err instanceof Error ? err.message : (typeof err === 'string' ? err : 'Unknown error');
       console.log(`${colors.bright}${colors.red}🔌 [${timestamp}] WebSocket Error: ${errorMsg}${colors.reset}`);
-      if (err?.stack) {
+      if (err instanceof Error && err.stack) {
         console.log(`  ${colors.dim}${err.stack}${colors.reset}`);
       }
     },
@@ -465,7 +465,7 @@ export const Logger = {
 
   // Offer error logging
   offer: {
-    error(operation: string, tokenId: string, message: string, httpStatus?: number, response?: any) {
+    error(operation: string, tokenId: string, message: string, httpStatus?: number, response?: unknown) {
       const timestamp = getTimestamp();
       const statusStr = httpStatus ? ` (HTTP ${httpStatus})` : '';
       console.log(`${colors.red}✗ [${timestamp}] [OFFER] ${operation} error for ${tokenId.slice(-8)}${statusStr}: ${message}${colors.reset}`);

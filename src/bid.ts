@@ -934,7 +934,8 @@ class EventManager {
 
   async handleIncomingBid(message: CollectOfferActivity) {
     try {
-      const { newOwner: incomingBuyerTokenReceiveAddress, collectionSymbol, tokenId, listedPrice: incomingBidAmount, createdAt } = message
+      const { newOwner: incomingBuyerTokenReceiveAddress, collectionSymbol, tokenId, listedPrice: incomingBidAmount, createdAt: rawCreatedAt } = message
+      const createdAt = typeof rawCreatedAt === 'number' && rawCreatedAt > 0 ? rawCreatedAt : Date.now();
 
       if (!isWatchedEvent(message.kind)) return
       const collection = collections.find((item) => item.collectionSymbol === collectionSymbol)
@@ -1029,8 +1030,8 @@ class EventManager {
                 let bestOffer;
                 try {
                   bestOffer = await getBestOffer(tokenId);
-                } catch (offerError: any) {
-                  Logger.warning(`[WS] ${tokenId.slice(-8)}: API error fetching best offer, skipping counterbid: ${offerError?.message || offerError}`);
+                } catch (offerError: unknown) {
+                  Logger.warning(`[WS] ${tokenId.slice(-8)}: API error fetching best offer, skipping counterbid: ${getErrorMessage(offerError)}`);
                   return;
                 }
                 if (!bestOffer?.offers?.length) {
@@ -1196,8 +1197,8 @@ class EventManager {
               let offerData;
               try {
                 offerData = await getBestCollectionOffer(collectionSymbol);
-              } catch (offerError: any) {
-                Logger.warning(`[WS] API error fetching collection offers for ${collectionSymbol}, skipping: ${offerError?.message || offerError}`);
+              } catch (offerError: unknown) {
+                Logger.warning(`[WS] API error fetching collection offers for ${collectionSymbol}, skipping: ${getErrorMessage(offerError)}`);
                 return;
               }
               const ourOffer = offerData?.offers?.find((item) => isOurReceiveAddress(item.btcParams.makerOrdinalReceiveAddress))
@@ -1232,6 +1233,8 @@ class EventManager {
             }
           }
         }
+      } else {
+        Logger.warning(`[WS] Unknown offerType "${offerType}" for ${collectionSymbol}, skipping event`);
       }
 
       if (message.kind === "buying_broadcasted" || message.kind === "offer_accepted_broadcasted" || message.kind === "coll_offer_fulfill_broadcasted") {
@@ -1370,8 +1373,7 @@ class EventManager {
                   }
                 }
               } catch (error: unknown) {
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                Logger.warning(`[REHYDRATE] Failed to fetch offers for ${receiveAddr.slice(0, 10)}...: ${errorMessage}`);
+                Logger.warning(`[REHYDRATE] Failed to fetch offers for ${receiveAddr.slice(0, 10)}...: ${getErrorMessage(error)}`);
               }
             }
             lastRehydrationTime = Date.now();
@@ -1766,7 +1768,8 @@ class EventManager {
               else if (ourExistingOffer) {
                 alreadyHaveBids++;
                 if (bestOffer && bestOffer.offers && bestOffer.offers.length > 0) {
-                  const [topOffer, secondTopOffer] = bestOffer.offers
+                  const topOffer = bestOffer.offers[0];
+                  const secondTopOffer = bestOffer.offers[1];
                   const bestPrice = topOffer.price
 
                   if (!isOurPaymentAddress(topOffer.buyerPaymentAddress)) {
@@ -1878,8 +1881,8 @@ class EventManager {
                   successfulBidsPlaced++;
                 }
               }
-              } catch (error: any) {
-                Logger.error(`[CRITICAL] Token ${tokenId.slice(-8)} crashed`, error?.message || error);
+              } catch (error: unknown) {
+                Logger.error(`[CRITICAL] Token ${tokenId.slice(-8)} crashed`, getErrorMessage(error));
                 unhandledPath++;
               }
             })
@@ -1889,13 +1892,14 @@ class EventManager {
         let bestOffer;
         try {
           bestOffer = await getBestCollectionOffer(collectionSymbol);
-        } catch (offerError: any) {
-          Logger.warning(`[SCHEDULE] API error fetching collection offers for ${collectionSymbol}, skipping cycle: ${offerError?.message || offerError}`);
+        } catch (offerError: unknown) {
+          Logger.warning(`[SCHEDULE] API error fetching collection offers for ${collectionSymbol}, skipping cycle: ${getErrorMessage(offerError)}`);
           return;
         }
         if (bestOffer && bestOffer.offers.length > 0) {
 
-          const [topOffer, secondTopOffer] = bestOffer.offers
+          const topOffer = bestOffer.offers[0];
+          const secondTopOffer = bestOffer.offers[1];
           const bestPrice = topOffer.price.amount
 
           bidHistory[collectionSymbol].highestCollectionOffer = {
@@ -1915,8 +1919,8 @@ class EventManager {
                   return;
                 }
               }
-            } catch (error: any) {
-              Logger.error(`[COLLECTION] Failed to cancel existing offer before outbid for ${collectionSymbol}`, error?.message || error);
+            } catch (error: unknown) {
+              Logger.error(`[COLLECTION] Failed to cancel existing offer before outbid for ${collectionSymbol}`, getErrorMessage(error));
               return;
             }
 
@@ -1959,8 +1963,8 @@ class EventManager {
                       return;
                     }
                   }
-                } catch (error: any) {
-                  Logger.error(`[COLLECTION] Failed to cancel offer before adjustment for ${collectionSymbol}`, error?.message || error);
+                } catch (error: unknown) {
+                  Logger.error(`[COLLECTION] Failed to cancel offer before adjustment for ${collectionSymbol}`, getErrorMessage(error));
                   return;
                 }
 
@@ -2037,6 +2041,8 @@ class EventManager {
             }
           }
         }
+      } else {
+        Logger.warning(`[SCHEDULE] Unknown offerType "${offerType}" for ${collectionSymbol}, skipping bid cycle`);
       }
 
       // Log bid placement summary
@@ -2277,9 +2283,14 @@ async function startCollectionMonitoring(item: CollectionData) {
 
 async function startProcessing() {
   // Memory leak fix: Properly await all collection monitoring promises
+  // Each startCollectionMonitoring runs an infinite loop, so Promise.all should never resolve.
+  // If it does, something critical has gone wrong.
   await Promise.all(
     collections.map(item => startCollectionMonitoring(item))
   );
+  // If we reach here, all monitoring loops have unexpectedly exited
+  Logger.critical('[CRITICAL] All collection monitoring loops exited unexpectedly');
+  await gracefulShutdown('MONITORING_EXIT');
 }
 
 // Display version banner on startup
@@ -2434,7 +2445,7 @@ async function writeBidHistoryToFile(): Promise<void> {
 }
 
 // Write comprehensive bot stats for manage CLI to display
-function writeBotStatsToFile() {
+async function writeBotStatsToFile(): Promise<void> {
   const memUsage = process.memoryUsage();
   const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
   const heapTotalMB = memUsage.heapTotal / 1024 / 1024;
@@ -2535,21 +2546,16 @@ function writeBotStatsToFile() {
   const tempPath = path.join(DATA_DIR, 'botStats.json.tmp');
 
   // Use mutex to prevent concurrent file writes
-  fileWriteMutex.acquire()
-    .then(async (release) => {
-      try {
-        // Atomic write: write to temp file first, then rename
-        await fs.promises.writeFile(tempPath, jsonString, 'utf-8');
-        await fs.promises.rename(tempPath, filePath);
-      } catch (err) {
-        Logger.error('[PERSIST] Error writing botStats to file', err);
-      } finally {
-        release();
-      }
-    })
-    .catch((err) => {
-      Logger.error('[PERSIST] Failed to acquire file write lock', err);
-    });
+  const release = await fileWriteMutex.acquire();
+  try {
+    // Atomic write: write to temp file first, then rename
+    await fs.promises.writeFile(tempPath, jsonString, 'utf-8');
+    await fs.promises.rename(tempPath, filePath);
+  } catch (err) {
+    Logger.error('[PERSIST] Error writing botStats to file', err);
+  } finally {
+    release();
+  }
 }
 
 // Write bot stats every 30 seconds
@@ -2760,7 +2766,8 @@ function monitorMemoryUsage() {
   const now = Date.now();
   const timeDiffMin = (now - lastMemoryCheck.timestamp) / 60000;
   const heapGrowthMB = heapUsedMB - (lastMemoryCheck.heapUsed / 1024 / 1024);
-  const growthRatePerMin = timeDiffMin > 0 ? heapGrowthMB / timeDiffMin : 0;
+  // Require at least 6 seconds of data to avoid false warnings from tiny time differences
+  const growthRatePerMin = timeDiffMin > 0.1 ? heapGrowthMB / timeDiffMin : 0;
 
   // Count total bids being tracked
   let totalBidsTracked = 0;
@@ -2889,6 +2896,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   }
 
   Logger.printStats();
+  await writeBotStatsToFile();
   await writeBidHistoryToFile();
   process.exit(0);
 }

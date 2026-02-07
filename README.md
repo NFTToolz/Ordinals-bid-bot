@@ -8,13 +8,11 @@ An automated bidding bot for Bitcoin Ordinals (NFTs) on Magic Eden marketplace. 
 
 #### Install dependencies
 
-- yarn is recommended
+This project uses **yarn** (not npm). Do not run `npm install`.
 
-`yarn install`
-
-OR
-
-`npm install`
+```bash
+yarn install
+```
 
 ---
 
@@ -171,7 +169,11 @@ The `View status & stats` command displays comprehensive information:
 
 `cp .env.example .env`
 
-- Edit the collections.json and set bidding configurations
+- Copy the example collections config and edit it:
+
+`cp config/collections.example.json config/collections.json`
+
+- Edit `config/collections.json` and set bidding configurations
 
 ### ITEM OFFER
 

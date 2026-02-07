@@ -1,0 +1,17 @@
+[
+  {
+    "collectionSymbol": "your-collection-symbol",
+    "minBid": 0.00001,
+    "maxBid": 0.001,
+    "minFloorBid": 50,
+    "maxFloorBid": 95,
+    "bidCount": 20,
+    "duration": 60,
+    "scheduledLoop": 60,
+    "enableCounterBidding": true,
+    "outBidMargin": 0.000001,
+    "offerType": "ITEM",
+    "quantity": 1,
+    "feeSatsPerVbyte": 28
+  }
+]

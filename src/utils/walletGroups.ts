@@ -161,14 +161,6 @@ export class WalletGroupManager {
   }
 
   /**
-   * @deprecated Use getAvailableWalletAsync() instead.
-   * Synchronous wallet selection has been removed due to race condition vulnerabilities.
-   */
-  getAvailableWallet(groupName: string): WalletState | null {
-    throw new Error('[WALLET GROUPS] Sync getAvailableWallet() is deprecated. Use getAvailableWalletAsync() instead.');
-  }
-
-  /**
    * Get an available wallet from a specific group (async version with mutex)
    * Uses proper mutex to prevent TOCTOU race conditions.
    */

@@ -12,7 +12,7 @@ vi.mock('./walletPool', () => {
       this.bidsPerMinute = bidsPerMinute;
     }
 
-    getAvailableWallet() {
+    async getAvailableWalletAsync() {
       if (this.wallets.length === 0) return null;
       return {
         privateKey: 'mockKey',
@@ -23,10 +23,6 @@ vi.mock('./walletPool', () => {
         lastBidTime: 0,
         windowStart: Date.now(),
       };
-    }
-
-    async getAvailableWalletAsync() {
-      return this.getAvailableWallet();
     }
 
     recordBid() {}
@@ -351,21 +347,6 @@ describe('WalletGroupManager', () => {
     it('should return null when not initialized', () => {
       const pool = manager.getDefaultGroup();
       expect(pool).toBeNull();
-    });
-  });
-
-  describe('getAvailableWallet (deprecated)', () => {
-    beforeEach(() => {
-      manager.initializeFromGroups(createGroupsConfig(1, 2));
-    });
-
-    it('should throw error indicating deprecation', () => {
-      // Sync method is deprecated and should throw
-      expect(() => manager.getAvailableWallet('group0')).toThrow('deprecated');
-    });
-
-    it('should throw for any group including non-existent', () => {
-      expect(() => manager.getAvailableWallet('nonexistent')).toThrow('deprecated');
     });
   });
 

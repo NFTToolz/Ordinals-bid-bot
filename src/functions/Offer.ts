@@ -283,11 +283,11 @@ export function signCollectionOffer(unsignedData: ICollectionOfferResponseData, 
   const offers = unsignedData.offers[0]
   const offerPsbt = bitcoin.Psbt.fromBase64(offers.psbtBase64);
   const keyPair: ECPairInterface = ECPair.fromWIF(privateKey, network)
-  const toSignInputs: any[] = offerPsbt.data.inputs
+  const inputCount = offerPsbt.data.inputs.length;
 
   let cancelPsbt, signedCancelledPSBTBase64;
 
-  if (toSignInputs.length > 1) {
+  if (inputCount > 1) {
     const inputs = [0, 1]
     Logger.info('[SIGN] Signing 2 inputs');
     for (let index of inputs) {
@@ -586,6 +586,11 @@ export async function cancelBulkTokenOffers(
       const offer = offerData?.offers?.[0]
       if (offer) {
         const offerFormat = await retrieveCancelOfferFormat(offer.id)
+        if (!offerFormat) {
+          Logger.warning(`[CANCEL BULK] No cancel format returned for offer ${offer.id}, skipping`);
+          results.failed.push({ tokenId: token, error: 'No cancel format returned' });
+          continue;
+        }
         const signedOfferFormat = signData(offerFormat, privateKey)
         await submitCancelOfferData(offer.id, signedOfferFormat)
         Logger.info(`[CANCEL BULK] Cancelled offer for ${offer.token.collectionSymbol} ${offer.token.id}`);

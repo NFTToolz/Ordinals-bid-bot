@@ -190,15 +190,6 @@ class WalletPool {
   }
 
   /**
-   * @deprecated Use getAvailableWalletAsync() instead.
-   * Synchronous wallet selection has been removed due to race condition vulnerabilities.
-   * This method now throws an error to ensure callers migrate to the async version.
-   */
-  getAvailableWallet(): WalletState | null {
-    throw new Error('[WALLET POOL] Sync getAvailableWallet() is deprecated and removed. Use getAvailableWalletAsync() instead to prevent race conditions.');
-  }
-
-  /**
    * Record that a bid was placed using this wallet
    */
   recordBid(paymentAddress: string): void {
@@ -364,14 +355,6 @@ export function getWalletPool(): WalletPool {
  */
 export function isWalletPoolInitialized(): boolean {
   return poolInstance !== null;
-}
-
-/**
- * @deprecated Use getAvailableWalletAsync() instead.
- * Synchronous wallet selection has been removed due to race condition vulnerabilities.
- */
-export function getAvailableWallet(): WalletState | null {
-  throw new Error('[WALLET POOL] Sync getAvailableWallet() is deprecated. Use getAvailableWalletAsync() instead.');
 }
 
 /**

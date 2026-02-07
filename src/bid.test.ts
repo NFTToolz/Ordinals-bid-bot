@@ -292,7 +292,6 @@ vi.mock('./utils/bidPacer', () => ({
 
 vi.mock('./utils/walletPool', () => ({
   initializeWalletPool: vi.fn(),
-  getAvailableWallet: vi.fn(),
   getAvailableWalletAsync: vi.fn(),
   recordBid: vi.fn(),
   decrementBidCount: vi.fn(),
