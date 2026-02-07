@@ -4,7 +4,7 @@ An automated bidding bot for Bitcoin Ordinals (NFTs) on Magic Eden marketplace. 
 
 #### Requirements
 
-- node version 18+
+- Node.js version 18+
 
 #### Install dependencies
 
