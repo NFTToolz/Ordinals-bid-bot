@@ -10,6 +10,8 @@ import {
   showError,
   showWarning,
   showInfo,
+  showTable,
+  formatAddress,
   withSpinner,
 } from '../../utils/display';
 import { promptConfirm } from '../../utils/prompts';
@@ -58,6 +60,13 @@ interface CancelResult {
   itemOffersCanceled: number;
   collectionOffersCanceled: number;
   errors: string[];
+}
+
+interface WalletOfferCounts {
+  label: string;
+  address: string;
+  itemOffers: number;
+  collectionOffers: number;
 }
 
 // Reset bot data files (bid history and stats)
@@ -286,6 +295,60 @@ function ensureWalletPoolInitialized(): void {
   }
 }
 
+async function fetchOfferCounts(): Promise<WalletOfferCounts[]> {
+  const collections = loadCollections();
+  ensureWalletPoolInitialized();
+  const addresses = getReceiveAddressesToCheck(collections);
+  const counts: WalletOfferCounts[] = [];
+
+  for (const addr of addresses) {
+    let itemOffers = 0;
+    let collectionOffers = 0;
+
+    // Count item offers
+    try {
+      const offerData = await getUserOffers(addr.address);
+      const offers = offerData?.offers;
+      if (Array.isArray(offers)) {
+        itemOffers = offers.length;
+      }
+    } catch {
+      // Default to 0
+    }
+
+    // Count collection offers for COLLECTION-type collections matching this wallet
+    const ourReceiveAddresses = getAllOurReceiveAddresses();
+    const collectionTypeConfigs = collections.filter(c => c.offerType === 'COLLECTION');
+    for (const col of collectionTypeConfigs) {
+      const colReceiveAddress = col.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
+      if (colReceiveAddress.toLowerCase() !== addr.address.toLowerCase()) continue;
+      try {
+        const bestOffers = await getBestCollectionOffer(col.collectionSymbol);
+        const ourOffer = bestOffers?.offers?.find(
+          (offer: ICollectionOffer) =>
+            ourReceiveAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
+        );
+        if (ourOffer) {
+          collectionOffers++;
+        }
+      } catch {
+        // Default to 0
+      }
+    }
+
+    if (itemOffers > 0 || collectionOffers > 0) {
+      counts.push({
+        label: addr.label || '',
+        address: addr.address,
+        itemOffers,
+        collectionOffers,
+      });
+    }
+  }
+
+  return counts;
+}
+
 async function performCancellation(): Promise<CancelResult> {
   const collections = loadCollections();
 
@@ -375,7 +438,30 @@ export async function cancelOffersForCollection(
 export async function cancelOffers(): Promise<void> {
   showSectionHeader('CANCEL ALL OFFERS');
 
-  showWarning('This will cancel ALL active item and collection offers.');
+  const counts = await withSpinner('Checking active offers...', fetchOfferCounts);
+
+  const totalItem = counts.reduce((sum, c) => sum + c.itemOffers, 0);
+  const totalCollection = counts.reduce((sum, c) => sum + c.collectionOffers, 0);
+  const total = totalItem + totalCollection;
+
+  if (total === 0) {
+    showInfo('No active offers found');
+    return;
+  }
+
+  console.log('');
+  showTable(
+    ['Wallet', 'Address', 'Item Offers', 'Collection Offers'],
+    counts.map(c => [
+      c.label || '-',
+      formatAddress(c.address),
+      String(c.itemOffers),
+      String(c.collectionOffers),
+    ])
+  );
+  console.log('');
+
+  showWarning(`Found ${total} active offer(s): ${totalItem} item, ${totalCollection} collection.`);
   console.log('');
 
   const confirm = await promptConfirm('Are you sure you want to cancel all offers?', false);

@@ -8,7 +8,7 @@ import {
   showInfo,
 } from '../../utils/display';
 import { promptConfirm, promptSelect } from '../../utils/prompts';
-import { loadWallets } from '../../services/WalletGenerator';
+import { loadWallets, isGroupsFormat, getAllWalletsFromGroups } from '../../services/WalletGenerator';
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');
 const DEFAULT_WALLET_CONFIG_PATH = './config/wallets.json';
@@ -59,7 +59,11 @@ function getCurrentConfig(): EnvConfig {
 
 function getWalletCount(): number {
   const wallets = loadWallets();
-  return wallets?.wallets?.length || 0;
+  if (!wallets) return 0;
+  if (isGroupsFormat(wallets)) {
+    return getAllWalletsFromGroups().length;
+  }
+  return wallets.wallets?.length || 0;
 }
 
 export async function walletRotationSettings(): Promise<void> {

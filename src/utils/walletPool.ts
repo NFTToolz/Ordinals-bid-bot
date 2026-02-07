@@ -17,8 +17,7 @@ export interface WalletState {
   publicKey: string;
   keyPair: ECPairInterface;
   lastBidTime: number;
-  bidCount: number;
-  windowStart: number;
+  bidTimestamps: number[];     // Sliding window: actual bid times within RATE_WINDOW_MS
   isAvailable: boolean;
 }
 
@@ -30,8 +29,7 @@ export interface WalletPoolStats {
   wallets: Array<{
     label: string;
     paymentAddress: string;
-    bidCount: number;
-    windowStart: number;
+    bidsInWindow: number;
     isAvailable: boolean;
     secondsUntilReset: number;
   }>;
@@ -85,8 +83,7 @@ class WalletPool {
           publicKey,
           keyPair,
           lastBidTime: 0,
-          bidCount: 0,
-          windowStart: Date.now(),
+          bidTimestamps: [],
           isAvailable: true,
         };
 
@@ -105,20 +102,16 @@ class WalletPool {
   }
 
   /**
-   * Check if a wallet is available (hasn't exceeded rate limit in current window)
+   * Check if a wallet is available (hasn't exceeded rate limit in sliding window)
    */
   private isWalletAvailable(wallet: WalletState): boolean {
     const now = Date.now();
+    const windowStart = now - this.RATE_WINDOW_MS;
 
-    // Reset window if it has expired
-    if (now - wallet.windowStart >= this.RATE_WINDOW_MS) {
-      wallet.bidCount = 0;
-      wallet.windowStart = now;
-      wallet.isAvailable = true;
-    }
+    // Remove expired timestamps outside the sliding window
+    wallet.bidTimestamps = wallet.bidTimestamps.filter(t => t > windowStart);
 
-    // Check if under rate limit
-    wallet.isAvailable = wallet.bidCount < this.BIDS_PER_MINUTE;
+    wallet.isAvailable = wallet.bidTimestamps.length < this.BIDS_PER_MINUTE;
     return wallet.isAvailable;
   }
 
@@ -158,30 +151,30 @@ class WalletPool {
       const wallet = this.selectLeastRecentlyUsed();
 
       if (!wallet) {
-        // Calculate when next wallet will be available
+        // Calculate when next wallet will be available (earliest timestamp expiry)
+        const now = Date.now();
+        const windowStart = now - this.RATE_WINDOW_MS;
         let earliestReset = Infinity;
         for (const w of this.walletList) {
-          const resetTime = w.windowStart + this.RATE_WINDOW_MS;
-          if (resetTime < earliestReset) {
-            earliestReset = resetTime;
+          const earliestInWindow = w.bidTimestamps.find(t => t > windowStart);
+          if (earliestInWindow) {
+            const resetTime = earliestInWindow + this.RATE_WINDOW_MS;
+            if (resetTime < earliestReset) {
+              earliestReset = resetTime;
+            }
           }
         }
-        const waitTime = Math.max(0, earliestReset - Date.now());
+        const waitTime = earliestReset === Infinity ? 0 : Math.max(0, earliestReset - now);
         console.log(`[WALLET POOL] All wallets rate-limited. Next available in ${(waitTime / 1000).toFixed(1)}s`);
         return null;
       }
 
-      // Pre-increment bid count to "reserve" this wallet
+      // Pre-record timestamp to "reserve" this wallet slot
       // This prevents another caller from selecting the same wallet before recordBid() is called
       const now = Date.now();
-      if (now - wallet.windowStart >= this.RATE_WINDOW_MS) {
-        wallet.bidCount = 1;
-        wallet.windowStart = now;
-      } else {
-        wallet.bidCount++;
-      }
+      wallet.bidTimestamps.push(now);
       wallet.lastBidTime = now;
-      wallet.isAvailable = wallet.bidCount < this.BIDS_PER_MINUTE;
+      wallet.isAvailable = wallet.bidTimestamps.length < this.BIDS_PER_MINUTE;
 
       return wallet;
     } finally {
@@ -200,23 +193,18 @@ class WalletPool {
     }
 
     const now = Date.now();
-
-    // Reset window if expired
-    if (now - wallet.windowStart >= this.RATE_WINDOW_MS) {
-      wallet.bidCount = 0;
-      wallet.windowStart = now;
-    }
-
-    wallet.bidCount++;
+    wallet.bidTimestamps.push(now);
     wallet.lastBidTime = now;
-    wallet.isAvailable = wallet.bidCount < this.BIDS_PER_MINUTE;
+    wallet.isAvailable = this.isWalletAvailable(wallet);
 
-    console.log(`[WALLET POOL] Recorded bid for "${wallet.config.label}" (${wallet.bidCount}/${this.BIDS_PER_MINUTE} in window)`);
+    const windowStart = now - this.RATE_WINDOW_MS;
+    const bidsInWindow = wallet.bidTimestamps.filter(t => t > windowStart).length;
+    console.log(`[WALLET POOL] Recorded bid for "${wallet.config.label}" (${bidsInWindow}/${this.BIDS_PER_MINUTE} in window)`);
   }
 
   /**
    * Decrement bid count for a wallet when a bid attempt fails.
-   * This reverses the pre-increment done in getAvailableWalletAsync() to prevent
+   * This reverses the pre-recorded timestamp done in getAvailableWalletAsync() to prevent
    * "lost" bid slots when bids fail after wallet reservation.
    */
   decrementBidCount(paymentAddress: string): void {
@@ -226,11 +214,13 @@ class WalletPool {
       return;
     }
 
-    // Only decrement if there are bids to decrement
-    if (wallet.bidCount > 0) {
-      wallet.bidCount--;
-      wallet.isAvailable = wallet.bidCount < this.BIDS_PER_MINUTE;
-      console.log(`[WALLET POOL] Decremented bid for "${wallet.config.label}" after failure (${wallet.bidCount}/${this.BIDS_PER_MINUTE} in window)`);
+    if (wallet.bidTimestamps.length > 0) {
+      wallet.bidTimestamps.pop();  // Remove the most recent (pre-recorded) timestamp
+      wallet.isAvailable = this.isWalletAvailable(wallet);
+      const now = Date.now();
+      const windowStart = now - this.RATE_WINDOW_MS;
+      const bidsInWindow = wallet.bidTimestamps.filter(t => t > windowStart).length;
+      console.log(`[WALLET POOL] Decremented bid for "${wallet.config.label}" after failure (${bidsInWindow}/${this.BIDS_PER_MINUTE} in window)`);
     }
   }
 
@@ -258,20 +248,24 @@ class WalletPool {
    */
   getStats(): WalletPoolStats {
     const now = Date.now();
+    const windowStart = now - this.RATE_WINDOW_MS;
     let available = 0;
 
     const walletStats = this.walletList.map(wallet => {
       const isAvail = this.isWalletAvailable(wallet);
       if (isAvail) available++;
 
-      const timeInWindow = now - wallet.windowStart;
-      const secondsUntilReset = Math.max(0, (this.RATE_WINDOW_MS - timeInWindow) / 1000);
+      const bidsInWindow = wallet.bidTimestamps.filter(t => t > windowStart).length;
+      // Time until the earliest bid in the window expires (frees a slot)
+      const earliestInWindow = wallet.bidTimestamps.find(t => t > windowStart);
+      const secondsUntilReset = earliestInWindow
+        ? Math.max(0, (earliestInWindow + this.RATE_WINDOW_MS - now) / 1000)
+        : 0;
 
       return {
         label: wallet.config.label,
         paymentAddress: wallet.paymentAddress,
-        bidCount: wallet.bidCount,
-        windowStart: wallet.windowStart,
+        bidsInWindow,
         isAvailable: isAvail,
         secondsUntilReset: Math.round(secondsUntilReset),
       };
@@ -304,10 +298,8 @@ class WalletPool {
    * Reset all rate limit windows (useful for testing)
    */
   resetAllWindows(): void {
-    const now = Date.now();
     for (const wallet of this.walletList) {
-      wallet.bidCount = 0;
-      wallet.windowStart = now;
+      wallet.bidTimestamps = [];
       wallet.isAvailable = true;
     }
     console.log('[WALLET POOL] All rate limit windows reset');

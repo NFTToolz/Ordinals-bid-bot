@@ -29,6 +29,8 @@ vi.mock('../../services/WalletGenerator', () => ({
       { label: 'Wallet 2', paymentAddress: 'bc1qwallet2' },
     ],
   }),
+  isGroupsFormat: vi.fn().mockReturnValue(false),
+  getAllWalletsFromGroups: vi.fn().mockReturnValue([]),
 }));
 
 // Mock fs

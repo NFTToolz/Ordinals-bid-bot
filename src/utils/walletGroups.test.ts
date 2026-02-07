@@ -19,9 +19,8 @@ vi.mock('./walletPool', () => {
         paymentAddress: this.wallets[0]?.paymentAddress || 'bc1qmockpayment',
         receiveAddress: this.wallets[0]?.ordinalsAddress || 'bc1pmockreceive',
         publicKey: 'mockPubKey',
-        bidCount: 0,
+        bidTimestamps: [],
         lastBidTime: 0,
-        windowStart: Date.now(),
       };
     }
 

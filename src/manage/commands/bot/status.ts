@@ -78,7 +78,7 @@ export async function viewStatus(): Promise<void> {
 
       wp.wallets.forEach(w => {
         const statusIcon = w.isAvailable ? chalk.green('●') : chalk.yellow('⏸');
-        const bidInfo = `${w.bidCount}/${wp.bidsPerMinute} bids`;
+        const bidInfo = `${w.bidsInWindow}/${wp.bidsPerMinute} bids`;
         const resetInfo = !w.isAvailable ? chalk.dim(` (reset ${w.secondsUntilReset}s)`) : '';
         console.log(`  ${statusIcon} ${w.label}: ${bidInfo}${resetInfo}`);
       });

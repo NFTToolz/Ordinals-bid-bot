@@ -46,7 +46,7 @@ export interface BotRuntimeStats {
     bidsPerMinute: number;
     wallets: Array<{
       label: string;
-      bidCount: number;
+      bidsInWindow: number;
       isAvailable: boolean;
       secondsUntilReset: number;
     }>;

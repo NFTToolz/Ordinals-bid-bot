@@ -76,12 +76,12 @@ describe('WalletPool', () => {
       expect(wallet).not.toBeNull();
     });
 
-    it('should pre-increment bid count', async () => {
+    it('should pre-record bid timestamp', async () => {
       const pool = new WalletPool(testWallets, 5);
       const wallet = await pool.getAvailableWalletAsync();
 
       expect(wallet).not.toBeNull();
-      expect(wallet?.bidCount).toBe(1);
+      expect(wallet?.bidTimestamps).toHaveLength(1);
     });
 
     it('should return null when all wallets exhausted', async () => {
@@ -98,13 +98,13 @@ describe('WalletPool', () => {
   });
 
   describe('recordBid', () => {
-    it('should increment bid count for wallet', async () => {
+    it('should add bid timestamp for wallet', async () => {
       const pool = new WalletPool(testWallets, 5);
 
       // Get stats before any operations
       const statsBefore = pool.getStats();
       const walletBefore = statsBefore.wallets.find(w => w.label === 'wallet-1');
-      const initialBidCount = walletBefore?.bidCount || 0;
+      const initialBidsInWindow = walletBefore?.bidsInWindow || 0;
 
       // Use async method instead of deprecated sync method
       const wallet = await pool.getAvailableWalletAsync();
@@ -113,8 +113,8 @@ describe('WalletPool', () => {
         pool.recordBid(wallet.paymentAddress);
         const stats = pool.getStats();
         const walletStats = stats.wallets.find(w => w.label === 'wallet-1');
-        // Should have incremented from initial count (async method pre-increments + recordBid)
-        expect(walletStats?.bidCount).toBeGreaterThan(initialBidCount);
+        // Should have more bids than initial (async method pre-records + recordBid)
+        expect(walletStats?.bidsInWindow).toBeGreaterThan(initialBidsInWindow);
       }
     });
 
@@ -126,45 +126,45 @@ describe('WalletPool', () => {
   });
 
   describe('decrementBidCount', () => {
-    it('should decrement bid count after failed bid', async () => {
+    it('should remove bid timestamp after failed bid', async () => {
       const pool = new WalletPool(testWallets, 5);
       const wallet = await pool.getAvailableWalletAsync();
 
       expect(wallet).not.toBeNull();
-      expect(wallet?.bidCount).toBe(1);
+      expect(wallet?.bidTimestamps).toHaveLength(1);
 
       if (wallet) {
         pool.decrementBidCount(wallet.paymentAddress);
         const stats = pool.getStats();
         const walletStats = stats.wallets.find(w => w.label === wallet.config.label);
-        expect(walletStats?.bidCount).toBe(0);
+        expect(walletStats?.bidsInWindow).toBe(0);
       }
     });
 
     it('should not decrement below zero', async () => {
       const pool = new WalletPool(testWallets, 5);
-      // Use async method which pre-increments bid count
+      // Use async method which pre-records a bid timestamp
       const wallet = await pool.getAvailableWalletAsync();
 
       if (wallet) {
-        // Wallet has 1 bid from getAvailableWalletAsync
+        // Wallet has 1 timestamp from getAvailableWalletAsync
         pool.decrementBidCount(wallet.paymentAddress); // -> 0
         pool.decrementBidCount(wallet.paymentAddress); // -> should stay at 0
         const stats = pool.getStats();
         const walletStats = stats.wallets.find(w => w.label === wallet.config.label);
-        expect(walletStats?.bidCount).toBe(0);
+        expect(walletStats?.bidsInWindow).toBe(0);
       }
     });
   });
 
-  describe('rate limiting window reset', () => {
-    it('should reset bid count after window expires', async () => {
+  describe('rate limiting sliding window', () => {
+    it('should expire old timestamps after window passes', async () => {
       const pool = new WalletPool(testWallets, 2);
 
       // Exhaust wallet-1 using async method
-      const wallet = await pool.getAvailableWalletAsync(); // bid count = 1
+      const wallet = await pool.getAvailableWalletAsync(); // 1 timestamp
       if (wallet) {
-        pool.recordBid(wallet.paymentAddress); // bid count = 2
+        pool.recordBid(wallet.paymentAddress); // 2 timestamps
       }
 
       // Verify exhausted
@@ -175,11 +175,45 @@ describe('WalletPool', () => {
       // Advance time past window (60 seconds)
       vi.advanceTimersByTime(61000);
 
-      // Verify reset
+      // Verify old timestamps expired (sliding window)
       const statsAfter = pool.getStats();
       const w1After = statsAfter.wallets.find(w => w.label === 'wallet-1');
       expect(w1After?.isAvailable).toBe(true);
-      expect(w1After?.bidCount).toBe(0);
+      expect(w1After?.bidsInWindow).toBe(0);
+    });
+
+    it('should allow new bids as old timestamps expire individually', async () => {
+      const pool = new WalletPool(testWallets, 2);
+
+      // Place 2 bids for wallet-1 (exhausting it)
+      const wallet1 = await pool.getAvailableWalletAsync(); // timestamp at t=0
+      expect(wallet1?.config.label).toBe('wallet-1');
+
+      // Advance 10 seconds
+      vi.advanceTimersByTime(10000);
+
+      // Second bid should go to wallet-2 since wallet-1 has 1/2, wallet-2 has 0/2 (LRU)
+      const wallet2 = await pool.getAvailableWalletAsync();
+      // Record bid on wallet-1 directly to exhaust it
+      if (wallet1) {
+        pool.recordBid(wallet1.paymentAddress); // 2 timestamps for wallet-1
+      }
+
+      // wallet-1 should be exhausted now
+      const stats = pool.getStats();
+      const w1 = stats.wallets.find(w => w.label === 'wallet-1');
+      expect(w1?.bidsInWindow).toBe(2);
+      expect(w1?.isAvailable).toBe(false);
+
+      // Advance 51 seconds (61 total from first bid, 51 from second)
+      // First bid timestamp should expire, freeing one slot
+      vi.advanceTimersByTime(51000);
+
+      const statsAfter = pool.getStats();
+      const w1After = statsAfter.wallets.find(w => w.label === 'wallet-1');
+      // First timestamp expired, second still active (placed at t=10s, now at t=61s, so 51s ago < 60s)
+      expect(w1After?.bidsInWindow).toBe(1);
+      expect(w1After?.isAvailable).toBe(true);
     });
   });
 
@@ -206,8 +240,8 @@ describe('WalletPool', () => {
 
       const stats = pool.getStats();
       const w1 = stats.wallets.find(w => w.label === 'wallet-1');
-      // After getAvailableWalletAsync (pre-increments) + recordBid, bid count should be tracked
-      expect(w1?.bidCount).toBeGreaterThan(0);
+      // After getAvailableWalletAsync (pre-records timestamp) + recordBid, bids should be tracked
+      expect(w1?.bidsInWindow).toBeGreaterThan(0);
       expect(w1?.isAvailable).toBe(true);
     });
   });

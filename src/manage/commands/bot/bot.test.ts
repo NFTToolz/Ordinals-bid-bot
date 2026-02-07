@@ -50,6 +50,7 @@ vi.mock('../../utils/display', () => ({
   showWarning: vi.fn(),
   showInfo: vi.fn(),
   showTable: vi.fn(),
+  formatAddress: vi.fn((addr: string) => addr.slice(0, 8) + '...' + addr.slice(-8)),
   getSeparatorWidth: vi.fn(() => 60),
   formatBTC: vi.fn((sats: number) => `${(sats / 100000000).toFixed(8)} BTC`),
   withSpinner: vi.fn().mockImplementation(async (message, fn) => fn()),
@@ -130,6 +131,12 @@ vi.mock('../../../functions/Offer', () => ({
   signData: vi.fn(),
   submitCancelOfferData: vi.fn(),
   cancelCollectionOffer: vi.fn(),
+}));
+
+// Mock walletHelpers
+vi.mock('../../../utils/walletHelpers', () => ({
+  getAllOurPaymentAddresses: vi.fn(() => new Set<string>()),
+  getAllOurReceiveAddresses: vi.fn(() => new Set<string>()),
 }));
 
 // Mock walletPool
@@ -468,27 +475,29 @@ describe('Bot Commands', () => {
   });
 
   describe('cancelOffers', () => {
-    it('should cancel offers when confirmed', async () => {
+    it('should show no offers message when none found', async () => {
       const { cancelOffers } = await import('./cancel');
-      const prompts = await import('../../utils/prompts');
       const display = await import('../../utils/display');
-
-      vi.mocked(prompts.promptConfirm).mockResolvedValueOnce(true);
 
       await cancelOffers();
 
-      expect(display.showInfo).toHaveBeenCalledWith('No active offers to cancel');
+      expect(display.showInfo).toHaveBeenCalledWith('No active offers found');
     });
 
     it('should abort when not confirmed', async () => {
       const { cancelOffers } = await import('./cancel');
+      const { getUserOffers } = await import('../../../functions/Offer');
       const prompts = await import('../../utils/prompts');
       const display = await import('../../utils/display');
 
+      vi.mocked(getUserOffers).mockResolvedValueOnce({
+        offers: [{ id: 'offer-1', buyerPaymentAddress: 'bc1qtest', token: { collectionSymbol: 'test' } }],
+      });
       vi.mocked(prompts.promptConfirm).mockResolvedValueOnce(false);
 
       await cancelOffers();
 
+      expect(display.showTable).toHaveBeenCalled();
       expect(display.showWarning).toHaveBeenCalledWith('Cancellation aborted');
     });
   });

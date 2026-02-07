@@ -202,11 +202,12 @@ export function showEnhancedStatusBar(status: EnhancedStatusData): void {
   console.log('');
 }
 
-export type MenuLevel = 'main' | 'wallets' | 'wallet-groups' | 'collections' | 'bot' | 'settings';
+export type MenuLevel = 'main' | 'wallet-hub' | 'wallets' | 'wallet-groups' | 'collections' | 'bot' | 'settings';
 
 const MENU_LABELS: Record<MenuLevel, string> = {
   'main': 'Main Menu',
-  'wallets': 'Wallets',
+  'wallet-hub': 'Wallets',
+  'wallets': 'Individual Wallets',
   'wallet-groups': 'Wallet Groups',
   'collections': 'Collections',
   'bot': 'Bot Control',

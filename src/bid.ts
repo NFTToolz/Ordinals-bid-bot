@@ -265,9 +265,9 @@ function forceReleaseTokenLock(tokenId: string): void {
   }
 }
 
-// Global minimum bid interval - enforces max 5 bids/min globally regardless of wallet count
-// This prevents API rate limits when multiple wallets would otherwise allow rapid-fire bidding
-const MIN_BID_INTERVAL_MS = 12000; // 12 seconds = max 5 bids/min globally
+// Global minimum bid interval - scales with total wallet throughput capacity
+// Recalculated after wallet init; 2s floor prevents API hammering (30/min hard cap)
+let minBidIntervalMs = 12000; // Default 5/min, recalculated after wallet init
 let lastGlobalBidTime = 0;
 
 // Rate limit deduplication: Track recently bid tokens to prevent duplicate bids
@@ -293,13 +293,13 @@ function addRecentBid(tokenId: string, timestamp: number): void {
 
 /**
  * Enforce global minimum interval between ALL bids.
- * This prevents API rate limits when multiple wallets are available,
- * since Magic Eden's rate limit is per API key (~5/min), not per wallet.
+ * This prevents rapid-fire bids from overwhelming the API.
+ * The actual per-wallet rate limit is enforced by WalletPool's sliding window.
  */
 async function waitForGlobalBidSlot(): Promise<void> {
   const now = Date.now();
   const elapsed = now - lastGlobalBidTime;
-  const waitTime = MIN_BID_INTERVAL_MS - elapsed;
+  const waitTime = minBidIntervalMs - elapsed;
 
   if (waitTime > 0) {
     Logger.info(`[GLOBAL PACER] Waiting ${(waitTime / 1000).toFixed(1)}s before next bid`);
@@ -2375,13 +2375,29 @@ if (ENABLE_WALLET_ROTATION) {
           if (group && group.wallets) {
             for (const wallet of group.wallets) {
               try {
-                ECPair.fromWIF(wallet.fundingWalletWIF, network);
+                ECPair.fromWIF(wallet.wif, network);
               } catch (wifError: any) {
                 Logger.error(`[STARTUP] Invalid WIF for wallet in group "${groupName}": ${wifError.message}`);
                 process.exit(1);
               }
             }
           }
+        }
+
+        // Scale global pacer with total wallet throughput
+        let totalThroughput = 0;
+        for (const groupName of groupNames) {
+          const stats = manager.getGroupStats(groupName);
+          if (stats) {
+            totalThroughput += stats.total * stats.bidsPerMinute;
+          }
+        }
+        if (totalThroughput > 0) {
+          minBidIntervalMs = Math.max(2000, Math.floor(60000 / totalThroughput));
+          Logger.info(`[GLOBAL PACER] Interval set to ${(minBidIntervalMs / 1000).toFixed(1)}s (${totalThroughput} bids/min across all wallets)`);
+          // Reinitialize BidPacer with total throughput so its "X/Y" display is accurate
+          initializeBidPacer(totalThroughput);
+          Logger.info(`[BID PACER] Reinitialized with ${totalThroughput} bids/minute (total wallet throughput)`);
         }
 
       } else if (walletConfig.wallets && walletConfig.wallets.length > 0) {
@@ -2392,10 +2408,20 @@ if (ENABLE_WALLET_ROTATION) {
         Logger.info(`[WALLET ROTATION] Maximum throughput: ${walletConfig.wallets.length * (walletConfig.bidsPerMinute || 5)} bids/min`);
         Logger.warning('[WALLET ROTATION] Consider migrating to wallet groups for per-collection wallet assignment');
 
+        // Scale global pacer with total wallet throughput
+        const totalThroughput = walletConfig.wallets.length * (walletConfig.bidsPerMinute || 5);
+        if (totalThroughput > 0) {
+          minBidIntervalMs = Math.max(2000, Math.floor(60000 / totalThroughput));
+          Logger.info(`[GLOBAL PACER] Interval set to ${(minBidIntervalMs / 1000).toFixed(1)}s (${totalThroughput} bids/min across all wallets)`);
+          // Reinitialize BidPacer with total throughput so its "X/Y" display is accurate
+          initializeBidPacer(totalThroughput);
+          Logger.info(`[BID PACER] Reinitialized with ${totalThroughput} bids/minute (total wallet throughput)`);
+        }
+
         // M5: Validate all wallet WIFs at startup (fail-fast before bot loop)
         for (const wallet of walletConfig.wallets) {
           try {
-            ECPair.fromWIF(wallet.fundingWalletWIF, network);
+            ECPair.fromWIF(wallet.wif, network);
           } catch (wifError: any) {
             Logger.error(`[STARTUP] Invalid WIF for wallet in legacy pool: ${wifError.message}`);
             process.exit(1);
@@ -2474,7 +2500,7 @@ async function writeBotStatsToFile(): Promise<void> {
         bidsPerMinute: stats.bidsPerMinute,
         wallets: stats.wallets.map(w => ({
           label: w.label,
-          bidCount: w.bidCount,
+          bidsInWindow: w.bidsInWindow,
           isAvailable: w.isAvailable,
           secondsUntilReset: w.secondsUntilReset,
         })),
@@ -2489,7 +2515,7 @@ async function writeBotStatsToFile(): Promise<void> {
       bidsPerMinute: stats.bidsPerMinute,
       wallets: stats.wallets.map(w => ({
         label: w.label,
-        bidCount: w.bidCount,
+        bidsInWindow: w.bidsInWindow,
         isAvailable: w.isAvailable,
         secondsUntilReset: w.secondsUntilReset,
       })),
@@ -2855,7 +2881,7 @@ const bidStatsIntervalId = setInterval(() => {
         '',
         ...stats.wallets.map(w => {
           const statusIcon = w.isAvailable ? '[OK]' : '[WAIT]';
-          return `  ${statusIcon} ${w.label}: ${w.bidCount}/${stats.bidsPerMinute} bids (reset in ${w.secondsUntilReset}s)`;
+          return `  ${statusIcon} ${w.label}: ${w.bidsInWindow}/${stats.bidsPerMinute} bids (reset in ${w.secondsUntilReset}s)`;
         }),
         '━'.repeat(60),
       ];

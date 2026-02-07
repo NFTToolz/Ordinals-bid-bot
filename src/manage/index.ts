@@ -12,13 +12,14 @@ import {
   showEnhancedStatusBar,
   showBreadcrumb,
   clearScreen,
+  showWarning,
   MenuLevel,
 } from './utils/display';
 
-import { promptContinue } from './utils/prompts';
+import { promptContinue, promptConfirm } from './utils/prompts';
 
 // Services
-import { getEnhancedStatus, getQuickStatus, refreshOfferCountAsync } from './services/StatusService';
+import { getEnhancedStatus, getQuickStatus, refreshAllStatusAsync } from './services/StatusService';
 
 // Wallet commands
 import {
@@ -123,12 +124,18 @@ interface MenuConfig {
 const MENU_CONFIG: Record<MenuLevel, MenuConfig> = {
   main: {
     choices: [
-      { name: 'Wallets', value: 'submenu:wallets' },
-      { name: 'Wallet Groups', value: 'submenu:wallet-groups' },
+      { name: 'Wallets', value: 'submenu:wallet-hub' },
       { name: 'Collections', value: 'submenu:collections' },
       { name: 'Bot Control', value: 'submenu:bot' },
       { name: 'Settings', value: 'submenu:settings' },
       { name: 'Exit', value: 'exit' },
+    ],
+  },
+  'wallet-hub': {
+    choices: [
+      { name: 'Individual Wallets', value: 'submenu:wallets' },
+      { name: 'Wallet Groups', value: 'submenu:wallet-groups' },
+      { name: '← Back', value: 'back' },
     ],
   },
   wallets: {
@@ -244,9 +251,35 @@ async function main(): Promise<void> {
 
   const state = createInitialState();
 
-  // Start background refresh of offer count and update check
-  refreshOfferCountAsync().catch(() => {});
-  checkForUpdates().catch(() => {});
+  // Start background refresh of all status caches
+  refreshAllStatusAsync().catch(() => {});
+
+  // Check for updates at startup (15s timeout so offline users aren't stuck)
+  try {
+    const updateInfo = await Promise.race([
+      checkForUpdates(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
+    ]);
+
+    if (updateInfo && updateInfo.updateAvailable) {
+      const countLabel = updateInfo.commitsBehind > 0
+        ? `${updateInfo.commitsBehind} commits behind`
+        : 'new version available';
+      console.log('');
+      showWarning(`Update available! (${countLabel})`);
+      console.log('');
+      const shouldUpdate = await promptConfirm('Update now?', true);
+      if (shouldUpdate) {
+        await checkForUpdatesCommand();
+        // checkForUpdatesCommand handles restart; if we reach here, continue to menu
+      }
+    }
+  } catch {
+    // Update check failed — continue to menu
+  }
+
+  // Periodic refresh to keep status bar current (matches 30s cache TTL)
+  const statusRefreshInterval = setInterval(() => refreshAllStatusAsync().catch(() => {}), 30_000);
 
   while (true) {
     try {
@@ -314,6 +347,7 @@ async function main(): Promise<void> {
     }
   }
 
+  clearInterval(statusRefreshInterval);
   process.exit(0);
 }
 

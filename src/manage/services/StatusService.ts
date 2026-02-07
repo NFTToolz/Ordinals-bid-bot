@@ -295,3 +295,36 @@ export async function refreshOfferCountAsync(): Promise<void> {
     // Silently fail
   }
 }
+
+/**
+ * Refresh balance in the background
+ */
+export async function refreshBalanceAsync(): Promise<void> {
+  try {
+    await getTotalBalance();
+  } catch (error) {
+    // Silently fail
+  }
+}
+
+/**
+ * Refresh pending transaction count in the background
+ */
+export async function refreshPendingAsync(): Promise<void> {
+  try {
+    await getPendingTxCount();
+  } catch (error) {
+    // Silently fail
+  }
+}
+
+/**
+ * Refresh all status caches in the background (balance, pending, offers)
+ */
+export async function refreshAllStatusAsync(): Promise<void> {
+  await Promise.allSettled([
+    refreshBalanceAsync(),
+    refreshPendingAsync(),
+    refreshOfferCountAsync(),
+  ]);
+}
