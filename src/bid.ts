@@ -44,6 +44,7 @@ import {
 import {
   isOurPaymentAddress,
   isOurReceiveAddress,
+  getWalletCredentialsByPaymentAddress,
 } from "./utils/walletHelpers";
 import {
   // Bid Calculation
@@ -100,6 +101,8 @@ import {
   BottomListing,
   CollectionBottomBid,
 } from "./utils/bidLogic";
+import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerator";
+import { promptPasswordStdin } from "./utils/promptPassword";
 
 
 config()
@@ -1205,7 +1208,17 @@ class EventManager {
 
               if (ourOffer) {
                 const offerIds = [ourOffer.id]
-                const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                let cancelPublicKey = publicKey;
+                let cancelPrivateKey = privateKey;
+                const makerAddr = ourOffer.btcParams?.makerPaymentAddress;
+                if (ENABLE_WALLET_ROTATION && makerAddr) {
+                  const creds = getWalletCredentialsByPaymentAddress(makerAddr);
+                  if (creds) {
+                    cancelPublicKey = creds.publicKey;
+                    cancelPrivateKey = creds.privateKey;
+                  }
+                }
+                const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
                 if (!cancelled) {
                   Logger.error(`[WS] Failed to cancel existing collection offer for ${collectionSymbol}, aborting counter-bid`);
                   return;
@@ -1913,7 +1926,17 @@ class EventManager {
             try {
               if (ourOffer) {
                 const offerIds = [ourOffer.id]
-                const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                let cancelPublicKey = publicKey;
+                let cancelPrivateKey = privateKey;
+                const makerAddr = ourOffer.btcParams?.makerPaymentAddress;
+                if (ENABLE_WALLET_ROTATION && makerAddr) {
+                  const creds = getWalletCredentialsByPaymentAddress(makerAddr);
+                  if (creds) {
+                    cancelPublicKey = creds.publicKey;
+                    cancelPrivateKey = creds.privateKey;
+                  }
+                }
+                const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
                 if (!cancelled) {
                   Logger.error(`[COLLECTION] Failed to cancel existing offer before outbid for ${collectionSymbol}, skipping bid`);
                   return;
@@ -1957,7 +1980,17 @@ class EventManager {
                 try {
                   if (ourOffer) {
                     const offerIds = [ourOffer.id]
-                    const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                    let cancelPublicKey = publicKey;
+                    let cancelPrivateKey = privateKey;
+                    const makerAddr = ourOffer.btcParams?.makerPaymentAddress;
+                    if (ENABLE_WALLET_ROTATION && makerAddr) {
+                      const creds = getWalletCredentialsByPaymentAddress(makerAddr);
+                      if (creds) {
+                        cancelPublicKey = creds.publicKey;
+                        cancelPrivateKey = creds.privateKey;
+                      }
+                    }
+                    const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
                     if (!cancelled) {
                       Logger.error(`[COLLECTION] Failed to cancel offer before adjustment for ${collectionSymbol}, skipping bid`);
                       return;
@@ -1992,7 +2025,17 @@ class EventManager {
                 try {
                   if (ourOffer) {
                     const offerIds = [ourOffer.id]
-                    const cancelled = await cancelCollectionOffer(offerIds, publicKey, privateKey)
+                    let cancelPublicKey = publicKey;
+                    let cancelPrivateKey = privateKey;
+                    const makerAddr = ourOffer.btcParams?.makerPaymentAddress;
+                    if (ENABLE_WALLET_ROTATION && makerAddr) {
+                      const creds = getWalletCredentialsByPaymentAddress(makerAddr);
+                      if (creds) {
+                        cancelPublicKey = creds.publicKey;
+                        cancelPrivateKey = creds.privateKey;
+                      }
+                    }
+                    const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
                     if (!cancelled) {
                       Logger.error(`[COLLECTION] Failed to cancel collection offer for ${collectionSymbol}, skipping bid`);
                       return;
@@ -2307,6 +2350,12 @@ try {
     fs.chmodSync(WALLET_CONFIG_FULL_PATH, 0o600);
     Logger.info(`[STARTUP] Set secure permissions on ${WALLET_CONFIG_FULL_PATH}`);
   }
+  // Set secure permissions on .env file
+  const envPath = path.join(process.cwd(), '.env');
+  if (fs.existsSync(envPath)) {
+    fs.chmodSync(envPath, 0o600);
+    Logger.info(`[STARTUP] Set secure permissions on ${envPath}`);
+  }
 } catch (err: any) {
   Logger.warning(`[STARTUP] Could not set file permissions: ${err?.message || err}`);
 }
@@ -2319,6 +2368,8 @@ initializeBidPacer(BIDS_PER_MINUTE);
 Logger.info(`[BID PACER] Initialized with ${BIDS_PER_MINUTE} bids/minute limit`);
 
 // Initialize wallet groups/pool if multi-wallet rotation is enabled
+// Wrapped in async IIFE because encrypted wallets.json requires async password prompt
+(async () => {
 if (ENABLE_WALLET_ROTATION) {
   try {
     if (!fs.existsSync(WALLET_CONFIG_PATH)) {
@@ -2326,7 +2377,20 @@ if (ENABLE_WALLET_ROTATION) {
       Logger.warning('[WALLET GROUPS] Copy config/wallets.example.json to config/wallets.json and configure your wallets');
       Logger.warning('[WALLET GROUPS] Continuing with single wallet mode...');
     } else {
-      const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
+      // Read raw file content and decrypt if needed
+      let walletConfigContent = fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8');
+      if (isEncryptedFormat(walletConfigContent)) {
+        Logger.info('[STARTUP] Wallets file is encrypted — password required');
+        const password = await promptPasswordStdin('[STARTUP] Enter wallets encryption password: ');
+        try {
+          walletConfigContent = decryptData(walletConfigContent, password);
+        } catch {
+          Logger.error('[STARTUP] Wrong password — could not decrypt wallets.json');
+          process.exit(1);
+        }
+        Logger.success('[STARTUP] Wallets file decrypted successfully');
+      }
+      const walletConfig = JSON.parse(walletConfigContent);
 
       // Check if using new groups format
       if (walletConfig.groups && typeof walletConfig.groups === 'object') {
@@ -2442,6 +2506,10 @@ connectWebSocket();
 
 startProcessing().catch(error => {
   Logger.error('[CRITICAL] startProcessing failed with unhandled error', error);
+  process.exit(1);
+});
+})().catch(error => {
+  Logger.error(`[CRITICAL] Startup initialization failed: ${getErrorMessage(error)}`);
   process.exit(1);
 });
 
@@ -3173,9 +3241,10 @@ async function placeBid(
     // Note: delay removed - per-wallet rate limiting handles API safety
 
     // Fetch existing offers - abort on API error to prevent duplicate bids
+    // When wallet rotation is enabled, query without wallet filter to find offers from ALL our wallets
     let offerData;
     try {
-      offerData = await getOffers(tokenId, buyerTokenReceiveAddress);
+      offerData = await getOffers(tokenId, ENABLE_WALLET_ROTATION ? undefined : buyerTokenReceiveAddress);
     } catch (apiError: any) {
       const status = getErrorStatus(apiError);
       const msg = getErrorMessage(apiError);
@@ -3189,10 +3258,19 @@ async function placeBid(
     }
 
     if (Array.isArray(offerData?.offers) && offerData.offers.length > 0) {
-      const offers = offerData.offers
+      // When wallet rotation is enabled, unfiltered query returns all offers — only cancel ours
+      const offers = ENABLE_WALLET_ROTATION
+        ? offerData.offers.filter(item => isOurPaymentAddress(item.buyerPaymentAddress))
+        : offerData.offers;
       // Use Promise.allSettled to ensure all cancellations are attempted even if some fail
       const results = await Promise.allSettled(offers.map(async (item) => {
-        await cancelBid(item, privateKey)
+        // Use the correct wallet's private key for cancellation
+        let cancelKey = privateKey;
+        if (ENABLE_WALLET_ROTATION && item.buyerPaymentAddress) {
+          const creds = getWalletCredentialsByPaymentAddress(item.buyerPaymentAddress);
+          if (creds) cancelKey = creds.privateKey;
+        }
+        await cancelBid(item, cancelKey)
       }));
       // Log any failed cancellations
       results.forEach((result, index) => {

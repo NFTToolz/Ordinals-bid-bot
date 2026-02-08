@@ -157,7 +157,7 @@ export interface BidHistoryEntry {
     [tokenId: string]: {
       price: number;
       expiration: number;
-      paymentAddress?: string;
+      paymentAddress: string;
     };
   };
   topBids: {

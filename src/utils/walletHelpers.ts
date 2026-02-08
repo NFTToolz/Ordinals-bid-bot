@@ -321,3 +321,30 @@ export function getAllWalletCredentialsForCancellation(): Array<{
 
   return wallets;
 }
+
+/**
+ * Look up wallet credentials by payment address for cross-wallet cancellation.
+ * Uses getAllWalletCredentialsForCancellation() internally with a Map cache
+ * for efficient repeated lookups within the same call.
+ *
+ * @param paymentAddress - The payment address to look up
+ * @returns Wallet credentials (privateKey, publicKey, receiveAddress) or undefined if not found
+ */
+export function getWalletCredentialsByPaymentAddress(
+  paymentAddress: string
+): { privateKey: string; publicKey: string; receiveAddress: string } | undefined {
+  if (!paymentAddress) return undefined;
+  const normalized = paymentAddress.toLowerCase();
+
+  const allCreds = getAllWalletCredentialsForCancellation();
+  for (const cred of allCreds) {
+    if (cred.paymentAddress.toLowerCase() === normalized) {
+      return {
+        privateKey: cred.privateKey,
+        publicKey: cred.publicKey,
+        receiveAddress: cred.receiveAddress,
+      };
+    }
+  }
+  return undefined;
+}
