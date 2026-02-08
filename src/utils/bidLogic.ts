@@ -489,7 +489,9 @@ export function combineBidsAndListings(
   price: number;
   listedPrice: number;
 } | null> {
-  const combined = userBids
+  const now = Date.now();
+  const activeBids = userBids.filter(bid => new Date(bid.expiration).getTime() > now);
+  const combined = activeBids
     .map(bid => {
       const matchedListing = bottomListings.find(listing => listing.id === bid.tokenId);
       if (matchedListing) {

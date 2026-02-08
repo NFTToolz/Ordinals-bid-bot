@@ -75,13 +75,10 @@ export async function stopBot(): Promise<void> {
     cancelResult.errors.forEach((err) => showError(`  ${err}`));
   }
 
-  // Reset bid history and stats
+  // Reset bid history
   const resetResult = resetBotData();
-  if (resetResult.historyReset || resetResult.statsReset) {
-    const resetItems: string[] = [];
-    if (resetResult.historyReset) resetItems.push('bid history');
-    if (resetResult.statsReset) resetItems.push('bot stats');
-    showSuccess(`Reset ${resetItems.join(' and ')}`);
+  if (resetResult.historyReset) {
+    showSuccess('Reset bid history');
   }
 
   console.log('');

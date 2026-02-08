@@ -35,6 +35,12 @@ import {
   getAllOurReceiveAddresses,
 } from '../../../utils/walletHelpers';
 import { loadCollections, CollectionConfig } from '../../services/CollectionService';
+import {
+  loadWallets,
+  isGroupsFormat,
+  getAllWalletsFromGroups,
+  WalletConfig,
+} from '../../services/WalletGenerator';
 import { getErrorMessage } from '../../../utils/errorUtils';
 
 import { getFundingWIF, getReceiveAddress } from '../../../utils/fundingWallet';
@@ -44,7 +50,6 @@ config();
 const network = bitcoin.networks.bitcoin;
 
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
-const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -70,11 +75,15 @@ interface WalletOfferCounts {
   collectionOffers: number;
 }
 
-// Reset bot data files (bid history and stats)
-export function resetBotData(): { historyReset: boolean; statsReset: boolean } {
+interface FetchOfferCountsResult {
+  counts: WalletOfferCounts[];
+  fetchedOffers: Map<string, IOffer[]>;
+}
+
+// Reset bot data files (bid history)
+export function resetBotData(): { historyReset: boolean } {
   const dataDir = path.join(process.cwd(), 'data');
   let historyReset = false;
-  let statsReset = false;
 
   const historyPath = path.join(dataDir, 'bidHistory.json');
   if (fs.existsSync(historyPath)) {
@@ -82,13 +91,7 @@ export function resetBotData(): { historyReset: boolean; statsReset: boolean } {
     historyReset = true;
   }
 
-  const statsPath = path.join(dataDir, 'botStats.json');
-  if (fs.existsSync(statsPath)) {
-    fs.unlinkSync(statsPath);
-    statsReset = true;
-  }
-
-  return { historyReset, statsReset };
+  return { historyReset };
 }
 
 function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInfo[] {
@@ -96,31 +99,18 @@ function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInf
   const seenAddresses = new Set<string>();
 
   // If wallet rotation is enabled, add all wallet receive addresses
-  if (ENABLE_WALLET_ROTATION && fs.existsSync(WALLET_CONFIG_PATH)) {
+  if (ENABLE_WALLET_ROTATION) {
     try {
-      const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-
-      // Handle groups format
-      if (walletConfig.groups && typeof walletConfig.groups === 'object') {
-        for (const groupName of Object.keys(walletConfig.groups)) {
-          const group = walletConfig.groups[groupName];
-          for (const wallet of group.wallets || []) {
-            if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
-              const keyPair = ECPair.fromWIF(wallet.wif, network);
-              addresses.push({
-                address: wallet.receiveAddress,
-                privateKey: wallet.wif,
-                publicKey: keyPair.publicKey.toString('hex'),
-                paymentAddress: bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network }).address as string,
-                label: wallet.label,
-              });
-              seenAddresses.add(wallet.receiveAddress.toLowerCase());
-            }
-          }
+      const walletsData = loadWallets();
+      if (walletsData) {
+        let configWallets: WalletConfig[] = [];
+        if (isGroupsFormat(walletsData)) {
+          configWallets = getAllWalletsFromGroups();
+        } else if (walletsData.wallets?.length > 0) {
+          configWallets = walletsData.wallets;
         }
-      } else {
-        // Fallback for legacy flat wallets array
-        for (const wallet of walletConfig.wallets || []) {
+
+        for (const wallet of configWallets) {
           if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
             const keyPair = ECPair.fromWIF(wallet.wif, network);
             addresses.push({
@@ -195,17 +185,23 @@ async function cancelBid(
 }
 
 async function cancelAllItemOffers(
-  addresses: AddressInfo[]
+  addresses: AddressInfo[],
+  prefetchedOffers?: Map<string, IOffer[]>
 ): Promise<{ canceled: number; errors: string[] }> {
   let canceled = 0;
   const errors: string[] = [];
 
   for (const addr of addresses) {
     try {
-      const offerData = await getUserOffers(addr.address);
-      const offers = offerData?.offers;
+      let offers: IOffer[];
+      if (prefetchedOffers?.has(addr.address)) {
+        offers = prefetchedOffers.get(addr.address)!;
+      } else {
+        const offerData = await getUserOffers(addr.address);
+        offers = offerData?.offers ?? [];
+      }
 
-      if (Array.isArray(offers) && offers.length > 0) {
+      if (offers.length > 0) {
         const cancelOps = offers.map((offer: IOffer) =>
           cancelBid(offer, addr.privateKey, addr.paymentAddress)
         );
@@ -214,8 +210,7 @@ async function cancelAllItemOffers(
         canceled += results.filter(Boolean).length;
       }
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${errorMessage}`);
+      errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${getErrorMessage(error)}`);
       // Continue with next address instead of stopping
     }
   }
@@ -271,36 +266,34 @@ function ensureWalletPoolInitialized(): void {
   if (!ENABLE_WALLET_ROTATION) return;
 
   try {
-    if (fs.existsSync(WALLET_CONFIG_PATH)) {
-      const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
+    const walletsData = loadWallets();
+    if (!walletsData) return;
 
-      // Handle groups format
-      if (walletConfig.groups && typeof walletConfig.groups === 'object') {
-        const allWallets: any[] = [];
-        for (const groupName of Object.keys(walletConfig.groups)) {
-          const group = walletConfig.groups[groupName];
-          if (group.wallets?.length > 0) {
-            allWallets.push(...group.wallets);
-          }
+    if (isGroupsFormat(walletsData)) {
+      const allWallets: WalletConfig[] = [];
+      for (const groupName of Object.keys(walletsData.groups)) {
+        const group = walletsData.groups[groupName];
+        if (group.wallets?.length > 0) {
+          allWallets.push(...group.wallets);
         }
-        if (allWallets.length > 0) {
-          initializeWalletPool(allWallets, walletConfig.bidsPerMinute || 5, network);
-        }
-      } else if (walletConfig.wallets?.length > 0) {
-        // Fallback for legacy flat wallets array
-        initializeWalletPool(walletConfig.wallets, walletConfig.bidsPerMinute || 5, network);
       }
+      if (allWallets.length > 0) {
+        initializeWalletPool(allWallets, walletsData.groups[Object.keys(walletsData.groups)[0]]?.bidsPerMinute || 5, network);
+      }
+    } else if (walletsData.wallets?.length > 0) {
+      initializeWalletPool(walletsData.wallets, walletsData.bidsPerMinute || 5, network);
     }
   } catch (error) {
     // Failed to initialize wallet pool
   }
 }
 
-async function fetchOfferCounts(): Promise<WalletOfferCounts[]> {
+async function fetchOfferCounts(): Promise<FetchOfferCountsResult> {
   const collections = loadCollections();
   ensureWalletPoolInitialized();
   const addresses = getReceiveAddressesToCheck(collections);
   const counts: WalletOfferCounts[] = [];
+  const fetchedOffers = new Map<string, IOffer[]>();
 
   for (const addr of addresses) {
     let itemOffers = 0;
@@ -312,6 +305,7 @@ async function fetchOfferCounts(): Promise<WalletOfferCounts[]> {
       const offers = offerData?.offers;
       if (Array.isArray(offers)) {
         itemOffers = offers.length;
+        fetchedOffers.set(addr.address, offers);
       }
     } catch {
       // Default to 0
@@ -347,16 +341,16 @@ async function fetchOfferCounts(): Promise<WalletOfferCounts[]> {
     }
   }
 
-  return counts;
+  return { counts, fetchedOffers };
 }
 
-export async function performCancellation(): Promise<CancelResult> {
+export async function performCancellation(prefetchedOffers?: Map<string, IOffer[]>): Promise<CancelResult> {
   const collections = loadCollections();
 
   ensureWalletPoolInitialized();
 
   const addresses = getReceiveAddressesToCheck(collections);
-  const itemResult = await cancelAllItemOffers(addresses);
+  const itemResult = await cancelAllItemOffers(addresses, prefetchedOffers);
   const collectionResult = await cancelAllCollectionOffers(collections);
 
   return {
@@ -398,8 +392,7 @@ export async function cancelOffersForCollection(
         }
       }
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${errorMessage}`);
+      errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${getErrorMessage(error)}`);
     }
   }
 
@@ -428,8 +421,7 @@ export async function cancelOffersForCollection(
         }
       }
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      errors.push(`Failed to cancel collection offer for ${collectionSymbol}: ${errorMessage}`);
+      errors.push(`Failed to cancel collection offer for ${collectionSymbol}: ${getErrorMessage(error)}`);
     }
   }
 
@@ -439,7 +431,7 @@ export async function cancelOffersForCollection(
 export async function cancelOffers(): Promise<void> {
   showSectionHeader('CANCEL ALL OFFERS');
 
-  const counts = await withSpinner('Checking active offers...', fetchOfferCounts);
+  const { counts, fetchedOffers } = await withSpinner('Checking active offers...', fetchOfferCounts);
 
   const totalItem = counts.reduce((sum, c) => sum + c.itemOffers, 0);
   const totalCollection = counts.reduce((sum, c) => sum + c.collectionOffers, 0);
@@ -474,7 +466,7 @@ export async function cancelOffers(): Promise<void> {
 
   console.log('');
 
-  const result = await withSpinner('Canceling all offers...', performCancellation);
+  const result = await withSpinner('Canceling all offers...', () => performCancellation(fetchedOffers));
 
   console.log('');
 
@@ -492,13 +484,10 @@ export async function cancelOffers(): Promise<void> {
     result.errors.forEach((err) => showError(`  ${err}`));
   }
 
-  // Reset bid history and stats
+  // Reset bid history
   const resetResult = resetBotData();
-  if (resetResult.historyReset || resetResult.statsReset) {
-    const resetItems: string[] = [];
-    if (resetResult.historyReset) resetItems.push('bid history');
-    if (resetResult.statsReset) resetItems.push('bot stats');
-    showSuccess(`Reset ${resetItems.join(' and ')}`);
+  if (resetResult.historyReset) {
+    showSuccess('Reset bid history');
   }
 
   console.log('');

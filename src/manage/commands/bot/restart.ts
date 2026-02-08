@@ -8,6 +8,7 @@ import {
 } from '../../utils/display';
 import { promptConfirm } from '../../utils/prompts';
 import { followLogsUntilExit } from './logs';
+import { resetBotData } from './cancel';
 
 export async function restartBot(): Promise<void> {
   showSectionHeader('RESTART BOT');
@@ -40,6 +41,11 @@ export async function restartBot(): Promise<void> {
   }
 
   console.log('');
+
+  // Reset stale stats/history so the manage console doesn't show old data
+  if (wasRunning) {
+    resetBotData();
+  }
 
   const result = await withSpinner(
     wasRunning ? 'Restarting bot...' : 'Starting bot...',

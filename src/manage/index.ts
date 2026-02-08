@@ -59,6 +59,8 @@ import {
   restartBot,
   viewLogs,
   cancelOffers,
+  viewStatsOverview,
+  viewCollectionDetails,
 } from './commands/bot';
 
 // Settings commands
@@ -111,6 +113,8 @@ const actions: Record<string, ActionHandler> = {
   'bot:restart': restartBot,
   'bot:logs': viewLogs,
   'bot:cancel': cancelOffers,
+  'bot:stats-overview': viewStatsOverview,
+  'bot:stats-collection': viewCollectionDetails,
 
   // Settings actions
   'settings:wallet-rotation': walletRotationSettings,
@@ -183,12 +187,20 @@ const MENU_CONFIG: Record<MenuLevel, MenuConfig> = {
   },
   bot: {
     choices: [
-      { name: 'View status & stats', value: 'bot:status' },
+      { name: 'Bot Status', value: 'bot:status' },
+      { name: 'Bidding Stats', value: 'submenu:bidding-stats' },
       { name: 'Start bot', value: 'bot:start' },
       { name: 'Stop bot', value: 'bot:stop' },
       { name: 'Restart bot', value: 'bot:restart' },
       { name: 'View logs', value: 'bot:logs' },
       { name: 'Cancel all offers', value: 'bot:cancel' },
+      { name: '← Back', value: 'back' },
+    ],
+  },
+  'bidding-stats': {
+    choices: [
+      { name: 'Overview', value: 'bot:stats-overview' },
+      { name: 'Collection Jobs', value: 'bot:stats-collection' },
       { name: '← Back', value: 'back' },
     ],
   },
@@ -258,7 +270,10 @@ async function main(): Promise<void> {
   const state = createInitialState();
 
   // Decrypt wallets (if encrypted) so status bar can see all wallets + funding WIF
-  await ensureWalletPasswordIfNeeded();
+  const walletReady = await ensureWalletPasswordIfNeeded();
+  if (!walletReady) {
+    process.exit(1);
+  }
 
   // For non-encrypted files, load funding wallet from wallets.json
   if (!hasFundingWIF()) {
@@ -270,7 +285,7 @@ async function main(): Promise<void> {
 
   // Refresh status caches + check for updates in parallel (both complete before first menu render)
   const [, updateInfo] = await Promise.all([
-    refreshAllStatusAsync().catch(() => {}),
+    refreshAllStatusAsync().catch(err => Logger.debug('Status refresh failed', err)),
     Promise.race([
       checkForUpdates(),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
@@ -292,7 +307,7 @@ async function main(): Promise<void> {
   }
 
   // Periodic refresh to keep status bar current (matches 30s cache TTL)
-  const statusRefreshInterval = setInterval(() => refreshAllStatusAsync().catch(() => {}), 30_000);
+  const statusRefreshInterval = setInterval(() => refreshAllStatusAsync().catch(err => Logger.debug('Status refresh failed', err)), 30_000);
 
   while (true) {
     try {

@@ -6,6 +6,7 @@ import { loadCollections } from './CollectionService';
 import { isRunning } from './BotProcessManager';
 import { getUserOffers } from '../../functions/Offer';
 import { getFundingWIF, hasFundingWIF } from '../../utils/fundingWallet';
+import Logger from '../../utils/logger';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -18,6 +19,8 @@ export interface EnhancedStatus {
   totalBalance: number;
   activeOfferCount: number;
   pendingTxCount: number;
+  dataFreshness: 'fresh' | 'stale' | 'unavailable';
+  lastRefreshAgoSec: number;
 }
 
 interface CacheEntry<T> {
@@ -34,7 +37,64 @@ const cache: {
   totalBalance?: CacheEntry<number>;
   activeOfferCount?: CacheEntry<number>;
   pendingTxCount?: CacheEntry<number>;
+  walletCount?: CacheEntry<number>;
+  collectionCount?: CacheEntry<number>;
 } = {};
+
+// Circuit breaker state
+let consecutiveFailures = 0;
+let lastFailureTime = 0;
+let currentBackoffMs = 0;
+
+const FAILURE_THRESHOLD = 3;
+const INITIAL_BACKOFF_MS = 60_000;
+const MAX_BACKOFF_MS = 300_000;
+const BACKOFF_MULTIPLIER = 2;
+
+function recordSuccess(): void {
+  consecutiveFailures = 0;
+  currentBackoffMs = 0;
+}
+
+function recordFailure(): void {
+  consecutiveFailures++;
+  if (consecutiveFailures >= FAILURE_THRESHOLD) {
+    lastFailureTime = Date.now();
+    currentBackoffMs = Math.min(
+      currentBackoffMs ? currentBackoffMs * BACKOFF_MULTIPLIER : INITIAL_BACKOFF_MS,
+      MAX_BACKOFF_MS,
+    );
+    Logger.warning(`Status refresh circuit breaker open (${consecutiveFailures} consecutive failures, backoff ${Math.round(currentBackoffMs / 1000)}s)`);
+  }
+}
+
+function isCircuitOpen(): boolean {
+  return consecutiveFailures >= FAILURE_THRESHOLD && Date.now() - lastFailureTime < currentBackoffMs;
+}
+
+export function getCircuitBreakerStatus(): {
+  isOpen: boolean;
+  consecutiveFailures: number;
+  backoffMs: number;
+  lastFailureTime: number;
+} {
+  return {
+    isOpen: isCircuitOpen(),
+    consecutiveFailures,
+    backoffMs: currentBackoffMs,
+    lastFailureTime,
+  };
+}
+
+export function resetCircuitBreaker(): void {
+  consecutiveFailures = 0;
+  lastFailureTime = 0;
+  currentBackoffMs = 0;
+}
+
+// Data freshness tracking
+let lastRefreshTime = 0;
+let lastRefreshSuccess = false;
 
 /**
  * Check if a cache entry is still valid
@@ -85,6 +145,37 @@ function getAllWalletAddresses(): string[] {
 }
 
 /**
+ * Get cached wallet count (recomputed on cache miss)
+ */
+function getCachedWalletCount(): number {
+  if (isCacheValid(cache.walletCount)) return cache.walletCount.data;
+
+  const walletsData = loadWallets();
+  let count = hasFundingWIF() ? 1 : 0;
+  if (walletsData) {
+    if (isGroupsFormat(walletsData)) {
+      count += getAllWalletsFromGroups().length;
+    } else {
+      count += walletsData.wallets?.length || 0;
+    }
+  }
+
+  cache.walletCount = { data: count, timestamp: Date.now() };
+  return count;
+}
+
+/**
+ * Get cached collection count (recomputed on cache miss)
+ */
+function getCachedCollectionCount(): number {
+  if (isCacheValid(cache.collectionCount)) return cache.collectionCount.data;
+  const collections = loadCollections();
+  const count = collections.length;
+  cache.collectionCount = { data: count, timestamp: Date.now() };
+  return count;
+}
+
+/**
  * Get total BTC balance across all wallets
  */
 export async function getTotalBalance(): Promise<number> {
@@ -122,6 +213,7 @@ export async function getActiveOfferCount(): Promise<number> {
   }
 
   let totalOffers = 0;
+  let failCount = 0;
 
   // Fetch offers for each wallet (with rate limiting)
   for (const address of addresses) {
@@ -129,10 +221,14 @@ export async function getActiveOfferCount(): Promise<number> {
       const userOffers = await getUserOffers(address);
       totalOffers += userOffers.offers?.length || 0;
     } catch (error) {
-      // Skip on error
+      failCount++;
     }
     // Small delay to avoid rate limiting
     await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  if (failCount === addresses.length) {
+    throw new Error(`Failed to fetch offers for all ${addresses.length} wallet addresses`);
   }
 
   cache.activeOfferCount = {
@@ -190,21 +286,10 @@ export async function getEnhancedStatus(): Promise<EnhancedStatus> {
     return cache.enhancedStatus.data;
   }
 
-  // Get basic counts (fast, no API calls)
+  // Get basic counts (fast, cached)
   const botStatus = isRunning() ? 'RUNNING' : 'STOPPED';
-
-  const walletsData = loadWallets();
-  let walletCount = hasFundingWIF() ? 1 : 0;
-  if (walletsData) {
-    if (isGroupsFormat(walletsData)) {
-      walletCount += getAllWalletsFromGroups().length;
-    } else {
-      walletCount += walletsData.wallets?.length || 0;
-    }
-  }
-
-  const collections = loadCollections();
-  const collectionCount = collections.length;
+  const walletCount = getCachedWalletCount();
+  const collectionCount = getCachedCollectionCount();
 
   // Fetch balance and pending count in parallel (offers take longer, skip for quick refresh)
   let totalBalance = 0;
@@ -227,6 +312,14 @@ export async function getEnhancedStatus(): Promise<EnhancedStatus> {
   // Use cached offer count if available, don't block on it
   activeOfferCount = cache.activeOfferCount?.data || 0;
 
+  // Compute freshness
+  const now = Date.now();
+  const agoMs = lastRefreshTime > 0 ? now - lastRefreshTime : -1;
+  const dataFreshness: 'fresh' | 'stale' | 'unavailable' =
+    lastRefreshTime === 0 ? 'unavailable' :
+    (agoMs > 120_000 || !lastRefreshSuccess) ? 'stale' : 'fresh';
+  const lastRefreshAgoSec = lastRefreshTime > 0 ? Math.floor(agoMs / 1000) : -1;
+
   const status: EnhancedStatus = {
     botStatus,
     walletCount,
@@ -234,6 +327,8 @@ export async function getEnhancedStatus(): Promise<EnhancedStatus> {
     totalBalance,
     activeOfferCount,
     pendingTxCount,
+    dataFreshness,
+    lastRefreshAgoSec,
   };
 
   cache.enhancedStatus = {
@@ -250,19 +345,16 @@ export async function getEnhancedStatus(): Promise<EnhancedStatus> {
  */
 export function getQuickStatus(): EnhancedStatus {
   const botStatus = isRunning() ? 'RUNNING' : 'STOPPED';
+  const walletCount = getCachedWalletCount();
+  const collectionCount = getCachedCollectionCount();
 
-  const walletsData = loadWallets();
-  let walletCount = hasFundingWIF() ? 1 : 0;
-  if (walletsData) {
-    if (isGroupsFormat(walletsData)) {
-      walletCount += getAllWalletsFromGroups().length;
-    } else {
-      walletCount += walletsData.wallets?.length || 0;
-    }
-  }
-
-  const collections = loadCollections();
-  const collectionCount = collections.length;
+  // Compute freshness
+  const now = Date.now();
+  const agoMs = lastRefreshTime > 0 ? now - lastRefreshTime : -1;
+  const dataFreshness: 'fresh' | 'stale' | 'unavailable' =
+    lastRefreshTime === 0 ? 'unavailable' :
+    (agoMs > 120_000 || !lastRefreshSuccess) ? 'stale' : 'fresh';
+  const lastRefreshAgoSec = lastRefreshTime > 0 ? Math.floor(agoMs / 1000) : -1;
 
   return {
     botStatus,
@@ -271,6 +363,8 @@ export function getQuickStatus(): EnhancedStatus {
     totalBalance: cache.totalBalance?.data || 0,
     activeOfferCount: cache.activeOfferCount?.data || 0,
     pendingTxCount: cache.pendingTxCount?.data || 0,
+    dataFreshness,
+    lastRefreshAgoSec,
   };
 }
 
@@ -282,6 +376,10 @@ export function clearStatusCache(): void {
   delete cache.totalBalance;
   delete cache.activeOfferCount;
   delete cache.pendingTxCount;
+  delete cache.walletCount;
+  delete cache.collectionCount;
+  lastRefreshTime = 0;
+  lastRefreshSuccess = false;
 }
 
 /**
@@ -289,42 +387,46 @@ export function clearStatusCache(): void {
  * Call this periodically to keep offer count updated without blocking
  */
 export async function refreshOfferCountAsync(): Promise<void> {
-  try {
-    await getActiveOfferCount();
-  } catch (error) {
-    // Silently fail
-  }
+  await getActiveOfferCount();
 }
 
 /**
  * Refresh balance in the background
  */
 export async function refreshBalanceAsync(): Promise<void> {
-  try {
-    await getTotalBalance();
-  } catch (error) {
-    // Silently fail
-  }
+  await getTotalBalance();
 }
 
 /**
  * Refresh pending transaction count in the background
  */
 export async function refreshPendingAsync(): Promise<void> {
-  try {
-    await getPendingTxCount();
-  } catch (error) {
-    // Silently fail
-  }
+  await getPendingTxCount();
 }
 
 /**
  * Refresh all status caches in the background (balance, pending, offers)
  */
 export async function refreshAllStatusAsync(): Promise<void> {
-  await Promise.allSettled([
-    refreshBalanceAsync(),
-    refreshPendingAsync(),
-    refreshOfferCountAsync(),
+  if (isCircuitOpen()) {
+    return; // Skip while circuit breaker is open
+  }
+
+  const results = await Promise.allSettled([
+    getTotalBalance(),
+    getPendingTxCount(),
+    getActiveOfferCount(),
   ]);
+
+  const allFailed = results.every(r => r.status === 'rejected');
+  const hasSuccess = results.some(r => r.status === 'fulfilled');
+
+  lastRefreshTime = Date.now();
+  lastRefreshSuccess = hasSuccess;
+
+  if (allFailed) {
+    recordFailure();
+  } else {
+    recordSuccess();
+  }
 }

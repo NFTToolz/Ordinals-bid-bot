@@ -177,6 +177,8 @@ export interface EnhancedStatusData {
   totalBalance: number;
   activeOfferCount: number;
   pendingTxCount: number;
+  dataFreshness?: 'fresh' | 'stale' | 'unavailable';
+  lastRefreshAgoSec?: number;
 }
 
 /**
@@ -193,7 +195,13 @@ export function showEnhancedStatusBar(status: EnhancedStatusData): void {
 
   // Second row: Balance, offers, pending
   const balanceStr = formatBTC(status.totalBalance);
-  const line2 = `  Balance: ${balanceStr}    Offers: ${status.activeOfferCount}    Pending: ${status.pendingTxCount}`;
+  let freshnessTag = '';
+  if (status.dataFreshness === 'stale') {
+    freshnessTag = chalk.yellow(' [stale]');
+  } else if (status.dataFreshness === 'unavailable') {
+    freshnessTag = chalk.red(' [offline]');
+  }
+  const line2 = `  Balance: ${balanceStr}    Offers: ${status.activeOfferCount}    Pending: ${status.pendingTxCount}${freshnessTag}`;
   const padding2 = width - stripAnsi(line2).length - 2;
 
   console.log(chalk.cyan(BOX.vertical) + line1 + ' '.repeat(Math.max(0, padding1)) + chalk.cyan(BOX.vertical));
@@ -202,7 +210,7 @@ export function showEnhancedStatusBar(status: EnhancedStatusData): void {
   console.log('');
 }
 
-export type MenuLevel = 'main' | 'wallet-hub' | 'wallets' | 'wallet-groups' | 'collections' | 'bot' | 'settings';
+export type MenuLevel = 'main' | 'wallet-hub' | 'wallets' | 'wallet-groups' | 'collections' | 'bot' | 'bidding-stats' | 'settings';
 
 const MENU_LABELS: Record<MenuLevel, string> = {
   'main': 'Main Menu',
@@ -211,6 +219,7 @@ const MENU_LABELS: Record<MenuLevel, string> = {
   'wallet-groups': 'Wallet Groups',
   'collections': 'Collections',
   'bot': 'Bot Control',
+  'bidding-stats': 'Bidding Stats',
   'settings': 'Settings',
 };
 
@@ -247,9 +256,15 @@ export function showSectionHeader(title: string, width?: number): void {
  */
 export function showTable(headers: string[], rows: string[][], columnWidths?: number[]): void {
   const widths = columnWidths || headers.map((h, i) => {
-    const maxContent = Math.max(h.length, ...rows.map(r => (r[i] || '').length));
+    const maxContent = Math.max(h.length, ...rows.map(r => stripAnsi(r[i] || '').length));
     return Math.min(maxContent + 2, 30);
   });
+
+  // ANSI-aware pad: pads based on visible width, preserving color codes
+  const padCell = (text: string, width: number): string => {
+    const visible = stripAnsi(text).length;
+    return visible >= width ? text : text + ' '.repeat(width - visible);
+  };
 
   // Header
   const headerLine = headers.map((h, i) => h.padEnd(widths[i])).join(' │ ');
@@ -259,7 +274,7 @@ export function showTable(headers: string[], rows: string[][], columnWidths?: nu
 
   // Rows
   rows.forEach(row => {
-    const rowLine = row.map((cell, i) => (cell || '').padEnd(widths[i])).join(' │ ');
+    const rowLine = row.map((cell, i) => padCell(cell || '', widths[i])).join(' │ ');
     console.log('│ ' + rowLine + ' │');
   });
 

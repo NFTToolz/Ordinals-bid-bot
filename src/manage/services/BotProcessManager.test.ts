@@ -27,12 +27,12 @@ import {
   getStatus,
   getLogs,
   getStats,
-  getBotRuntimeStats,
   clearLogs,
   start,
   stop,
   restart,
   followLogs,
+  readPidFile,
 } from './BotProcessManager';
 
 // Helper to create mock child process
@@ -291,62 +291,6 @@ describe('BotProcessManager', () => {
     });
   });
 
-  describe('getBotRuntimeStats', () => {
-    it('should return null when stats file does not exist', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(false);
-
-      const stats = getBotRuntimeStats();
-      expect(stats).toBeNull();
-    });
-
-    it('should return stats when file is fresh', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      const freshStats = {
-        timestamp: Date.now(),
-        runtime: { startTime: Date.now() - 60000, uptimeSeconds: 60 },
-        bidStats: { bidsPlaced: 10, bidsSkipped: 5, bidsCancelled: 2, bidsAdjusted: 1, errors: 0 },
-        pacer: { bidsUsed: 5, bidsRemaining: 25, windowResetIn: 30, totalBidsPlaced: 100, totalWaits: 10, bidsPerMinute: 30 },
-        walletPool: null,
-        queue: { size: 0, pending: 0, active: 0 },
-        memory: { heapUsedMB: 100, heapTotalMB: 200, percentage: 50 },
-        websocket: { connected: true },
-        bidsTracked: 50,
-      };
-      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(freshStats));
-
-      const stats = getBotRuntimeStats();
-      expect(stats).not.toBeNull();
-      expect(stats?.bidStats.bidsPlaced).toBe(10);
-    });
-
-    it('should return null when stats are stale (>2 minutes old)', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      const staleStats = {
-        timestamp: Date.now() - 3 * 60 * 1000, // 3 minutes old
-        runtime: {},
-        bidStats: {},
-        pacer: {},
-        walletPool: null,
-        queue: {},
-        memory: {},
-        websocket: {},
-        bidsTracked: 0,
-      };
-      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(staleStats));
-
-      const stats = getBotRuntimeStats();
-      expect(stats).toBeNull();
-    });
-
-    it('should return null on parse error', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('invalid json');
-
-      const stats = getBotRuntimeStats();
-      expect(stats).toBeNull();
-    });
-  });
-
   describe('clearLogs', () => {
     it('should write empty string to log file', () => {
       clearLogs();
@@ -369,7 +313,7 @@ describe('BotProcessManager', () => {
       process.kill = originalKill;
     });
 
-    it('should spawn bot process and write PID file', () => {
+    it('should spawn bot process and write PID file with JSON format', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
       vi.mocked(fs.openSync).mockReturnValue(3);
 
@@ -380,10 +324,15 @@ describe('BotProcessManager', () => {
 
       expect(result.success).toBe(true);
       expect(result.pid).toBe(54321);
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('.bot.pid'),
-        '54321'
+      // PID file now written as JSON with pid and startedAt
+      const pidWriteCall = vi.mocked(fs.writeFileSync).mock.calls.find(
+        (call) => String(call[0]).includes('.bot.pid')
       );
+      expect(pidWriteCall).toBeDefined();
+      const pidData = JSON.parse(pidWriteCall![1] as string);
+      expect(pidData.pid).toBe(54321);
+      expect(typeof pidData.startedAt).toBe('number');
+      expect(pidData.startedAt).toBeGreaterThan(0);
       expect(mockChild.unref).toHaveBeenCalled();
     });
 
@@ -561,6 +510,136 @@ describe('BotProcessManager', () => {
 
       // Should not have called callback after stop
       expect(callback).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('readPidFile', () => {
+    it('should return null when no PID file exists', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      expect(readPidFile()).toBeNull();
+    });
+
+    it('should parse JSON format with pid and startedAt', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({ pid: 12345, startedAt: 1700000000000 })
+      );
+
+      const result = readPidFile();
+      expect(result).toEqual({ pid: 12345, startedAt: 1700000000000 });
+    });
+
+    it('should handle legacy plain number format with startedAt=0', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('12345');
+
+      const result = readPidFile();
+      expect(result).toEqual({ pid: 12345, startedAt: 0 });
+    });
+
+    it('should return null for empty content', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('');
+
+      expect(readPidFile()).toBeNull();
+    });
+
+    it('should return null for non-numeric content', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('invalid');
+
+      expect(readPidFile()).toBeNull();
+    });
+
+    it('should handle JSON with missing startedAt field', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ pid: 99999 }));
+
+      const result = readPidFile();
+      expect(result).toEqual({ pid: 99999, startedAt: 0 });
+    });
+  });
+
+  describe('start - FD cleanup', () => {
+    it('should close fd when child.pid is undefined', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.openSync).mockReturnValue(7);
+
+      const mockChild = new EventEmitter() as any;
+      mockChild.pid = undefined;
+      mockChild.unref = vi.fn();
+      vi.mocked(spawn).mockReturnValue(mockChild);
+
+      const result = start();
+
+      expect(result.success).toBe(false);
+      expect(fs.closeSync).toHaveBeenCalledWith(7);
+    });
+
+    it('should close fd when spawn throws', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.openSync).mockReturnValue(9);
+      vi.mocked(spawn).mockImplementation(() => {
+        throw new Error('Spawn failed');
+      });
+
+      const result = start();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Spawn failed');
+      expect(fs.closeSync).toHaveBeenCalledWith(9);
+    });
+
+    it('should NOT close fd on successful spawn', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.openSync).mockReturnValue(11);
+
+      const mockChild = createMockChildProcess(88888);
+      vi.mocked(spawn).mockReturnValue(mockChild as any);
+
+      const result = start();
+
+      expect(result.success).toBe(true);
+      // closeSync should NOT have been called (child inherits the fd)
+      expect(fs.closeSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getStatus - startedAt from PID file', () => {
+    it('should use startedAt from JSON PID file instead of mtime', () => {
+      const startedAtMs = Date.now() - 7200000; // 2 hours ago
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({ pid: 12345, startedAt: startedAtMs })
+      );
+
+      const originalKill = process.kill;
+      process.kill = vi.fn();
+
+      const status = getStatus();
+      expect(status.running).toBe(true);
+      expect(status.startedAt).toEqual(new Date(startedAtMs));
+      // statSync should NOT be called because startedAt > 0
+      expect(fs.statSync).not.toHaveBeenCalled();
+
+      process.kill = originalKill;
+    });
+
+    it('should fall back to mtime for legacy PID format', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('12345');
+      const mtimeDate = new Date(Date.now() - 3600000);
+      vi.mocked(fs.statSync).mockReturnValue({ mtime: mtimeDate } as any);
+
+      const originalKill = process.kill;
+      process.kill = vi.fn();
+
+      const status = getStatus();
+      expect(status.running).toBe(true);
+      expect(status.startedAt).toEqual(mtimeDate);
+      expect(fs.statSync).toHaveBeenCalled();
+
+      process.kill = originalKill;
     });
   });
 });

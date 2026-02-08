@@ -1,24 +1,15 @@
-import { getStatus, getStats, isRunning, getBotRuntimeStats } from '../../services/BotProcessManager';
-import { loadCollections } from '../../services/CollectionService';
-import { loadWallets } from '../../services/WalletGenerator';
+import { getStatus, getBotRuntimeStats } from '../../services/BotProcessManager';
 import {
   showSectionHeader,
-  showSuccess,
-  showWarning,
-  showTable,
   getSeparatorWidth,
 } from '../../utils/display';
 import { hasFundingWIF, hasReceiveAddress } from '../../../utils/fundingWallet';
 import chalk = require('chalk');
 
 export async function viewStatus(): Promise<void> {
-  showSectionHeader('BOT STATUS & STATS');
+  showSectionHeader('BOT STATUS');
 
   const status = getStatus();
-  const stats = getStats();
-  const runtimeStats = getBotRuntimeStats();
-  const collections = loadCollections();
-  const wallets = loadWallets();
 
   // Bot Status
   console.log('━'.repeat(getSeparatorWidth()));
@@ -38,119 +29,32 @@ export async function viewStatus(): Promise<void> {
 
   console.log('');
 
-  // Session Statistics (from runtime stats)
-  if (runtimeStats) {
-    console.log('━'.repeat(getSeparatorWidth()));
-    console.log('  SESSION STATISTICS (since bot start)');
-    console.log('━'.repeat(getSeparatorWidth()));
+  // System Health (from API, only when running)
+  if (status.running) {
+    const runtimeStats = await getBotRuntimeStats();
 
-    const bs = runtimeStats.bidStats;
-    const totalActions = bs.bidsPlaced + bs.bidsSkipped;
-    const successRate = totalActions > 0
-      ? ((bs.bidsPlaced / totalActions) * 100).toFixed(1)
-      : '0.0';
-
-    console.log(`  Bids Placed:     ${chalk.green(bs.bidsPlaced.toString())}`);
-    console.log(`  Bids Skipped:    ${chalk.yellow(bs.bidsSkipped.toString())}`);
-    console.log(`  Bids Adjusted:   ${chalk.blue(bs.bidsAdjusted.toString())}`);
-    console.log(`  Bids Cancelled:  ${chalk.yellow(bs.bidsCancelled.toString())}`);
-    console.log(`  Errors:          ${bs.errors > 0 ? chalk.red(bs.errors.toString()) : bs.errors}`);
-    console.log(`  Success Rate:    ${chalk.cyan(successRate + '%')}`);
-    console.log('');
-
-    // Rate Limiter
-    console.log('━'.repeat(getSeparatorWidth()));
-    console.log('  RATE LIMITER');
-    console.log('━'.repeat(getSeparatorWidth()));
-
-    const pacer = runtimeStats.pacer;
-    const usedColor = pacer.bidsUsed >= pacer.bidsPerMinute ? chalk.red : chalk.green;
-    console.log(`  Bids this window:  ${usedColor(pacer.bidsUsed.toString())}/${pacer.bidsPerMinute}`);
-    console.log(`  Window resets in:  ${pacer.windowResetIn}s`);
-    console.log(`  Total waits:       ${pacer.totalWaits}`);
-    console.log('');
-
-    // Wallet Pool (if enabled)
-    if (runtimeStats.walletPool) {
-      const wp = runtimeStats.walletPool;
+    if (runtimeStats) {
       console.log('━'.repeat(getSeparatorWidth()));
-      console.log(`  WALLET POOL (${wp.available} available / ${wp.total} total)`);
+      console.log('  SYSTEM HEALTH');
       console.log('━'.repeat(getSeparatorWidth()));
 
-      wp.wallets.forEach(w => {
-        const statusIcon = w.isAvailable ? chalk.green('*') : chalk.yellow('-');
-        const bidInfo = `${w.bidsInWindow}/${wp.bidsPerMinute} bids`;
-        const resetInfo = !w.isAvailable ? chalk.dim(` (reset ${w.secondsUntilReset}s)`) : '';
-        console.log(`  ${statusIcon} ${w.label}: ${bidInfo}${resetInfo}`);
-      });
+      const mem = runtimeStats.memory;
+      const memColor = mem.percentage > 80 ? chalk.red : mem.percentage > 60 ? chalk.yellow : chalk.green;
+      console.log(`  Memory:      ${memColor(mem.heapUsedMB + ' MB')} / ${mem.heapTotalMB} MB (${mem.percentage}%)`);
+      console.log(`  Queue:       ${runtimeStats.queue.size} events`);
+
+      const wsStatus = runtimeStats.websocket.connected
+        ? chalk.green('Connected')
+        : chalk.red('Disconnected');
+      console.log(`  WebSocket:   ${wsStatus}`);
+
+      const lastUpdateSec = Math.floor((Date.now() - runtimeStats.timestamp) / 1000);
+      console.log(`  Last update: ${lastUpdateSec}s ago`);
       console.log('');
     }
-
-    // System
-    console.log('━'.repeat(getSeparatorWidth()));
-    console.log('  SYSTEM');
-    console.log('━'.repeat(getSeparatorWidth()));
-
-    const mem = runtimeStats.memory;
-    const memColor = mem.percentage > 80 ? chalk.red : mem.percentage > 60 ? chalk.yellow : chalk.green;
-    console.log(`  Memory:      ${memColor(mem.heapUsedMB + ' MB')} / ${mem.heapTotalMB} MB (${mem.percentage}%)`);
-    console.log(`  Queue:       ${runtimeStats.queue.size} events`);
-
-    const wsStatus = runtimeStats.websocket.connected
-      ? chalk.green('Connected')
-      : chalk.red('Disconnected');
-    console.log(`  WebSocket:   ${wsStatus}`);
-
-    const lastUpdateSec = Math.floor((Date.now() - runtimeStats.timestamp) / 1000);
-    console.log(`  Last update: ${lastUpdateSec}s ago`);
-    console.log('');
   }
 
-  // Configuration
-  console.log('━'.repeat(getSeparatorWidth()));
-  console.log('  CONFIGURATION');
-  console.log('━'.repeat(getSeparatorWidth()));
-  console.log(`  Collections:  ${collections.length}`);
-  console.log(`  Wallets:      ${wallets?.wallets?.length || 0} (+ Main Wallet)`);
-  console.log('');
-
-  // Active Collections
-  if (collections.length > 0) {
-    console.log('━'.repeat(getSeparatorWidth()));
-    console.log('  ACTIVE COLLECTIONS');
-    console.log('━'.repeat(getSeparatorWidth()));
-
-    const headers = ['Collection', 'Type', 'Bid Range', 'Counter-Bid'];
-    const rows = collections.map(c => [
-      c.collectionSymbol.length > 20 ? c.collectionSymbol.slice(0, 17) + '...' : c.collectionSymbol,
-      c.offerType,
-      `${c.minBid}-${c.maxBid} BTC`,
-      c.enableCounterBidding ? 'Yes' : 'No',
-    ]);
-
-    showTable(headers, rows, [24, 12, 18, 12]);
-  }
-
-  // Bid History (if available)
-  if (stats.bidHistory && Object.keys(stats.bidHistory).length > 0) {
-    console.log('');
-    console.log('━'.repeat(getSeparatorWidth()));
-    console.log('  BID ACTIVITY');
-    console.log('━'.repeat(getSeparatorWidth()));
-
-    for (const [symbol, data] of Object.entries(stats.bidHistory) as any) {
-      const ourBids = Object.keys(data.ourBids || {}).length;
-      const topBids = Object.values(data.topBids || {}).filter(Boolean).length;
-
-      console.log(`  ${symbol}:`);
-      console.log(`    Active bids: ${ourBids}`);
-      console.log(`    Top bids:    ${topBids}`);
-      console.log(`    Items won:   ${data.quantity || 0}`);
-    }
-  }
-
-  // Environment Status
-  console.log('');
+  // Environment (always shown)
   console.log('━'.repeat(getSeparatorWidth()));
   console.log('  ENVIRONMENT');
   console.log('━'.repeat(getSeparatorWidth()));

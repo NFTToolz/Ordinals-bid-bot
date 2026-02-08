@@ -1,83 +1,8 @@
 /**
  * File Write Trackers - Dirty-flag caching & debouncing to reduce disk I/O
  *
- * BotStatsDirtyTracker: Compares discrete counter snapshots to skip identical writes
  * BidHistoryDirtyTracker: Simple dirty flag with debounced write coalescing
  */
-
-/**
- * Snapshot of bot stats fields that indicate meaningful change.
- * Excludes always-changing fields: timestamp, uptimeSeconds, windowResetIn, secondsUntilReset
- */
-export interface BotStatsSnapshot {
-  bidsPlaced: number;
-  bidsSkipped: number;
-  bidsCancelled: number;
-  bidsAdjusted: number;
-  errors: number;
-  queueSize: number;
-  wsConnected: boolean;
-  bidsTracked: number;
-  walletPoolAvailable: number | null;
-  heapUsedMB: number;
-}
-
-export class BotStatsDirtyTracker {
-  private lastSnapshot: BotStatsSnapshot | null = null;
-  private forceDirty = true; // First call is always dirty
-  private readonly heapThresholdMB: number;
-
-  constructor(heapThresholdMB: number = 5) {
-    this.heapThresholdMB = heapThresholdMB;
-  }
-
-  /**
-   * Check if the given snapshot differs from the last written snapshot.
-   */
-  isDirty(snapshot: BotStatsSnapshot): boolean {
-    if (this.forceDirty) return true;
-    if (!this.lastSnapshot) return true;
-
-    const prev = this.lastSnapshot;
-
-    // Check discrete counters
-    if (
-      snapshot.bidsPlaced !== prev.bidsPlaced ||
-      snapshot.bidsSkipped !== prev.bidsSkipped ||
-      snapshot.bidsCancelled !== prev.bidsCancelled ||
-      snapshot.bidsAdjusted !== prev.bidsAdjusted ||
-      snapshot.errors !== prev.errors ||
-      snapshot.queueSize !== prev.queueSize ||
-      snapshot.wsConnected !== prev.wsConnected ||
-      snapshot.bidsTracked !== prev.bidsTracked ||
-      snapshot.walletPoolAvailable !== prev.walletPoolAvailable
-    ) {
-      return true;
-    }
-
-    // Check heap memory with threshold
-    if (Math.abs(snapshot.heapUsedMB - prev.heapUsedMB) >= this.heapThresholdMB) {
-      return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Record that a write happened with this snapshot.
-   */
-  markClean(snapshot: BotStatsSnapshot): void {
-    this.lastSnapshot = { ...snapshot };
-    this.forceDirty = false;
-  }
-
-  /**
-   * Force the next isDirty() call to return true.
-   */
-  forceNextDirty(): void {
-    this.forceDirty = true;
-  }
-}
 
 export class BidHistoryDirtyTracker {
   private dirty = false;

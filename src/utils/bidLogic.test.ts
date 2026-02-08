@@ -635,7 +635,7 @@ describe('bidLogic', () => {
   describe('combineBidsAndListings', () => {
     it('should combine matching bids and listings', () => {
       const userBids: UserBid[] = [
-        { collectionSymbol: 'col1', tokenId: 'token123', price: 1000, expiration: '2024-01-01' },
+        { collectionSymbol: 'col1', tokenId: 'token123', price: 1000, expiration: '2099-01-01' },
       ];
       const listings: BottomListing[] = [
         { id: 'token123', price: 2000 },
@@ -651,7 +651,7 @@ describe('bidLogic', () => {
 
     it('should filter out non-matching bids', () => {
       const userBids: UserBid[] = [
-        { collectionSymbol: 'col1', tokenId: 'token123', price: 1000, expiration: '2024-01-01' },
+        { collectionSymbol: 'col1', tokenId: 'token123', price: 1000, expiration: '2099-01-01' },
       ];
       const listings: BottomListing[] = [
         { id: 'differentToken', price: 2000 },
@@ -661,10 +661,28 @@ describe('bidLogic', () => {
       expect(combined).toHaveLength(0);
     });
 
+    it('should filter out expired bids', () => {
+      const pastDate = new Date(Date.now() - 60_000).toISOString();
+      const futureDate = new Date(Date.now() + 3_600_000).toISOString();
+      const userBids: UserBid[] = [
+        { collectionSymbol: 'col1', tokenId: 'token1', price: 1000, expiration: futureDate },
+        { collectionSymbol: 'col1', tokenId: 'token2', price: 2000, expiration: pastDate },
+      ];
+      const listings: BottomListing[] = [
+        { id: 'token1', price: 3000 },
+        { id: 'token2', price: 4000 },
+      ];
+
+      const combined = combineBidsAndListings(userBids, listings);
+
+      expect(combined).toHaveLength(1);
+      expect(combined[0]!.bidId).toBe('token1'.slice(-8));
+    });
+
     it('should sort by listed price ascending', () => {
       const userBids: UserBid[] = [
-        { collectionSymbol: 'col1', tokenId: 'token1', price: 1000, expiration: '2024-01-01' },
-        { collectionSymbol: 'col1', tokenId: 'token2', price: 500, expiration: '2024-01-01' },
+        { collectionSymbol: 'col1', tokenId: 'token1', price: 1000, expiration: '2099-01-01' },
+        { collectionSymbol: 'col1', tokenId: 'token2', price: 500, expiration: '2099-01-01' },
       ];
       const listings: BottomListing[] = [
         { id: 'token1', price: 3000 },

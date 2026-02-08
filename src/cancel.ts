@@ -25,8 +25,8 @@ import {
 } from "./utils/walletHelpers";
 import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerator";
 import { promptPasswordStdin } from "./utils/promptPassword";
-import { getErrorMessage } from "./utils/errorUtils";
 import { getFundingWIF, setFundingWIF, hasReceiveAddress, setReceiveAddress, getReceiveAddress } from "./utils/fundingWallet";
+import Logger from "./utils/logger";
 
 config()
 
@@ -72,7 +72,7 @@ function getReceiveAddressesToCheck(): { address: string; privateKey: string; pu
         }
       }
     } catch (error) {
-      console.error('[WALLET ROTATION] Failed to load wallet config for cancellation');
+      Logger.error('[CANCEL] Failed to load wallet config for cancellation');
     }
   }
 
@@ -102,7 +102,7 @@ async function cancelAllItemOffers() {
 
   for (const addr of addresses) {
     const labelStr = addr.label ? ` (${addr.label})` : '';
-    console.log(`\n[CHECKING] ${addr.address.slice(0, 10)}...${labelStr}`);
+    Logger.info(`[CANCEL] Checking ${addr.address.slice(0, 10)}...${labelStr}`);
 
     try {
       // addr.address is the taproot receive address (bc1p...) — required by the ME API
@@ -110,9 +110,7 @@ async function cancelAllItemOffers() {
 
       if (offerData && Array.isArray(offerData.offers) && offerData.offers.length > 0) {
         const offers = offerData.offers;
-        console.log('--------------------------------------------------------------------------------');
-        console.log(`${offers.length} OFFERS FOUND FOR ${addr.address}${labelStr}`);
-        console.log('--------------------------------------------------------------------------------');
+        Logger.info(`[CANCEL] ${offers.length} offers found for ${addr.address.slice(0, 10)}...${labelStr}`);
 
         const cancelOps = offers.map(offer => {
           const collectionSymbol = offer.token.collectionSymbol;
@@ -123,14 +121,13 @@ async function cancelAllItemOffers() {
         const results = await Promise.allSettled(cancelOps);
         const failed = results.filter(r => r.status === 'rejected');
         if (failed.length > 0) {
-          console.error(`Failed to cancel ${failed.length} of ${results.length} offers`);
+          Logger.error(`[CANCEL] Failed to cancel ${failed.length} of ${results.length} offers`);
         }
       } else {
-        console.log(`No offers found for ${addr.address.slice(0, 10)}...${labelStr}`);
+        Logger.info(`[CANCEL] No offers found for ${addr.address.slice(0, 10)}...${labelStr}`);
       }
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`Error checking offers for ${addr.address}: ${errorMessage}`);
+      Logger.error(`[CANCEL] Error checking offers for ${addr.address.slice(0, 10)}...`, error);
       // Continue with next address instead of stopping
     }
   }
@@ -152,7 +149,7 @@ async function cancelCollectionOffers() {
 
       const bestOffers = await getBestCollectionOffer(item.collectionSymbol);
       if (!bestOffers?.offers?.length) {
-        console.log(`No collection offers found for ${item.collectionSymbol}`);
+        Logger.info(`[CANCEL] No collection offers found for ${item.collectionSymbol}`);
         continue;
       }
       // Check all our receive addresses from all wallets (supports wallet groups)
@@ -164,17 +161,16 @@ async function cancelCollectionOffers() {
       if (ourOffers) {
         const offerIds = [ourOffers.id];
         await cancelCollectionOffer(offerIds, publicKey, privateKey);
-        console.log(`Cancelled collection offer for ${item.collectionSymbol}`);
+        Logger.success(`[CANCEL] Cancelled collection offer for ${item.collectionSymbol}`);
       }
     }
   }
 }
 
-// Reset bot data files (bid history and stats)
-function resetBotData(): { historyReset: boolean; statsReset: boolean } {
+// Reset bot data files (bid history)
+function resetBotData(): { historyReset: boolean } {
   const dataDir = path.join(process.cwd(), 'data');
   let historyReset = false;
-  let statsReset = false;
 
   const historyPath = path.join(dataDir, 'bidHistory.json');
   if (fs.existsSync(historyPath)) {
@@ -182,13 +178,7 @@ function resetBotData(): { historyReset: boolean; statsReset: boolean } {
     historyReset = true;
   }
 
-  const statsPath = path.join(dataDir, 'botStats.json');
-  if (fs.existsSync(statsPath)) {
-    fs.unlinkSync(statsPath);
-    statsReset = true;
-  }
-
-  return { historyReset, statsReset };
+  return { historyReset };
 }
 
 // Main execution
@@ -197,15 +187,15 @@ async function main() {
   if (fs.existsSync(WALLET_CONFIG_PATH)) {
     let walletConfigContent = fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8');
     if (isEncryptedFormat(walletConfigContent)) {
-      console.log('[STARTUP] Wallets file is encrypted — password required');
+      Logger.info('[STARTUP] Wallets file is encrypted — password required');
       const password = await promptPasswordStdin('[STARTUP] Enter wallets encryption password: ');
       try {
         walletConfigContent = decryptData(walletConfigContent, password);
       } catch {
-        console.error('[STARTUP] Wrong password — could not decrypt wallets.json');
+        Logger.error('[STARTUP] Wrong password — could not decrypt wallets.json');
         process.exit(1);
       }
-      console.log('[STARTUP] Wallets file decrypted successfully');
+      Logger.success('[STARTUP] Wallets file decrypted successfully');
     }
 
     const walletConfig = JSON.parse(walletConfigContent);
@@ -214,18 +204,18 @@ async function main() {
     // Extract funding WIF and receive address from wallets.json if present
     if (walletConfig.fundingWallet?.wif) {
       setFundingWIF(walletConfig.fundingWallet.wif);
-      console.log('[STARTUP] Funding WIF loaded from wallets.json');
+      Logger.success('[STARTUP] Funding WIF loaded from wallets.json');
     }
     if (walletConfig.fundingWallet?.receiveAddress) {
       setReceiveAddress(walletConfig.fundingWallet.receiveAddress);
-      console.log('[STARTUP] Token receive address loaded from wallets.json');
+      Logger.success('[STARTUP] Token receive address loaded from wallets.json');
     }
 
     // Resolve TOKEN_RECEIVE_ADDRESS: wallets.json > .env > warning
     if (hasReceiveAddress()) {
       TOKEN_RECEIVE_ADDRESS = getReceiveAddress();
     } else if (process.env.TOKEN_RECEIVE_ADDRESS) {
-      console.log('[STARTUP] TOKEN_RECEIVE_ADDRESS loaded from .env (deprecated)');
+      Logger.warning('[STARTUP] TOKEN_RECEIVE_ADDRESS loaded from .env (deprecated — migrate to wallets.json)');
       TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS;
     }
 
@@ -242,45 +232,33 @@ async function main() {
           }
           if (allWallets.length > 0) {
             initializeWalletPool(allWallets, 5, network);
-            console.log(`[WALLET ROTATION] Initialized wallet pool with ${allWallets.length} wallets for cancellation`);
+            Logger.info(`[STARTUP] Initialized wallet pool with ${allWallets.length} wallets for cancellation`);
           }
         }
       } catch (error: unknown) {
-        console.error(`[WALLET ROTATION] Failed to initialize wallet pool: ${getErrorMessage(error)}`);
+        Logger.error('[STARTUP] Failed to initialize wallet pool', error);
       }
     }
   }
 
-  console.log('================================================================================');
-  console.log('CANCELLING ALL OFFERS');
+  Logger.header('CANCELLING ALL OFFERS');
   if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    console.log('[WALLET ROTATION] Multi-wallet mode enabled - checking all wallet addresses');
+    Logger.info('[CANCEL] Multi-wallet mode — checking all wallet addresses');
   }
-  console.log('================================================================================');
 
   await cancelAllItemOffers();
   await cancelCollectionOffers();
 
-  // Reset bid history and stats
+  // Reset bid history
   const resetResult = resetBotData();
-  if (resetResult.historyReset || resetResult.statsReset) {
-    console.log('\n--------------------------------------------------------------------------------');
-    console.log('BOT DATA RESET');
-    if (resetResult.historyReset) {
-      console.log('  - Bid history cleared');
-    }
-    if (resetResult.statsReset) {
-      console.log('  - Bot stats cleared');
-    }
-    console.log('--------------------------------------------------------------------------------');
+  if (resetResult.historyReset) {
+    Logger.info('[CANCEL] Bot data reset — bid history cleared');
   }
 
-  console.log('\n================================================================================');
-  console.log('CANCELLATION COMPLETE');
-  console.log('================================================================================');
+  Logger.header('CANCELLATION COMPLETE');
 }
 
-main().catch(console.error);
+main().catch((error: unknown) => Logger.error('[CANCEL] Fatal error', error));
 
 async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol: string, tokenId: string, buyerPaymentAddress: string) {
   // Determine which private key to use for signing the cancellation
@@ -294,10 +272,10 @@ async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol: st
     const wallet = getWalletByPaymentAddress(offer.buyerPaymentAddress);
     if (wallet) {
       signingKey = wallet.config.wif;
-      console.log(`[WALLET ROTATION] Using wallet "${wallet.config.label}" for cancellation`);
+      Logger.debug(`[CANCEL] Using wallet "${wallet.config.label}" for cancellation`);
     } else if (!ourPaymentAddresses.has(offer.buyerPaymentAddress.toLowerCase())) {
       // Bid was placed by unknown wallet (not in any of our wallet groups), skip
-      console.log(`[WALLET ROTATION] Skipping cancellation - bid placed by unknown wallet: ${offer.buyerPaymentAddress.slice(0, 10)}...`);
+      Logger.warning(`[CANCEL] Skipping — bid placed by unknown wallet: ${offer.buyerPaymentAddress.slice(0, 10)}...`);
       return;
     }
   } else if (!ourPaymentAddresses.has(offer.buyerPaymentAddress.toLowerCase())) {
@@ -309,11 +287,9 @@ async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol: st
     const offerFormat = await retrieveCancelOfferFormat(offer.id)
     const signedOfferFormat = signData(offerFormat, signingKey)
     await submitCancelOfferData(offer.id, signedOfferFormat)
-    console.log('--------------------------------------------------------------------------------');
-    console.log(`CANCELLED OFFER FOR ${collectionSymbol} ${tokenId}`);
-    console.log('--------------------------------------------------------------------------------');
+    Logger.success(`[CANCEL] ${collectionSymbol} ${tokenId.length > 20 ? tokenId.slice(0, 8) + '...' + tokenId.slice(-6) : tokenId}`);
   } catch (error: unknown) {
-    console.error(`Failed to cancel offer for ${collectionSymbol} ${tokenId}: ${getErrorMessage(error)}`);
+    Logger.error(`[CANCEL] Failed to cancel ${collectionSymbol} ${tokenId.length > 20 ? tokenId.slice(0, 8) + '...' + tokenId.slice(-6) : tokenId}`, error);
   }
 }
 

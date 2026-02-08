@@ -80,7 +80,7 @@ vi.mock('../../services/BotProcessManager', () => ({
     totalBidsPlaced: 0,
     bidHistory: {},
   })),
-  getBotRuntimeStats: vi.fn(() => null),
+  getBotRuntimeStats: vi.fn(async () => null),
   start: vi.fn(() => ({ success: true, pid: 12345 })),
   stop: vi.fn(async () => ({ success: true })),
   restart: vi.fn(async () => ({ success: true, pid: 12345 })),
@@ -107,6 +107,7 @@ vi.mock('../../services/WalletGenerator', () => ({
   loadWallets: vi.fn(() => ({
     wallets: [{ label: 'Test Wallet' }],
   })),
+  isGroupsFormat: vi.fn(() => false),
 }));
 
 // Mock fs
@@ -348,7 +349,7 @@ describe('Bot Commands', () => {
 
       await viewStatus();
 
-      expect(display.showSectionHeader).toHaveBeenCalledWith('BOT STATUS & STATS');
+      expect(display.showSectionHeader).toHaveBeenCalledWith('BOT STATUS');
     });
 
     it('should display stopped status', async () => {
@@ -365,19 +366,21 @@ describe('Bot Commands', () => {
 
       await viewStatus();
 
-      expect(display.showSectionHeader).toHaveBeenCalledWith('BOT STATUS & STATS');
+      expect(display.showSectionHeader).toHaveBeenCalledWith('BOT STATUS');
     });
 
     it('should display runtime stats when available', async () => {
       const { viewStatus } = await import('./status');
       const { getBotRuntimeStats } = await import('../../services/BotProcessManager');
 
-      vi.mocked(getBotRuntimeStats).mockReturnValueOnce({
+      vi.mocked(getBotRuntimeStats).mockResolvedValueOnce({
         timestamp: Date.now(),
         runtime: { startTime: Date.now() - 60000, uptimeSeconds: 60 },
         bidStats: { bidsPlaced: 10, bidsSkipped: 5, bidsCancelled: 2, bidsAdjusted: 1, errors: 0 },
         pacer: { bidsUsed: 3, bidsRemaining: 2, windowResetIn: 30, totalBidsPlaced: 100, totalWaits: 5, bidsPerMinute: 5 },
         walletPool: null,
+        walletGroups: null,
+        totalWalletCount: 0,
         queue: { size: 0, pending: 0, active: 0 },
         memory: { heapUsedMB: 100, heapTotalMB: 200, percentage: 50 },
         websocket: { connected: true },

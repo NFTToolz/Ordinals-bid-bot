@@ -1,4 +1,5 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
+import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getErrorMessage } from '../../utils/errorUtils';
@@ -14,13 +15,23 @@ export interface BotStatus {
   startedAt?: Date;
 }
 
+export interface BidHistoryEntry {
+  offerType?: 'ITEM' | 'COLLECTION';
+  ourBids: Record<string, { price: number; expiration: number; paymentAddress?: string }>;
+  topBids: Record<string, boolean>;
+  bottomListings?: Array<{ id: string; price: number }>;
+  quantity?: number;
+  lastSeenActivity?: number | null;
+  highestCollectionOffer?: { price: number; buyerPaymentAddress: string };
+}
+
 export interface BotStats {
   activeCollections: number;
   totalBidsPlaced?: number;
-  bidHistory?: any;
+  bidHistory?: Record<string, BidHistoryEntry>;
 }
 
-// Runtime stats written by bot to botStats.json
+// Runtime stats served by bot's HTTP API
 export interface BotRuntimeStats {
   timestamp: number;
   runtime: {
@@ -63,13 +74,44 @@ export interface BotRuntimeStats {
     heapTotalMB: number;
     percentage: number;
   };
+  walletGroups: {
+    groupCount: number;
+    totalWallets: number;
+    groups: Array<{
+      name: string;
+      available: number;
+      total: number;
+      bidsPerMinute: number;
+      wallets: Array<{
+        label: string;
+        bidsInWindow: number;
+        isAvailable: boolean;
+        secondsUntilReset: number;
+      }>;
+    }>;
+  } | null;
+  totalWalletCount: number;
   websocket: {
     connected: boolean;
   };
   bidsTracked: number;
+  bidHistory?: Record<string, BidHistoryEntry>;
+  collections?: Array<{
+    collectionSymbol: string;
+    minBid: number;
+    maxBid: number;
+    minFloorBid: number;
+    maxFloorBid: number;
+    bidCount: number;
+    duration: number;
+    scheduledLoop?: number;
+    enableCounterBidding: boolean;
+    outBidMargin: number;
+    offerType: 'ITEM' | 'COLLECTION';
+    quantity: number;
+    walletGroup?: string;
+  }>;
 }
-
-const BOT_STATS_FILE = path.join(process.cwd(), 'data/botStats.json');
 
 /**
  * Check if the bot is currently running
@@ -93,24 +135,29 @@ export function isRunning(): boolean {
  * Get bot status
  */
 export function getStatus(): BotStatus {
-  const pid = readPid();
+  const pidData = readPidFile();
 
-  if (!pid) {
+  if (!pidData) {
     return { running: false };
   }
 
   try {
     // Check if process exists
-    process.kill(pid, 0);
+    process.kill(pidData.pid, 0);
 
-    // Get process start time if possible
-    const stat = fs.statSync(PID_FILE);
-    const startedAt = stat.mtime;
+    // Use actual startedAt from PID file if available, fall back to mtime
+    let startedAt: Date;
+    if (pidData.startedAt > 0) {
+      startedAt = new Date(pidData.startedAt);
+    } else {
+      const stat = fs.statSync(PID_FILE);
+      startedAt = stat.mtime;
+    }
     const uptime = formatUptime(Date.now() - startedAt.getTime());
 
     return {
       running: true,
-      pid,
+      pid: pidData.pid,
       uptime,
       startedAt,
     };
@@ -128,11 +175,12 @@ export function start(): { success: boolean; pid?: number; error?: string } {
     return { success: false, error: 'Bot is already running' };
   }
 
+  let logFd: number | null = null;
   try {
     // Ensure log file exists
     fs.writeFileSync(LOG_FILE, '', { flag: 'a' });
 
-    const logStream = fs.openSync(LOG_FILE, 'a');
+    logFd = fs.openSync(LOG_FILE, 'a');
 
     // If the manage session has a wallet password, pipe it to the child
     const sessionPassword = getSessionPassword();
@@ -141,7 +189,7 @@ export function start(): { success: boolean; pid?: number; error?: string } {
     const child = spawn('npx', ['ts-node', 'src/bid.ts'], {
       cwd: process.cwd(),
       detached: true,
-      stdio: [sessionPassword ? 'pipe' : 'ignore', logStream, logStream],
+      stdio: [sessionPassword ? 'pipe' : 'ignore', logFd, logFd],
       env: { ...process.env },
     });
 
@@ -152,17 +200,23 @@ export function start(): { success: boolean; pid?: number; error?: string } {
     }
 
     if (!child.pid) {
+      fs.closeSync(logFd);
       return { success: false, error: 'Failed to start process' };
     }
 
-    // Write PID file
-    fs.writeFileSync(PID_FILE, child.pid.toString());
+    // Child inherits the fd; do NOT close logFd on success path
+
+    // Write PID file with actual start time
+    fs.writeFileSync(PID_FILE, JSON.stringify({ pid: child.pid, startedAt: Date.now() }));
 
     // Unref so parent can exit
     child.unref();
 
     return { success: true, pid: child.pid };
   } catch (error: unknown) {
+    if (logFd !== null) {
+      try { fs.closeSync(logFd); } catch (_) { /* ignore close error */ }
+    }
     return { success: false, error: getErrorMessage(error) };
   }
 }
@@ -335,28 +389,65 @@ export function getStats(): BotStats {
 }
 
 /**
- * Get bot runtime stats from botStats.json
- * Returns null if file doesn't exist or is stale (>2 minutes old)
+ * Get the bot's HTTP API URL from the PID file.
+ * Returns null if the bot is not running or has no API port recorded.
  */
-export function getBotRuntimeStats(): BotRuntimeStats | null {
+export function getBotApiUrl(): string | null {
+  const pidData = readPidFile();
+  if (!pidData || !pidData.apiPort || pidData.apiPort <= 0) return null;
+
+  // Verify process is actually running
   try {
-    if (!fs.existsSync(BOT_STATS_FILE)) {
-      return null;
-    }
-
-    const content = fs.readFileSync(BOT_STATS_FILE, 'utf-8');
-    const stats: BotRuntimeStats = JSON.parse(content);
-
-    // Check if stats are stale (>2 minutes old)
-    const ageMs = Date.now() - stats.timestamp;
-    if (ageMs > 2 * 60 * 1000) {
-      return null;  // Stats are too old, bot might not be running
-    }
-
-    return stats;
-  } catch (error) {
+    process.kill(pidData.pid, 0);
+  } catch {
     return null;
   }
+
+  return `http://127.0.0.1:${pidData.apiPort}`;
+}
+
+/**
+ * Fetch live runtime stats from the bot's HTTP API.
+ * Returns null on any error (timeout, connection refused, etc).
+ */
+export function fetchBotRuntimeStatsFromApi(): Promise<BotRuntimeStats | null> {
+  const baseUrl = getBotApiUrl();
+  if (!baseUrl) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    const url = new URL('/api/stats', baseUrl);
+
+    const req = http.get(url, { timeout: 2000 }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume(); // Drain response
+        resolve(null);
+        return;
+      }
+
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data) as BotRuntimeStats);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+/**
+ * Get bot runtime stats from the live HTTP API.
+ */
+export async function getBotRuntimeStats(): Promise<BotRuntimeStats | null> {
+  return fetchBotRuntimeStatsFromApi();
 }
 
 /**
@@ -368,17 +459,38 @@ export function clearLogs(): void {
 
 // Helper functions
 
-function readPid(): number | null {
+export function readPidFile(): { pid: number; startedAt: number; apiPort?: number } | null {
   try {
     if (!fs.existsSync(PID_FILE)) {
       return null;
     }
     const content = fs.readFileSync(PID_FILE, 'utf-8').trim();
+
+    // Try JSON format first
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed.pid === 'number' && !isNaN(parsed.pid)) {
+        return {
+          pid: parsed.pid,
+          startedAt: typeof parsed.startedAt === 'number' ? parsed.startedAt : 0,
+          apiPort: typeof parsed.apiPort === 'number' ? parsed.apiPort : undefined,
+        };
+      }
+    } catch (_) {
+      // Not JSON, try legacy plain number format
+    }
+
+    // Legacy format: plain PID number
     const pid = parseInt(content, 10);
-    return isNaN(pid) ? null : pid;
+    if (isNaN(pid)) return null;
+    return { pid, startedAt: 0 };
   } catch (error) {
     return null;
   }
+}
+
+function readPid(): number | null {
+  return readPidFile()?.pid ?? null;
 }
 
 function cleanupPidFile(): void {

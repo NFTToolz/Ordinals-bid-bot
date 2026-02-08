@@ -48,7 +48,7 @@ import {
   isOurReceiveAddress,
   getWalletCredentialsByPaymentAddress,
 } from "./utils/walletHelpers";
-import { BotStatsDirtyTracker, BidHistoryDirtyTracker, BotStatsSnapshot } from "./utils/fileWriteTracker";
+import { BidHistoryDirtyTracker } from "./utils/fileWriteTracker";
 import {
   // Bid Calculation
   calculateBidPrice,
@@ -108,6 +108,8 @@ import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerato
 import { promptPasswordStdin } from "./utils/promptPassword";
 import { getFundingWIF, setFundingWIF, hasFundingWIF } from "./utils/fundingWallet";
 import { setReceiveAddress, getReceiveAddress, hasReceiveAddress } from "./utils/fundingWallet";
+import { startStatsServer, setStatsProvider, stopStatsServer } from "./api/statsServer";
+import { buildRuntimeStats, StatsDependencies } from "./api/buildStats";
 
 /** Centralized bot timing and limit constants */
 const BOT_CONSTANTS = {
@@ -127,8 +129,6 @@ const BOT_CONSTANTS = {
   MEMORY_USAGE_THRESHOLD: 0.8,
   /** Heap growth rate warning threshold (MB/min) */
   HEAP_GROWTH_WARNING_RATE: 5,
-  /** Bot stats write interval (ms) — 30 seconds */
-  BOT_STATS_WRITE_INTERVAL_MS: 30_000,
   /** Bid history write interval (ms) — 5 minutes */
   BID_HISTORY_WRITE_INTERVAL_MS: 300_000,
   /** Memory monitor interval (ms) — 5 minutes */
@@ -145,10 +145,6 @@ const BOT_CONSTANTS = {
   PACER_STATUS_INTERVAL_MS: 30_000,
   /** Bid stats print interval (ms) — 30 minutes */
   BID_STATS_PRINT_INTERVAL_MS: 1_800_000,
-  /** Max staleness before forced stats write (ms) — 90 seconds */
-  STATS_MAX_STALENESS_MS: 90_000,
-  /** Initial stats write delay (ms) — 5 seconds */
-  INITIAL_STATS_DELAY_MS: 5_000,
   /** Initial memory check delay (ms) — 1 minute */
   INITIAL_MEMORY_CHECK_DELAY_MS: 60_000,
   /** Maximum time to wait for a rate-limited wallet to become available (ms) */
@@ -2635,6 +2631,24 @@ if (ENABLE_WALLET_ROTATION) {
 // Initialize bid pacer once (after wallet loading determines actual throughput)
 initializeBidPacer(pacerLimit);
 
+// Start HTTP stats API server for live stats queries from manage CLI
+const statsApiPort = await startStatsServer();
+if (statsApiPort > 0) {
+  // Register stats provider that builds live stats on each request
+  setStatsProvider(() => buildRuntimeStats(gatherStatsDeps()));
+
+  // Update PID file with API port so manage CLI can find it
+  const pidFilePath = path.join(process.cwd(), '.bot.pid');
+  try {
+    const existing = fs.readFileSync(pidFilePath, 'utf-8');
+    const pidData = JSON.parse(existing);
+    pidData.apiPort = statsApiPort;
+    fs.writeFileSync(pidFilePath, JSON.stringify(pidData));
+  } catch {
+    // PID file might not exist yet in dev mode — ignore
+  }
+}
+
 connectWebSocket();
 
 startProcessing().catch(error => {
@@ -2654,11 +2668,8 @@ function delay(ms: number) {
 // Mutex to prevent concurrent file writes which can corrupt state files
 const fileWriteMutex = new Mutex();
 
-// Dirty-flag trackers to reduce disk I/O
-const botStatsDirtyTracker = new BotStatsDirtyTracker(5);
+// Dirty-flag tracker to reduce disk I/O
 const bidHistoryDirtyTracker = new BidHistoryDirtyTracker(15_000);
-let lastStatsWriteTime = 0;
-const STATS_MAX_STALENESS_MS = BOT_CONSTANTS.STATS_MAX_STALENESS_MS;
 
 async function writeBidHistoryToFile(force = false): Promise<void> {
   if (!force && !bidHistoryDirtyTracker.isDirty()) return;
@@ -2679,24 +2690,15 @@ async function writeBidHistoryToFile(force = false): Promise<void> {
   }
 }
 
-// Write comprehensive bot stats for manage CLI to display
-async function writeBotStatsToFile(force = false): Promise<void> {
-  const memUsage = process.memoryUsage();
-  const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
-  const heapTotalMB = memUsage.heapTotal / 1024 / 1024;
-
-  // Get bid stats from logger
+// Gather current stats dependencies for buildRuntimeStats (shared by HTTP API and file writer)
+function gatherStatsDeps(): StatsDependencies {
   const bidStatsData = getBidStatsData();
-
-  // Get pacer status
   const pacerStatus = getBidPacerStatus();
 
-  // Get wallet pool/groups stats if enabled
-  let walletPoolData = null;
-  let walletGroupsData = null;
+  let walletPoolData: StatsDependencies['walletPool'] = null;
+  let walletGroupsData: StatsDependencies['walletGroups'] = null;
 
   if (ENABLE_WALLET_ROTATION && isWalletGroupManagerInitialized()) {
-    // New wallet groups format
     const manager = getWalletGroupManager();
     const allStats = manager.getAllStats();
     walletGroupsData = {
@@ -2716,7 +2718,6 @@ async function writeBotStatsToFile(force = false): Promise<void> {
       })),
     };
   } else if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    // Legacy single pool format
     const stats = getWalletPoolStats();
     walletPoolData = {
       available: stats.available,
@@ -2731,110 +2732,27 @@ async function writeBotStatsToFile(force = false): Promise<void> {
     };
   }
 
-  // Count total bids being tracked
-  let totalBidsTracked = 0;
+  let bidsTracked = 0;
   for (const collectionSymbol in bidHistory) {
-    totalBidsTracked += Object.keys(bidHistory[collectionSymbol]?.ourBids || {}).length;
+    bidsTracked += Object.keys(bidHistory[collectionSymbol]?.ourBids || {}).length;
   }
 
-  const stats = {
-    timestamp: Date.now(),
-    runtime: {
-      startTime: BOT_START_TIME,
-      uptimeSeconds: Math.floor((Date.now() - BOT_START_TIME) / 1000),
-    },
-    bidStats: {
-      bidsPlaced: bidStatsData.bidsPlaced,
-      bidsSkipped: bidStatsData.bidsSkipped,
-      bidsCancelled: bidStatsData.bidsCancelled,
-      bidsAdjusted: bidStatsData.bidsAdjusted,
-      errors: bidStatsData.errors,
-    },
-    pacer: {
-      bidsUsed: pacerStatus.bidsUsed,
-      bidsRemaining: pacerStatus.bidsRemaining,
-      windowResetIn: pacerStatus.windowResetIn,
-      totalBidsPlaced: pacerStatus.totalBidsPlaced,
-      totalWaits: pacerStatus.totalWaits,
-      bidsPerMinute: getBidPacer().getLimit(),
-    },
+  return {
+    bidStats: bidStatsData,
+    pacer: pacerStatus,
+    pacerLimit: getBidPacer().getLimit(),
     walletPool: walletPoolData,
     walletGroups: walletGroupsData,
-    queue: {
-      size: eventManager.queue.length,
-      pending: queue.size,
-      active: queue.pending,
-    },
-    memory: {
-      heapUsedMB: Math.round(heapUsedMB * 100) / 100,
-      heapTotalMB: Math.round(heapTotalMB * 100) / 100,
-      percentage: Math.round((heapUsedMB / heapTotalMB) * 100),
-    },
-    websocket: {
-      connected: ws && ws.readyState === WebSocket.OPEN,
-    },
-    bidsTracked: totalBidsTracked,
-  };
-
-  // Build snapshot for dirty check (excludes always-changing fields)
-  const walletAvailable = walletGroupsData
-    ? walletGroupsData.groups.reduce((sum: number, g: { available: number }) => sum + g.available, 0)
-    : walletPoolData ? walletPoolData.available : null;
-  const snapshot: BotStatsSnapshot = {
-    bidsPlaced: bidStatsData.bidsPlaced,
-    bidsSkipped: bidStatsData.bidsSkipped,
-    bidsCancelled: bidStatsData.bidsCancelled,
-    bidsAdjusted: bidStatsData.bidsAdjusted,
-    errors: bidStatsData.errors,
-    queueSize: eventManager.queue.length,
+    eventQueueLength: eventManager.queue.length,
+    queueSize: queue.size,
+    queuePending: queue.pending,
     wsConnected: !!(ws && ws.readyState === WebSocket.OPEN),
-    bidsTracked: totalBidsTracked,
-    walletPoolAvailable: walletAvailable,
-    heapUsedMB: Math.round(heapUsedMB * 100) / 100,
+    botStartTime: BOT_START_TIME,
+    bidsTracked,
+    bidHistory,
+    collections,
   };
-
-  // Skip write if nothing changed and not stale
-  const timeSinceLastWrite = Date.now() - lastStatsWriteTime;
-  if (!force && !botStatsDirtyTracker.isDirty(snapshot) && timeSinceLastWrite < STATS_MAX_STALENESS_MS) {
-    return;
-  }
-
-  const jsonString = JSON.stringify(stats, null, 2);
-  const filePath = path.join(DATA_DIR, 'botStats.json');
-  const tempPath = path.join(DATA_DIR, 'botStats.json.tmp');
-
-  // Use mutex to prevent concurrent file writes
-  const release = await fileWriteMutex.acquire();
-  try {
-    // Atomic write: write to temp file first, then rename
-    await fs.promises.writeFile(tempPath, jsonString, 'utf-8');
-    await fs.promises.rename(tempPath, filePath);
-    botStatsDirtyTracker.markClean(snapshot);
-    lastStatsWriteTime = Date.now();
-  } catch (err) {
-    Logger.error('[PERSIST] Error writing botStats to file', err);
-  } finally {
-    release();
-  }
 }
-
-// Write bot stats periodically
-const botStatsIntervalId = setInterval(() => {
-  try {
-    writeBotStatsToFile();
-  } catch (err) {
-    Logger.error('[INTERVAL] writeBotStatsToFile failed:', err);
-  }
-}, BOT_CONSTANTS.BOT_STATS_WRITE_INTERVAL_MS);
-
-// Initial write after startup (forced - always write on startup)
-setTimeout(() => {
-  try {
-    writeBotStatsToFile(true);
-  } catch (err) {
-    Logger.error('[TIMEOUT] Initial writeBotStatsToFile failed:', err);
-  }
-}, BOT_CONSTANTS.INITIAL_STATS_DELAY_MS);
 
 // Write bid history periodically for crash recovery
 const bidHistoryIntervalId = setInterval(() => {
@@ -3130,7 +3048,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   forceExitTimer.unref(); // Don't keep process alive just for this timer
 
   // M6: Wrap each clearInterval in try-catch so one failure doesn't skip the rest
-  const intervals = [botStatsIntervalId, bidHistoryIntervalId, cleanupBidHistoryIntervalId,
+  const intervals = [bidHistoryIntervalId, cleanupBidHistoryIntervalId,
     cleanupRecentBidsIntervalId, cleanupPurchaseEventsIntervalId, memoryMonitorIntervalId,
     pacerProgressIntervalId, bidStatsIntervalId, cleanupStaleLocksIntervalId];
   for (const id of intervals) {
@@ -3147,9 +3065,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
     } catch {}
   }
 
+  // Stop HTTP stats server
+  try { await stopStatsServer(); } catch {}
+
   Logger.printStats();
   bidHistoryDirtyTracker.cancelPendingDebounce();
-  await writeBotStatsToFile(true);
   await writeBidHistoryToFile(true);
   process.exit(0);
 }
