@@ -13,6 +13,7 @@ import {
   promptConfirm,
 } from '../../utils/prompts';
 import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
+import { getErrorMessage } from '../../../utils/errorUtils';
 
 export async function exportWalletsCommand(): Promise<void> {
   showSectionHeader('EXPORT/BACKUP WALLETS');
@@ -41,7 +42,7 @@ export async function exportWalletsCommand(): Promise<void> {
   console.log('');
 
   // Get export path
-  const defaultPath = path.join(process.cwd(), 'wallets-backup.enc');
+  const defaultPath = path.join(process.cwd(), 'wallets-backup.json');
   const exportPath = await promptText('Export file path (empty to cancel):', defaultPath);
 
   if (!exportPath.trim()) {
@@ -57,24 +58,31 @@ export async function exportWalletsCommand(): Promise<void> {
     }
   }
 
-  // Get encryption password
-  const password = await promptPassword('Enter encryption password:');
+  // Ask whether to encrypt the backup
+  const encrypt = await promptConfirm('Encrypt the backup file?', false);
 
-  if (password.length < 8) {
-    showError('Password must be at least 8 characters');
-    return;
-  }
+  let backupPassword: string | undefined;
+  if (encrypt) {
+    const password = await promptPassword('Enter encryption password:');
 
-  const confirmPassword = await promptPassword('Confirm password:');
+    if (password.length < 8) {
+      showError('Password must be at least 8 characters');
+      return;
+    }
 
-  if (password !== confirmPassword) {
-    showError('Passwords do not match');
-    return;
+    const confirmPassword = await promptPassword('Confirm password:');
+
+    if (password !== confirmPassword) {
+      showError('Passwords do not match');
+      return;
+    }
+
+    backupPassword = password;
   }
 
   // Export
   try {
-    const success = exportWallets(exportPath, password);
+    const success = exportWallets(exportPath, backupPassword);
 
     if (success) {
       showSuccess(`Wallets exported to: ${exportPath}`);
@@ -84,12 +92,15 @@ export async function exportWalletsCommand(): Promise<void> {
       if (walletsData && (walletsData.mnemonic || walletsData.encryptedMnemonic)) {
         console.log('  • Master mnemonic (for wallet recovery)');
       }
+      if (encrypt) {
+        console.log('  • Encrypted with AES-256-GCM');
+      }
       console.log('');
-      console.log('Keep this backup file safe and remember your password!');
+      console.log(encrypt ? 'Keep this backup file safe and remember your password!' : 'Keep this backup file safe!');
     } else {
       showError('Failed to export wallets');
     }
-  } catch (error: any) {
-    showError(`Export failed: ${error.message}`);
+  } catch (error: unknown) {
+    showError(`Export failed: ${getErrorMessage(error)}`);
   }
 }

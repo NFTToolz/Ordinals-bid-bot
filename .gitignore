@@ -175,8 +175,9 @@ wallets.json
 .bot.pid
 bot.log
 
-# Wallet backups (encrypted)
+# Wallet backups
 wallets-backup.enc
+wallets-backup.json
 *.enc
 
 # Runtime data

@@ -13,6 +13,7 @@ import {
   showError,
   showWarning,
   showTable,
+  showInfo,
 } from '../../utils/display';
 import {
   promptText,
@@ -42,22 +43,33 @@ export async function importWalletsCommand(): Promise<void> {
     return;
   }
 
-  // Get decryption password
-  const password = await promptPassword('Enter decryption password:');
+  // Try plaintext JSON first, fall back to encrypted backup
+  let imported: WalletsFile | null = null;
 
-  // Import
-  console.log('');
-  console.log('Decrypting backup...');
-
-  const imported = importWalletsFromBackup(importPath, password);
-
-  if (!imported) {
-    showError('Failed to decrypt backup. Check your password.');
-    return;
+  try {
+    const raw = fs.readFileSync(importPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && (parsed.wallets || parsed.groups)) {
+      imported = parsed;
+      showInfo('Loaded plaintext backup.');
+    }
+  } catch {
+    // Not valid JSON — try encrypted format
   }
 
-  console.log('');
-  showSuccess('Backup decrypted successfully!');
+  if (!imported) {
+    const password = await promptPassword('Enter decryption password:');
+    console.log('');
+    console.log('Decrypting backup...');
+    imported = importWalletsFromBackup(importPath, password);
+
+    if (!imported) {
+      showError('Failed to decrypt backup. Check your password.');
+      return;
+    }
+
+    showSuccess('Backup decrypted successfully!');
+  }
   console.log('');
 
   // Show what's in the backup

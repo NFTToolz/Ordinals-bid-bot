@@ -493,17 +493,16 @@ export function getNextWalletIndex(): number {
 }
 
 /**
- * Export wallets to encrypted backup file
+ * Export wallets to backup file (plaintext JSON or encrypted)
  */
-export function exportWallets(
-  filePath: string,
-  password: string
-): boolean {
+export function exportWallets(filePath: string, password?: string): boolean {
   const existing = loadWallets();
   if (!existing) return false;
 
-  const encrypted = encryptData(JSON.stringify(existing), password);
-  fs.writeFileSync(filePath, encrypted, { mode: 0o600 });
+  const content = password
+    ? encryptData(JSON.stringify(existing), password)
+    : JSON.stringify(existing, null, 2);
+  fs.writeFileSync(filePath, content, { mode: 0o600 });
   return true;
 }
 

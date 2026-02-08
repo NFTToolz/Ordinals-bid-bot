@@ -498,7 +498,24 @@ describe('WalletGenerator', () => {
   });
 
   describe('exportWallets', () => {
-    it('should encrypt and write to file', () => {
+    it('should write plaintext JSON when no password given', () => {
+      const existing: WalletsFile = {
+        wallets: [{ label: 'wallet-1', wif: 'wif1', receiveAddress: 'bc1p1' }],
+      };
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(existing));
+
+      const result = exportWallets('/backup.json');
+
+      expect(result).toBe(true);
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/backup.json',
+        JSON.stringify(existing, null, 2),
+        { mode: 0o600 }
+      );
+    });
+
+    it('should write encrypted data when password given', () => {
       const existing: WalletsFile = {
         wallets: [{ label: 'wallet-1', wif: 'wif1', receiveAddress: 'bc1p1' }],
       };
@@ -508,13 +525,16 @@ describe('WalletGenerator', () => {
       const result = exportWallets('/backup.enc', 'password123');
 
       expect(result).toBe(true);
+      const writtenContent = vi.mocked(fs.writeFileSync).mock.calls[0][1] as string;
+      // Encrypted content should not be valid JSON of the original data
+      expect(writtenContent).not.toBe(JSON.stringify(existing, null, 2));
       expect(fs.writeFileSync).toHaveBeenCalledWith('/backup.enc', expect.any(String), { mode: 0o600 });
     });
 
     it('should return false when no wallets exist', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
-      const result = exportWallets('/backup.enc', 'password123');
+      const result = exportWallets('/backup.json');
       expect(result).toBe(false);
     });
   });
