@@ -46,6 +46,7 @@ import {
   isOurReceiveAddress,
   getWalletCredentialsByPaymentAddress,
 } from "./utils/walletHelpers";
+import { BotStatsDirtyTracker, BidHistoryDirtyTracker, BotStatsSnapshot } from "./utils/fileWriteTracker";
 import {
   // Bid Calculation
   calculateBidPrice,
@@ -406,6 +407,7 @@ async function incrementQuantity(collectionSymbol: string): Promise<number> {
       // Perform the atomic increment
       if (bidHistory[collectionSymbol]) {
         bidHistory[collectionSymbol].quantity += 1;
+        bidHistoryDirtyTracker.markDirty();
         return bidHistory[collectionSymbol].quantity;
       }
       return 0;
@@ -607,6 +609,7 @@ function initBidHistory(collectionSymbol: string, offerType: 'ITEM' | 'COLLECTIO
       lastSeenActivity: null,
       quantity: 0
     };
+    bidHistoryDirtyTracker.markDirty();
   }
 }
 
@@ -648,6 +651,7 @@ function safeSetOurBid(
     return false;
   }
   bidHistory[collectionSymbol].ourBids[tokenId] = bid;
+  bidHistoryDirtyTracker.markDirty();
   return true;
 }
 
@@ -686,6 +690,7 @@ function loadBidHistoryFromFile(): void {
       }
 
       if (restoredCount > 0) {
+        bidHistoryDirtyTracker.markDirty();
         Logger.info(`[STARTUP] Restored quantity values for ${restoredCount} collection(s)`);
       }
     }
@@ -1262,9 +1267,9 @@ class EventManager {
           try {
             const newQuantity = await incrementQuantity(collectionSymbol);
             Logger.info(`[WS] ${collectionSymbol}: Purchase confirmed for ${tokenId.slice(-8)}, quantity now ${newQuantity}`);
-            // Immediately persist quantity to prevent loss on crash
-            // This is critical because quantity controls purchase limits
-            await writeBidHistoryToFile();
+            // Debounced persist: coalesces rapid purchase events into a single write
+            // (shutdown handler will force-flush any pending write)
+            bidHistoryDirtyTracker.scheduleDebouncedWrite(() => writeBidHistoryToFile(true));
           } catch (quantityError: unknown) {
             Logger.error(`[WS] ${collectionSymbol}: Failed to increment quantity for ${tokenId.slice(-8)}`, getErrorMessage(quantityError));
             // Continue processing - purchase event is marked, but quantity wasn't updated
@@ -1272,6 +1277,8 @@ class EventManager {
           }
         }
       }
+      // Mark bidHistory dirty after all WS-triggered mutations
+      bidHistoryDirtyTracker.markDirty();
     } catch (error: unknown) {
       Logger.error(`[WS] handleIncomingBid error`, getErrorMessage(error));
     }
@@ -2111,6 +2118,8 @@ class EventManager {
       });
 
       restartState.set(item.collectionSymbol, false);
+      // Mark bidHistory dirty after all scheduled-loop mutations
+      bidHistoryDirtyTracker.markDirty();
       const scheduleDuration = (Date.now() - startTime) / 1000;
       Logger.scheduleComplete(item.collectionSymbol, scheduleDuration);
     } catch (error) {
@@ -2556,7 +2565,14 @@ function delay(ms: number) {
 // Mutex to prevent concurrent file writes which can corrupt state files
 const fileWriteMutex = new Mutex();
 
-async function writeBidHistoryToFile(): Promise<void> {
+// Dirty-flag trackers to reduce disk I/O
+const botStatsDirtyTracker = new BotStatsDirtyTracker(5);
+const bidHistoryDirtyTracker = new BidHistoryDirtyTracker(15_000);
+let lastStatsWriteTime = 0;
+const STATS_MAX_STALENESS_MS = 90_000; // Force write if last write >90s ago
+
+async function writeBidHistoryToFile(force = false): Promise<void> {
+  if (!force && !bidHistoryDirtyTracker.isDirty()) return;
   const release = await fileWriteMutex.acquire();
   try {
     const jsonString = JSON.stringify(bidHistory, null, 2);
@@ -2566,6 +2582,7 @@ async function writeBidHistoryToFile(): Promise<void> {
     // Atomic write: write to temp file first, then rename
     await fs.promises.writeFile(tempPath, jsonString, 'utf-8');
     await fs.promises.rename(tempPath, filePath);
+    bidHistoryDirtyTracker.markClean();
   } catch (err) {
     Logger.error('[PERSIST] Error writing bidHistory to file', err);
   } finally {
@@ -2574,7 +2591,7 @@ async function writeBidHistoryToFile(): Promise<void> {
 }
 
 // Write comprehensive bot stats for manage CLI to display
-async function writeBotStatsToFile(): Promise<void> {
+async function writeBotStatsToFile(force = false): Promise<void> {
   const memUsage = process.memoryUsage();
   const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
   const heapTotalMB = memUsage.heapTotal / 1024 / 1024;
@@ -2670,6 +2687,29 @@ async function writeBotStatsToFile(): Promise<void> {
     bidsTracked: totalBidsTracked,
   };
 
+  // Build snapshot for dirty check (excludes always-changing fields)
+  const walletAvailable = walletGroupsData
+    ? walletGroupsData.groups.reduce((sum: number, g: { available: number }) => sum + g.available, 0)
+    : walletPoolData ? walletPoolData.available : null;
+  const snapshot: BotStatsSnapshot = {
+    bidsPlaced: bidStatsData.bidsPlaced,
+    bidsSkipped: bidStatsData.bidsSkipped,
+    bidsCancelled: bidStatsData.bidsCancelled,
+    bidsAdjusted: bidStatsData.bidsAdjusted,
+    errors: bidStatsData.errors,
+    queueSize: eventManager.queue.length,
+    wsConnected: !!(ws && ws.readyState === WebSocket.OPEN),
+    bidsTracked: totalBidsTracked,
+    walletPoolAvailable: walletAvailable,
+    heapUsedMB: Math.round(heapUsedMB * 100) / 100,
+  };
+
+  // Skip write if nothing changed and not stale
+  const timeSinceLastWrite = Date.now() - lastStatsWriteTime;
+  if (!force && !botStatsDirtyTracker.isDirty(snapshot) && timeSinceLastWrite < STATS_MAX_STALENESS_MS) {
+    return;
+  }
+
   const jsonString = JSON.stringify(stats, null, 2);
   const filePath = path.join(DATA_DIR, 'botStats.json');
   const tempPath = path.join(DATA_DIR, 'botStats.json.tmp');
@@ -2680,6 +2720,8 @@ async function writeBotStatsToFile(): Promise<void> {
     // Atomic write: write to temp file first, then rename
     await fs.promises.writeFile(tempPath, jsonString, 'utf-8');
     await fs.promises.rename(tempPath, filePath);
+    botStatsDirtyTracker.markClean(snapshot);
+    lastStatsWriteTime = Date.now();
   } catch (err) {
     Logger.error('[PERSIST] Error writing botStats to file', err);
   } finally {
@@ -2697,10 +2739,10 @@ const botStatsIntervalId = setInterval(() => {
   }
 }, BOT_STATS_WRITE_INTERVAL_MS);
 
-// Initial write after 5 seconds
+// Initial write after 5 seconds (forced - always write on startup)
 setTimeout(() => {
   try {
-    writeBotStatsToFile();
+    writeBotStatsToFile(true);
   } catch (err) {
     Logger.error('[TIMEOUT] Initial writeBotStatsToFile failed:', err);
   }
@@ -2816,6 +2858,7 @@ function cleanupBidHistory() {
   }
 
     if (totalCleaned > 0) {
+      bidHistoryDirtyTracker.markDirty();
       Logger.memory.cleanup(totalCleaned);
     }
   } finally {
@@ -3025,8 +3068,9 @@ async function gracefulShutdown(signal: string): Promise<void> {
   }
 
   Logger.printStats();
-  await writeBotStatsToFile();
-  await writeBidHistoryToFile();
+  bidHistoryDirtyTracker.cancelPendingDebounce();
+  await writeBotStatsToFile(true);
+  await writeBidHistoryToFile(true);
   process.exit(0);
 }
 
@@ -3037,7 +3081,8 @@ process.on('SIGTERM', () => { gracefulShutdown('SIGTERM'); });
 process.on('uncaughtException', async (error) => {
   Logger.error('[CRITICAL] Uncaught exception:', error);
   Logger.printStats();
-  await writeBidHistoryToFile();
+  bidHistoryDirtyTracker.cancelPendingDebounce();
+  await writeBidHistoryToFile(true);
   process.exit(1);
 });
 
