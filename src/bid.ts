@@ -1264,7 +1264,8 @@ class EventManager {
                     cancelPublicKey = creds.publicKey;
                     cancelPrivateKey = creds.privateKey;
                   } else {
-                    Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
+                    Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, skipping cancel`);
+                    return;
                   }
                 }
                 const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -2007,7 +2008,8 @@ class EventManager {
                     cancelPublicKey = creds.publicKey;
                     cancelPrivateKey = creds.privateKey;
                   } else {
-                    Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
+                    Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, skipping cancel`);
+                    return;
                   }
                 }
                 const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -2063,7 +2065,8 @@ class EventManager {
                         cancelPublicKey = creds.publicKey;
                         cancelPrivateKey = creds.privateKey;
                       } else {
-                        Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
+                        Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, skipping cancel`);
+                        return;
                       }
                     }
                     const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -2110,7 +2113,8 @@ class EventManager {
                         cancelPublicKey = creds.publicKey;
                         cancelPrivateKey = creds.privateKey;
                       } else {
-                        Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
+                        Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, skipping cancel`);
+                        return;
                       }
                     }
                     const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -3353,7 +3357,8 @@ async function placeBid(
           if (creds) {
             cancelKey = creds.privateKey;
           } else {
-            Logger.warning(`[CANCEL] Cannot find credentials for wallet ${item.buyerPaymentAddress}, cancel may fail`);
+            Logger.warning(`[CANCEL] Cannot find credentials for wallet ${item.buyerPaymentAddress}, skipping cancel`);
+            return;
           }
         }
         await cancelBid(item, cancelKey)

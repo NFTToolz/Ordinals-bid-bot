@@ -7,7 +7,6 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
 import { config } from 'dotenv';
-import fs from 'fs';
 import {
   isWalletPoolInitialized,
   getWalletPool,
@@ -24,7 +23,6 @@ const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
-const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 const network = bitcoin.networks.bitcoin;
 
 /**
@@ -227,7 +225,7 @@ export function getAllOurReceiveAddresses(): Set<string> {
 /**
  * Get all payment addresses with their associated wallet info for cancellation.
  * This returns all addresses along with their private keys for signing cancellations.
- * Reads directly from wallet config file to get all wallet credentials.
+ * Sources data from the initialized WalletGroupManager/WalletPool (already decrypted at startup).
  *
  * @returns Array of wallet info with payment address, receive address, and private key
  */
@@ -273,65 +271,35 @@ export function getAllWalletCredentialsForCancellation(): Array<{
     }
   }
 
-  // Add wallets from config file if wallet rotation is enabled
-  if (ENABLE_WALLET_ROTATION && fs.existsSync(WALLET_CONFIG_PATH)) {
-    try {
-      const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
+  // Add wallets from initialized pool/manager (already decrypted at startup)
+  if (ENABLE_WALLET_ROTATION) {
+    const addWalletFromState = (addr: string, getState: () => { config: { wif: string; receiveAddress: string; label: string }; publicKey: string } | null) => {
+      if (seenPaymentAddresses.has(addr.toLowerCase())) return;
+      const state = getState();
+      if (!state) return;
+      wallets.push({
+        paymentAddress: addr,
+        receiveAddress: state.config.receiveAddress,
+        privateKey: state.config.wif,
+        publicKey: state.publicKey,
+        label: state.config.label,
+      });
+      seenPaymentAddresses.add(addr.toLowerCase());
+    };
 
-      // Handle groups format
-      if (walletConfig.groups && typeof walletConfig.groups === 'object') {
-        for (const groupName of Object.keys(walletConfig.groups)) {
-          const group = walletConfig.groups[groupName];
-          for (const wallet of group.wallets || []) {
-            try {
-              const keyPair = ECPair.fromWIF(wallet.wif, network);
-              const paymentAddress = bitcoin.payments.p2wpkh({
-                pubkey: keyPair.publicKey,
-                network: network,
-              }).address as string;
-
-              if (!seenPaymentAddresses.has(paymentAddress.toLowerCase())) {
-                wallets.push({
-                  paymentAddress,
-                  receiveAddress: wallet.receiveAddress,
-                  privateKey: wallet.wif,
-                  publicKey: keyPair.publicKey.toString('hex'),
-                  label: wallet.label,
-                });
-                seenPaymentAddresses.add(paymentAddress.toLowerCase());
-              }
-            } catch {
-              // Invalid wallet WIF, skip
-            }
-          }
-        }
-      } else if (walletConfig.wallets && Array.isArray(walletConfig.wallets)) {
-        // Legacy flat format
-        for (const wallet of walletConfig.wallets) {
-          try {
-            const keyPair = ECPair.fromWIF(wallet.wif, network);
-            const paymentAddress = bitcoin.payments.p2wpkh({
-              pubkey: keyPair.publicKey,
-              network: network,
-            }).address as string;
-
-            if (!seenPaymentAddresses.has(paymentAddress.toLowerCase())) {
-              wallets.push({
-                paymentAddress,
-                receiveAddress: wallet.receiveAddress,
-                privateKey: wallet.wif,
-                publicKey: keyPair.publicKey.toString('hex'),
-                label: wallet.label,
-              });
-              seenPaymentAddresses.add(paymentAddress.toLowerCase());
-            }
-          } catch {
-            // Invalid wallet WIF, skip
-          }
-        }
+    if (isWalletGroupManagerInitialized()) {
+      const manager = getWalletGroupManager();
+      for (const addr of manager.getAllPaymentAddresses()) {
+        addWalletFromState(addr, () => {
+          const result = manager.getWalletByPaymentAddress(addr);
+          return result ? result.wallet : null;
+        });
       }
-    } catch {
-      // Failed to read wallet config, continue with primary wallet only
+    } else if (isWalletPoolInitialized()) {
+      const pool = getWalletPool();
+      for (const addr of pool.getAllPaymentAddresses()) {
+        addWalletFromState(addr, () => pool.getWalletByPaymentAddress(addr));
+      }
     }
   }
 

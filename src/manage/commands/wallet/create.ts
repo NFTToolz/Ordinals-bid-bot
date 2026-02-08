@@ -39,6 +39,7 @@ export async function createWallets(): Promise<void> {
 
   // Check existing wallets
   const existing = loadWallets();
+  const existingMnemonic = existing?.mnemonic || '';
   if (existing) {
     let existingCount = 0;
     if (isGroupsFormat(existing)) {
@@ -65,13 +66,19 @@ export async function createWallets(): Promise<void> {
   }
 
   // Mnemonic source
-  const mnemonicSource = await promptSelect<'generate' | 'existing' | '__cancel__'>(
+  const mnemonicChoices: { name: string; value: 'saved' | 'generate' | 'existing' | '__cancel__' }[] = [];
+  if (existingMnemonic) {
+    mnemonicChoices.push({ name: 'Reuse saved mnemonic', value: 'saved' });
+  }
+  mnemonicChoices.push(
+    { name: 'Generate new mnemonic', value: 'generate' },
+    { name: 'Enter mnemonic manually', value: 'existing' },
+    { name: '← Back', value: '__cancel__' },
+  );
+
+  const mnemonicSource = await promptSelect<'saved' | 'generate' | 'existing' | '__cancel__'>(
     'Use existing mnemonic or generate new?',
-    [
-      { name: 'Generate new mnemonic', value: 'generate' },
-      { name: 'Use existing mnemonic', value: 'existing' },
-      { name: '← Back', value: '__cancel__' },
-    ]
+    mnemonicChoices
   );
 
   if (mnemonicSource === '__cancel__') {
@@ -80,7 +87,9 @@ export async function createWallets(): Promise<void> {
 
   let mnemonic: string;
 
-  if (mnemonicSource === 'generate') {
+  if (mnemonicSource === 'saved') {
+    mnemonic = existingMnemonic;
+  } else if (mnemonicSource === 'generate') {
     mnemonic = generateMnemonic();
 
     console.log('');
@@ -143,6 +152,26 @@ export async function createWallets(): Promise<void> {
       }
     }
   }
+
+  // Relabel wallets sequentially based on prefix
+  // (derivation index may differ from label number — that's fine)
+  const existingWallets: { label: string }[] = existing
+    ? isGroupsFormat(existing)
+      ? getAllWalletsFromGroups()
+      : existing.wallets || []
+    : [];
+  const prefixPattern = new RegExp(`^${labelPrefix}-(\\d+)$`);
+  let maxPrefixNum = 0;
+  existingWallets.forEach(w => {
+    const m = w.label.match(prefixPattern);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > maxPrefixNum) maxPrefixNum = n;
+    }
+  });
+  wallets.forEach((w, i) => {
+    w.label = `${labelPrefix}-${maxPrefixNum + i + 1}`;
+  });
 
   // Display wallets
   console.log('');

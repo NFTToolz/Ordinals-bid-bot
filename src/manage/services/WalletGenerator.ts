@@ -423,21 +423,40 @@ export function addWalletsToConfig(
   encrypt: boolean = false,
   password?: string
 ): void {
-  let existing = loadWallets() || {
-    wallets: [],
-    bidsPerMinute: 5,
-  };
+  const raw = loadWallets();
 
-  // Add new wallets
   const walletConfigs: WalletConfig[] = newWallets.map(w => ({
     label: w.label,
     wif: w.wif,
     receiveAddress: w.receiveAddress,
   }));
 
-  existing.wallets = [...existing.wallets, ...walletConfigs];
+  // Groups format: add to default/first group
+  if (raw && isGroupsFormat(raw)) {
+    const data = loadWalletGroups()!;
+    const targetGroup = data.defaultGroup || Object.keys(data.groups)[0];
+    if (targetGroup && data.groups[targetGroup]) {
+      data.groups[targetGroup].wallets.push(...walletConfigs);
+    }
 
-  // Store mnemonic if provided
+    if (mnemonic) {
+      if (encrypt && password) {
+        data.encryptedMnemonic = encryptData(mnemonic, password);
+        delete data.mnemonic;
+      } else {
+        data.mnemonic = mnemonic;
+        delete data.encryptedMnemonic;
+      }
+    }
+
+    saveWalletGroups(data, password);
+    return;
+  }
+
+  // Flat format
+  let existing = raw || { wallets: [], bidsPerMinute: 5 };
+  existing.wallets = [...(existing.wallets || []), ...walletConfigs];
+
   if (mnemonic) {
     if (encrypt && password) {
       existing.encryptedMnemonic = encryptData(mnemonic, password);
@@ -474,22 +493,26 @@ export function removeWalletFromConfig(label: string): boolean {
  */
 export function getNextWalletIndex(): number {
   const existing = loadWallets();
-  if (!existing || existing.wallets.length === 0) {
-    return 0;
+  if (!existing) return 0;
+
+  let allWallets: { label: string }[];
+  if (isGroupsFormat(existing)) {
+    allWallets = getAllWalletsFromGroups();
+  } else {
+    if (!existing.wallets || existing.wallets.length === 0) return 0;
+    allWallets = existing.wallets;
   }
 
-  // Find the highest index in existing wallet labels
+  if (allWallets.length === 0) return 0;
+
   let maxIndex = 0;
-  existing.wallets.forEach(w => {
+  allWallets.forEach(w => {
     const match = w.label.match(/-(\d+)$/);
     if (match) {
       const index = parseInt(match[1], 10);
-      if (index > maxIndex) {
-        maxIndex = index;
-      }
+      if (index > maxIndex) maxIndex = index;
     }
   });
-
   return maxIndex;
 }
 
