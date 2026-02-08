@@ -177,6 +177,7 @@ export interface EnhancedStatusData {
   totalBalance: number;
   activeOfferCount: number;
   pendingTxCount: number;
+  nftsWon: number;
   dataFreshness?: 'fresh' | 'stale' | 'unavailable';
   lastRefreshAgoSec?: number;
 }
@@ -201,7 +202,7 @@ export function showEnhancedStatusBar(status: EnhancedStatusData): void {
   } else if (status.dataFreshness === 'unavailable') {
     freshnessTag = chalk.red(' [offline]');
   }
-  const line2 = `  Balance: ${balanceStr}    Offers: ${status.activeOfferCount}    Pending: ${status.pendingTxCount}${freshnessTag}`;
+  const line2 = `  Balance: ${balanceStr}    Offers: ${status.activeOfferCount}    Pending: ${status.pendingTxCount}    Won: ${status.nftsWon}${freshnessTag}`;
   const padding2 = width - stripAnsi(line2).length - 2;
 
   console.log(chalk.cyan(BOX.vertical) + line1 + ' '.repeat(Math.max(0, padding1)) + chalk.cyan(BOX.vertical));

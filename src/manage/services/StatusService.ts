@@ -3,9 +3,9 @@ import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
 import { getAllBalances, calculateTotalBalance, getAllUTXOs } from './BalanceService';
 import { loadWallets, isGroupsFormat, getAllWalletsFromGroups, getWalletFromWIF } from './WalletGenerator';
 import { loadCollections } from './CollectionService';
-import { isRunning } from './BotProcessManager';
+import { isRunning, fetchBotRuntimeStatsFromApi } from './BotProcessManager';
 import { getUserOffers } from '../../functions/Offer';
-import { getFundingWIF, hasFundingWIF } from '../../utils/fundingWallet';
+import { getFundingWIF, hasFundingWIF, hasReceiveAddress, getReceiveAddress } from '../../utils/fundingWallet';
 import Logger from '../../utils/logger';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
@@ -19,6 +19,7 @@ export interface EnhancedStatus {
   totalBalance: number;
   activeOfferCount: number;
   pendingTxCount: number;
+  nftsWon: number;
   dataFreshness: 'fresh' | 'stale' | 'unavailable';
   lastRefreshAgoSec: number;
 }
@@ -37,6 +38,7 @@ const cache: {
   totalBalance?: CacheEntry<number>;
   activeOfferCount?: CacheEntry<number>;
   pendingTxCount?: CacheEntry<number>;
+  nftsWon?: CacheEntry<number>;
   walletCount?: CacheEntry<number>;
   collectionCount?: CacheEntry<number>;
 } = {};
@@ -145,6 +147,43 @@ function getAllWalletAddresses(): string[] {
 }
 
 /**
+ * Get all wallet taproot receive addresses (bc1p...) for offer lookups.
+ * getUserOffers requires taproot receive addresses, not payment addresses.
+ */
+function getAllReceiveAddresses(): string[] {
+  const addresses: string[] = [];
+
+  // Main wallet receive address
+  if (hasReceiveAddress()) {
+    try {
+      addresses.push(getReceiveAddress());
+    } catch {
+      // Skip if not configured
+    }
+  }
+
+  // Config wallets already have receiveAddress field
+  const walletsData = loadWallets();
+  if (walletsData) {
+    let configWallets: Array<{ label: string; wif: string; receiveAddress: string }> = [];
+
+    if (isGroupsFormat(walletsData)) {
+      configWallets = getAllWalletsFromGroups();
+    } else if (walletsData.wallets?.length > 0) {
+      configWallets = walletsData.wallets;
+    }
+
+    for (const w of configWallets) {
+      if (w.receiveAddress) {
+        addresses.push(w.receiveAddress);
+      }
+    }
+  }
+
+  return [...new Set(addresses)]; // deduplicate
+}
+
+/**
  * Get cached wallet count (recomputed on cache miss)
  */
 function getCachedWalletCount(): number {
@@ -207,7 +246,7 @@ export async function getActiveOfferCount(): Promise<number> {
     return cache.activeOfferCount.data;
   }
 
-  const addresses = getAllWalletAddresses();
+  const addresses = getAllReceiveAddresses();
   if (addresses.length === 0) {
     return 0;
   }
@@ -312,6 +351,9 @@ export async function getEnhancedStatus(): Promise<EnhancedStatus> {
   // Use cached offer count if available, don't block on it
   activeOfferCount = cache.activeOfferCount?.data || 0;
 
+  // Use cached NFTs won count
+  const nftsWon = cache.nftsWon?.data || 0;
+
   // Compute freshness
   const now = Date.now();
   const agoMs = lastRefreshTime > 0 ? now - lastRefreshTime : -1;
@@ -327,6 +369,7 @@ export async function getEnhancedStatus(): Promise<EnhancedStatus> {
     totalBalance,
     activeOfferCount,
     pendingTxCount,
+    nftsWon,
     dataFreshness,
     lastRefreshAgoSec,
   };
@@ -363,6 +406,7 @@ export function getQuickStatus(): EnhancedStatus {
     totalBalance: cache.totalBalance?.data || 0,
     activeOfferCount: cache.activeOfferCount?.data || 0,
     pendingTxCount: cache.pendingTxCount?.data || 0,
+    nftsWon: cache.nftsWon?.data || 0,
     dataFreshness,
     lastRefreshAgoSec,
   };
@@ -376,6 +420,7 @@ export function clearStatusCache(): void {
   delete cache.totalBalance;
   delete cache.activeOfferCount;
   delete cache.pendingTxCount;
+  delete cache.nftsWon;
   delete cache.walletCount;
   delete cache.collectionCount;
   lastRefreshTime = 0;
@@ -416,10 +461,26 @@ export async function refreshAllStatusAsync(): Promise<void> {
     getTotalBalance(),
     getPendingTxCount(),
     getActiveOfferCount(),
+    fetchBotRuntimeStatsFromApi(),
   ]);
 
-  const allFailed = results.every(r => r.status === 'rejected');
-  const hasSuccess = results.some(r => r.status === 'fulfilled');
+  // NFTs won from bot API (4th result)
+  const statsResult = results[3];
+  if (statsResult.status === 'fulfilled' && statsResult.value) {
+    const runtimeStats = statsResult.value as Awaited<ReturnType<typeof fetchBotRuntimeStatsFromApi>>;
+    if (runtimeStats?.bidHistory) {
+      let totalWon = 0;
+      for (const key in runtimeStats.bidHistory) {
+        totalWon += runtimeStats.bidHistory[key].quantity || 0;
+      }
+      cache.nftsWon = { data: totalWon, timestamp: Date.now() };
+    }
+  }
+
+  // Only count the first 3 results for circuit breaker (bot API is local, not external)
+  const externalResults = results.slice(0, 3);
+  const allFailed = externalResults.every(r => r.status === 'rejected');
+  const hasSuccess = externalResults.some(r => r.status === 'fulfilled');
 
   lastRefreshTime = Date.now();
   lastRefreshSuccess = hasSuccess;

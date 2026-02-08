@@ -394,7 +394,12 @@ export function getStats(): BotStats {
  */
 export function getBotApiUrl(): string | null {
   const pidData = readPidFile();
-  if (!pidData || !pidData.apiPort || pidData.apiPort <= 0) return null;
+  if (!pidData) return null;
+
+  // Use apiPort from PID file, or fall back to env/default
+  const port = (pidData.apiPort && pidData.apiPort > 0)
+    ? pidData.apiPort
+    : parseInt(process.env.BOT_API_PORT || '3847', 10);
 
   // Verify process is actually running
   try {
@@ -403,7 +408,7 @@ export function getBotApiUrl(): string | null {
     return null;
   }
 
-  return `http://127.0.0.1:${pidData.apiPort}`;
+  return `http://127.0.0.1:${port}`;
 }
 
 /**

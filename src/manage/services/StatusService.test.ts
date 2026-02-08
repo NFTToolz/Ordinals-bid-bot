@@ -20,6 +20,7 @@ vi.mock('./CollectionService', () => ({
 
 vi.mock('./BotProcessManager', () => ({
   isRunning: vi.fn().mockReturnValue(false),
+  fetchBotRuntimeStatsFromApi: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../functions/Offer', () => ({
@@ -36,6 +37,13 @@ vi.mock('ecpair', () => ({
 
 vi.mock('tiny-secp256k1', () => ({}), { virtual: true });
 
+vi.mock('../../utils/fundingWallet', () => ({
+  getFundingWIF: vi.fn().mockReturnValue('test-wif'),
+  hasFundingWIF: vi.fn().mockReturnValue(true),
+  hasReceiveAddress: vi.fn().mockReturnValue(false),
+  getReceiveAddress: vi.fn(),
+}));
+
 vi.mock('../../utils/logger', () => ({
   default: {
     warning: vi.fn(),
@@ -48,6 +56,8 @@ vi.mock('../../utils/logger', () => ({
 import { getAllBalances, calculateTotalBalance, getAllUTXOs } from './BalanceService';
 import { loadWallets, getWalletFromWIF } from './WalletGenerator';
 import { getUserOffers } from '../../functions/Offer';
+import { hasReceiveAddress, getReceiveAddress } from '../../utils/fundingWallet';
+import { fetchBotRuntimeStatsFromApi } from './BotProcessManager';
 import {
   getTotalBalance,
   getActiveOfferCount,
@@ -70,12 +80,15 @@ describe('StatusService', () => {
 
     // Setup default: main wallet from env
     process.env.FUNDING_WIF = 'test-wif';
+    process.env.TOKEN_RECEIVE_ADDRESS = 'bc1preceivetest';
     vi.mocked(getWalletFromWIF).mockReturnValue({
       paymentAddress: 'bc1qtest',
       receiveAddress: 'bc1qreceive',
       wif: 'test-wif',
     } as any);
     vi.mocked(loadWallets).mockReturnValue(null);
+    vi.mocked(hasReceiveAddress).mockReturnValue(true);
+    vi.mocked(getReceiveAddress).mockReturnValue('bc1preceivetest');
   });
 
   describe('getQuickStatus', () => {
@@ -85,6 +98,7 @@ describe('StatusService', () => {
       expect(status.totalBalance).toBe(0);
       expect(status.activeOfferCount).toBe(0);
       expect(status.pendingTxCount).toBe(0);
+      expect(status.nftsWon).toBe(0);
       expect(status.botStatus).toBe('STOPPED');
     });
 
@@ -260,6 +274,67 @@ describe('StatusService', () => {
       expect(status.totalBalance).toBe(25000);
       expect(status.pendingTxCount).toBe(0);
       expect(status.activeOfferCount).toBe(0);
+    });
+
+    it('should populate nftsWon from bot API bidHistory', async () => {
+      vi.mocked(getAllBalances).mockResolvedValue(
+        new Map([['bc1qtest', { confirmed: 1000, unconfirmed: 0, total: 1000 }]])
+      );
+      vi.mocked(calculateTotalBalance).mockReturnValue({
+        confirmed: 1000, unconfirmed: 0, total: 1000,
+      });
+      vi.mocked(getAllUTXOs).mockResolvedValue(new Map([['bc1qtest', []]]));
+      vi.mocked(getUserOffers).mockResolvedValue({ offers: [] } as any);
+      vi.mocked(fetchBotRuntimeStatsFromApi).mockResolvedValue({
+        bidHistory: {
+          'collection-a': { ourBids: {}, topBids: {}, quantity: 3 },
+          'collection-b': { ourBids: {}, topBids: {}, quantity: 1 },
+        },
+      } as any);
+
+      await refreshAllStatusAsync();
+
+      const status = getQuickStatus();
+      expect(status.nftsWon).toBe(4);
+    });
+
+    it('should set nftsWon to 0 when bot API returns null', async () => {
+      vi.mocked(getAllBalances).mockResolvedValue(
+        new Map([['bc1qtest', { confirmed: 1000, unconfirmed: 0, total: 1000 }]])
+      );
+      vi.mocked(calculateTotalBalance).mockReturnValue({
+        confirmed: 1000, unconfirmed: 0, total: 1000,
+      });
+      vi.mocked(getAllUTXOs).mockResolvedValue(new Map([['bc1qtest', []]]));
+      vi.mocked(getUserOffers).mockResolvedValue({ offers: [] } as any);
+      vi.mocked(fetchBotRuntimeStatsFromApi).mockResolvedValue(null);
+
+      await refreshAllStatusAsync();
+
+      const status = getQuickStatus();
+      expect(status.nftsWon).toBe(0);
+    });
+
+    it('should sum nftsWon correctly with missing quantity fields', async () => {
+      vi.mocked(getAllBalances).mockResolvedValue(
+        new Map([['bc1qtest', { confirmed: 1000, unconfirmed: 0, total: 1000 }]])
+      );
+      vi.mocked(calculateTotalBalance).mockReturnValue({
+        confirmed: 1000, unconfirmed: 0, total: 1000,
+      });
+      vi.mocked(getAllUTXOs).mockResolvedValue(new Map([['bc1qtest', []]]));
+      vi.mocked(getUserOffers).mockResolvedValue({ offers: [] } as any);
+      vi.mocked(fetchBotRuntimeStatsFromApi).mockResolvedValue({
+        bidHistory: {
+          'collection-a': { ourBids: {}, topBids: {}, quantity: 2 },
+          'collection-b': { ourBids: {}, topBids: {} }, // no quantity field
+        },
+      } as any);
+
+      await refreshAllStatusAsync();
+
+      const status = getQuickStatus();
+      expect(status.nftsWon).toBe(2);
     });
   });
 
