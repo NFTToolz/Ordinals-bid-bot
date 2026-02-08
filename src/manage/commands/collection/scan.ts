@@ -43,7 +43,7 @@ export async function scanCollections(): Promise<void> {
 
       collections = await withSpinner(label, () => getPopularCollections(50, 15000));
       break;
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (attempt < maxAttempts) {
         showWarning('Request timed out, retrying...');
       } else {

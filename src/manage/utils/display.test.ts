@@ -244,7 +244,7 @@ describe('Display Utilities', () => {
       it('should print success message with checkmark', () => {
         showSuccess('Operation completed');
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('✓');
+        expect(output).toContain('[OK]');
         expect(output).toContain('Operation completed');
       });
     });
@@ -253,7 +253,7 @@ describe('Display Utilities', () => {
       it('should print error message with x mark', () => {
         showError('Operation failed');
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('✗');
+        expect(output).toContain('[ERR]');
         expect(output).toContain('Operation failed');
       });
     });
@@ -262,7 +262,7 @@ describe('Display Utilities', () => {
       it('should print warning message with warning symbol', () => {
         showWarning('Proceed with caution');
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('⚠');
+        expect(output).toContain('[!]');
         expect(output).toContain('Proceed with caution');
       });
     });
@@ -271,7 +271,7 @@ describe('Display Utilities', () => {
       it('should print info message with info symbol', () => {
         showInfo('FYI: This is info');
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('ℹ');
+        expect(output).toContain('[i]');
         expect(output).toContain('FYI: This is info');
       });
     });

@@ -141,8 +141,12 @@ export async function createCollectionOffer(
       const url = 'https://nfttools.pro/magiceden/v2/ord/btc/collection-offers/psbt/create'
       const { data } = await limiter.schedule(() => axiosInstance.get<ICollectionOfferResponseData>(url, { params, headers }))
       return data
-    } catch (error: any) {
-      if (error.response?.data?.error === "Only 1 collection offer allowed per collection.") {
+    } catch (error: unknown) {
+      const responseError = getErrorResponseData(error);
+      const errorStr = responseError && typeof responseError === 'object' && responseError !== null && 'error' in responseError
+        ? String((responseError as { error: unknown }).error)
+        : '';
+      if (errorStr === "Only 1 collection offer allowed per collection.") {
         retryCount++;
         if (retryCount >= RETRY_CONFIG.maxRetries) {
           Logger.error(`[COLLECTION OFFER] Max retries (${RETRY_CONFIG.maxRetries}) reached for ${collectionSymbol}, aborting`);
@@ -226,9 +230,13 @@ export async function submitCollectionOffer(
       const { data: requestData } = await limiter.schedule(() => axiosInstance.post<ISubmitCollectionOfferResponse>(url, data, { headers }))
       Logger.info(`[OFFER] Collection offer submitted for ${collectionSymbol}`);
       return requestData
-    } catch (error: any) {
+    } catch (error: unknown) {
       Logger.offer.error('submitCollectionOffer', collectionSymbol, getErrorMessage(error), getErrorStatus(error), getErrorResponseData(error));
-      if (error.response?.data?.error === "Only 1 collection offer allowed per collection.") {
+      const submitResponseError = getErrorResponseData(error);
+      const submitErrorStr = submitResponseError && typeof submitResponseError === 'object' && submitResponseError !== null && 'error' in submitResponseError
+        ? String((submitResponseError as { error: unknown }).error)
+        : '';
+      if (submitErrorStr === "Only 1 collection offer allowed per collection.") {
         retryCount++;
         if (retryCount >= RETRY_CONFIG.maxRetries) {
           Logger.error(`[COLLECTION OFFER] Max retries (${RETRY_CONFIG.maxRetries}) reached for submit ${collectionSymbol}, aborting`);
@@ -393,7 +401,12 @@ export async function createOffer(
   }
 }
 
-export function signData(unsignedData: any, privateKey: string): string {
+export interface UnsignedPsbtData {
+  psbtBase64: string;
+  toSignInputs: number[];
+}
+
+export function signData(unsignedData: UnsignedPsbtData, privateKey: string): string {
   // Validate unsignedData has required properties (null, undefined, or missing fields)
   if (!unsignedData || !unsignedData.psbtBase64 || !unsignedData.toSignInputs) {
     throw new Error('[SIGN] Invalid unsigned data: missing psbtBase64 or toSignInputs');
@@ -467,8 +480,12 @@ export async function submitSignedOfferOrder(
     try {
       const response = await limiter.schedule(() => axiosInstance.post(url, data, { headers }));
       return response.data;
-    } catch (error: any) {
-      if (error.response?.data?.error === "You already have an offer for this token") {
+    } catch (error: unknown) {
+      const offerResponseError = getErrorResponseData(error);
+      const offerErrorStr = offerResponseError && typeof offerResponseError === 'object' && offerResponseError !== null && 'error' in offerResponseError
+        ? String((offerResponseError as { error: unknown }).error)
+        : '';
+      if (offerErrorStr === "You already have an offer for this token") {
         retryCount++;
         if (retryCount >= RETRY_CONFIG.maxRetries) {
           Logger.error(`[OFFER] Max retries (${RETRY_CONFIG.maxRetries}) reached for submitSignedOfferOrder token ${tokenId}, aborting`);
@@ -493,7 +510,7 @@ export async function submitSignedOfferOrder(
               throw new Error(`Failed to cancel all existing offers for token: ${tokenId}`);
             }
           }
-        } catch (offerError: any) {
+        } catch (offerError: unknown) {
           const status = getErrorStatus(offerError);
           // Transient errors (5xx, 429) - continue retry loop instead of aborting
           if (status !== undefined && (status >= 500 || status === 429)) {
@@ -503,7 +520,7 @@ export async function submitSignedOfferOrder(
             continue;
           }
           // Non-retryable errors - abort
-          Logger.error(`[OFFER] API error fetching offers for ${tokenId}, aborting retry: ${offerError?.message || offerError}`);
+          Logger.error(`[OFFER] API error fetching offers for ${tokenId}, aborting retry: ${getErrorMessage(offerError)}`);
           throw offerError;
         }
         errorOccurred = true;  // Signal to retry
@@ -616,22 +633,21 @@ export async function cancelBulkTokenOffers(
 export async function getOffers(tokenId: string, buyerTokenReceiveAddress?: string): Promise<OfferData> {
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/';
 
-  let params: any = {
+  interface GetOffersParams {
+    status: string;
+    limit: number;
+    sortBy: string;
+    token_id: string;
+    wallet_address_buyer?: string;
+  }
+
+  const params: GetOffersParams = {
     status: 'valid',
     limit: 100,
     sortBy: 'priceDesc',
-    token_id: tokenId
+    token_id: tokenId,
+    ...(buyerTokenReceiveAddress && { wallet_address_buyer: buyerTokenReceiveAddress }),
   };
-
-  if (buyerTokenReceiveAddress) {
-    params = {
-      status: 'valid',
-      limit: 100,
-      sortBy: 'priceDesc',
-      token_id: tokenId,
-      wallet_address_buyer: buyerTokenReceiveAddress
-    };
-  }
 
   try {
     const { data } = await limiter.schedule(() => axiosInstance.get<OfferData>(url, { params, headers }))
@@ -683,11 +699,14 @@ export async function submitCancelOfferData(offerId: string, signedPSBTBase64: s
 }
 
 /**
- * Get all offers for a user by their payment address.
+ * Get all offers for a user by their taproot receive address (bc1p...).
+ * NOTE: The Magic Eden API's `wallet_address_buyer` param requires a taproot
+ * receive address, NOT a payment address (bc1q...). Passing a payment address
+ * will return zero results.
  * @throws Error on API failure (network error, server error, etc.)
  * @returns UserOffer on success (may have empty offers array if no offers exist)
  */
-export async function getUserOffers(buyerPaymentAddress: string): Promise<UserOffer> {
+export async function getUserOffers(buyerReceiveAddress: string): Promise<UserOffer> {
   try {
     const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/';
     const params = {
@@ -695,13 +714,13 @@ export async function getUserOffers(buyerPaymentAddress: string): Promise<UserOf
       limit: 100,
       offset: 0,
       sortBy: 'priceDesc',
-      wallet_address_buyer: buyerPaymentAddress.toLowerCase()
+      wallet_address_buyer: buyerReceiveAddress.toLowerCase()
     };
 
     const { data } = await limiter.schedule(() => axiosInstance.get<UserOffer>(url, { params, headers }))
     return data
   } catch (error: unknown) {
-    Logger.error(`[OFFERS] getUserOffers error for ${buyerPaymentAddress}`, getErrorResponseData(error) || getErrorMessage(error));
+    Logger.error(`[OFFERS] getUserOffers error for ${buyerReceiveAddress}`, getErrorResponseData(error) || getErrorMessage(error));
     throw error;
   }
 }
@@ -716,7 +735,7 @@ interface Offer {
   buyerPaymentAddress: string;
   expirationDate: number;
   isValid: boolean;
-  token: any;
+  token: Token;
 }
 
 interface OfferData {
@@ -744,11 +763,11 @@ export interface ICollectionOffer {
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
-  fees: any[]; // Adjust this type based on the actual structure of the 'fees' property
+  fees: { pct: number; name: string; address?: string }[];
   btcParams: {
     makerOrdinalReceiveAddress: string;
     makerPaymentAddress: string;
-    pendingDeposits: any[]; // Adjust this type based on the actual structure of the 'pendingDeposits' property
+    pendingDeposits: unknown[];
   };
 }
 

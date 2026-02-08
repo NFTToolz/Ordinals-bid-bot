@@ -41,3 +41,40 @@ export function hasFundingWIF(): boolean {
 export function clearFundingWIF(): void {
   _fundingWIF = null;
 }
+
+// ─── TOKEN_RECEIVE_ADDRESS ───────────────────────────────────────────────────
+
+let _receiveAddress: string | null = null;
+
+/**
+ * Set the token receive address in memory and sync to process.env for backward compat.
+ */
+export function setReceiveAddress(address: string): void {
+  _receiveAddress = address;
+  process.env.TOKEN_RECEIVE_ADDRESS = address;
+}
+
+/**
+ * Get the token receive address. Checks in-memory state first, then process.env fallback.
+ * Throws if neither is configured.
+ */
+export function getReceiveAddress(): string {
+  if (_receiveAddress) return _receiveAddress;
+  const envAddr = process.env.TOKEN_RECEIVE_ADDRESS;
+  if (envAddr) return envAddr;
+  throw new Error('TOKEN_RECEIVE_ADDRESS not configured. Run: yarn manage → Encrypt wallets file');
+}
+
+/**
+ * Check if a token receive address is available from any source.
+ */
+export function hasReceiveAddress(): boolean {
+  return !!(_receiveAddress || process.env.TOKEN_RECEIVE_ADDRESS);
+}
+
+/**
+ * Clear the in-memory receive address (for tests).
+ */
+export function clearReceiveAddress(): void {
+  _receiveAddress = null;
+}

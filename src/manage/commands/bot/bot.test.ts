@@ -146,6 +146,15 @@ vi.mock('../../../utils/walletPool', () => ({
   isWalletPoolInitialized: vi.fn(() => false),
 }));
 
+// Mock followLogsUntilExit so start/restart tests don't hang waiting for stdin
+vi.mock('./logs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./logs')>();
+  return {
+    ...original,
+    followLogsUntilExit: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 // Set up env vars
 beforeAll(() => {
   process.env.FUNDING_WIF = TEST_WIF;
@@ -585,10 +594,10 @@ describe('Log Line Coloring', () => {
   });
 
   it('should identify success lines', () => {
-    const successLines = ['[SUCCESS] Bid placed', '✓ Connected'];
+    const successLines = ['[SUCCESS] Bid placed', '[OK] Connected'];
 
     const isSuccessLine = (line: string) =>
-      line.includes('[SUCCESS]') || line.includes('✓');
+      line.includes('[SUCCESS]') || line.includes('[OK]');
 
     expect(successLines.every(isSuccessLine)).toBe(true);
   });

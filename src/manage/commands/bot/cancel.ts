@@ -35,12 +35,12 @@ import {
   getAllOurReceiveAddresses,
 } from '../../../utils/walletHelpers';
 import { loadCollections, CollectionConfig } from '../../services/CollectionService';
+import { getErrorMessage } from '../../../utils/errorUtils';
 
-import { getFundingWIF } from '../../../utils/fundingWallet';
+import { getFundingWIF, getReceiveAddress } from '../../../utils/fundingWallet';
 
 config();
 
-const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string;
 const network = bitcoin.networks.bitcoin;
 
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
@@ -71,7 +71,7 @@ interface WalletOfferCounts {
 }
 
 // Reset bot data files (bid history and stats)
-function resetBotData(): { historyReset: boolean; statsReset: boolean } {
+export function resetBotData(): { historyReset: boolean; statsReset: boolean } {
   const dataDir = path.join(process.cwd(), 'data');
   let historyReset = false;
   let statsReset = false;
@@ -141,7 +141,7 @@ function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInf
 
   // Add addresses from collection configs
   for (const collection of collections) {
-    const receiveAddress = collection.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
+    const receiveAddress = collection.tokenReceiveAddress ?? getReceiveAddress();
     const privateKey = collection.fundingWalletWIF ?? getFundingWIF();
 
     if (!seenAddresses.has(receiveAddress.toLowerCase())) {
@@ -241,7 +241,7 @@ async function cancelAllCollectionOffers(
   for (const item of uniqueCollections) {
     if (item.offerType === 'COLLECTION') {
       const privateKey = item.fundingWalletWIF ?? getFundingWIF();
-      const buyerTokenReceiveAddress = item.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
+      const buyerTokenReceiveAddress = item.tokenReceiveAddress ?? getReceiveAddress();
       const keyPair = ECPair.fromWIF(privateKey, network);
       const publicKey = keyPair.publicKey.toString('hex');
 
@@ -258,8 +258,8 @@ async function cancelAllCollectionOffers(
           await cancelCollectionOffer([ourOffer.id], publicKey, privateKey);
           canceled++;
         }
-      } catch (error: any) {
-        errors.push(`Failed to cancel collection offer for ${item.collectionSymbol}: ${error.message}`);
+      } catch (error: unknown) {
+        errors.push(`Failed to cancel collection offer for ${item.collectionSymbol}: ${getErrorMessage(error)}`);
       }
     }
   }
@@ -321,7 +321,7 @@ async function fetchOfferCounts(): Promise<WalletOfferCounts[]> {
     const ourReceiveAddresses = getAllOurReceiveAddresses();
     const collectionTypeConfigs = collections.filter(c => c.offerType === 'COLLECTION');
     for (const col of collectionTypeConfigs) {
-      const colReceiveAddress = col.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
+      const colReceiveAddress = col.tokenReceiveAddress ?? getReceiveAddress();
       if (colReceiveAddress.toLowerCase() !== addr.address.toLowerCase()) continue;
       try {
         const bestOffers = await getBestCollectionOffer(col.collectionSymbol);
@@ -350,7 +350,7 @@ async function fetchOfferCounts(): Promise<WalletOfferCounts[]> {
   return counts;
 }
 
-async function performCancellation(): Promise<CancelResult> {
+export async function performCancellation(): Promise<CancelResult> {
   const collections = loadCollections();
 
   ensureWalletPoolInitialized();

@@ -2,7 +2,7 @@ import axios from 'axios';
 import axiosInstance from '../../axios/axiosInstance';
 import { config } from 'dotenv';
 import Logger from '../../utils/logger';
-import { getErrorMessage } from '../../utils/errorUtils';
+import { getErrorMessage, getErrorResponseData } from '../../utils/errorUtils';
 
 config();
 
@@ -291,9 +291,12 @@ export async function getTokensFromMagicEden(
     const hasMore = tokens.length === limit;
 
     return { tokens, hasMore };
-  } catch (error: any) {
+  } catch (error: unknown) {
     // Re-throw with more context
-    const message = error.response?.data?.message || error.message || 'Unknown error';
+    const responseData = getErrorResponseData(error);
+    const message = responseData && typeof responseData === 'object' && responseData !== null && 'message' in responseData
+      ? String((responseData as {message: unknown}).message)
+      : getErrorMessage(error);
     throw new Error(`Magic Eden API error: ${message}`);
   }
 }

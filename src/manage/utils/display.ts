@@ -159,7 +159,7 @@ export function showHeader(): void {
  */
 export function showStatusBar(botStatus: 'RUNNING' | 'STOPPED', walletCount: number, collectionCount: number): void {
   const width = getHeaderWidth();
-  const statusIcon = botStatus === 'RUNNING' ? chalk.green('●') : chalk.red('●');
+  const statusIcon = botStatus === 'RUNNING' ? chalk.green('*') : chalk.red('*');
   const statusText = botStatus === 'RUNNING' ? chalk.green('RUNNING') : chalk.red('STOPPED');
 
   const statusLine = `  Bot Status: ${statusIcon} ${statusText}    Wallets: ${walletCount}    Collections: ${collectionCount}`;
@@ -184,7 +184,7 @@ export interface EnhancedStatusData {
  */
 export function showEnhancedStatusBar(status: EnhancedStatusData): void {
   const width = getHeaderWidth();
-  const statusIcon = status.botStatus === 'RUNNING' ? chalk.green('●') : chalk.red('●');
+  const statusIcon = status.botStatus === 'RUNNING' ? chalk.green('*') : chalk.red('*');
   const statusText = status.botStatus === 'RUNNING' ? chalk.green('RUNNING') : chalk.red('STOPPED');
 
   // First row: Bot status, wallets, collections
@@ -270,28 +270,28 @@ export function showTable(headers: string[], rows: string[][], columnWidths?: nu
  * Display success message
  */
 export function showSuccess(message: string): void {
-  console.log(chalk.green('✓ ' + message));
+  console.log(chalk.green('[OK] ' + message));
 }
 
 /**
  * Display error message
  */
 export function showError(message: string): void {
-  console.log(chalk.red('✗ ' + message));
+  console.log(chalk.red('[ERR] ' + message));
 }
 
 /**
  * Display warning message
  */
 export function showWarning(message: string): void {
-  console.log(chalk.yellow('⚠ ' + message));
+  console.log(chalk.yellow('[!] ' + message));
 }
 
 /**
  * Display info message
  */
 export function showInfo(message: string): void {
-  console.log(chalk.blue('ℹ ' + message));
+  console.log(chalk.blue('[i] ' + message));
 }
 
 /**
@@ -420,7 +420,7 @@ export function showCollectionSummary(config: {
   console.log(`  Bid Count:     ${config.bidCount} items`);
   console.log(`  Duration:      ${config.duration} minutes`);
   console.log(`  Offer Type:    ${config.offerType}`);
-  console.log(`  Counter-bid:   ${config.enableCounterBidding ? chalk.green('✓ Enabled') : chalk.red('✗ Disabled')}`);
+  console.log(`  Counter-bid:   ${config.enableCounterBidding ? chalk.green('Enabled') : chalk.red('Disabled')}`);
   if (config.quantity) {
     console.log(`  Max to Win:    ${config.quantity}`);
   }

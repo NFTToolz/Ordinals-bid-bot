@@ -24,6 +24,10 @@ vi.mock('./walletPool', () => {
       };
     }
 
+    async waitForAvailableWallet(_maxWaitMs: number) {
+      return this.getAvailableWalletAsync();
+    }
+
     recordBid() {}
     decrementBidCount() {}
 
@@ -361,6 +365,22 @@ describe('WalletGroupManager', () => {
 
     it('should return null for non-existent group', async () => {
       const wallet = await manager.getAvailableWalletAsync('nonexistent');
+      expect(wallet).toBeNull();
+    });
+  });
+
+  describe('waitForAvailableWallet', () => {
+    beforeEach(() => {
+      manager.initializeFromGroups(createGroupsConfig(1, 2));
+    });
+
+    it('should return wallet from existing group', async () => {
+      const wallet = await manager.waitForAvailableWallet('group0', 5000);
+      expect(wallet).not.toBeNull();
+    });
+
+    it('should return null for non-existent group', async () => {
+      const wallet = await manager.waitForAvailableWallet('nonexistent', 5000);
       expect(wallet).toBeNull();
     });
   });

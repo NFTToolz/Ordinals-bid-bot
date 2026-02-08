@@ -1,6 +1,8 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface, ECPairInterface } from 'ecpair';
 import { Mutex } from 'async-mutex';
+import { getErrorMessage } from './errorUtils';
+import Logger from './logger';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -61,7 +63,7 @@ class WalletPool {
     this.network = network;
 
     this.initializeWallets(wallets);
-    console.log(`[WALLET POOL] Initialized with ${this.wallets.size} wallets, ${this.BIDS_PER_MINUTE} bids/min per wallet`);
+    Logger.debug(`[WALLET POOL] Initialized with ${this.wallets.size} wallets, ${this.BIDS_PER_MINUTE} bids/min per wallet`);
   }
 
   /**
@@ -89,9 +91,9 @@ class WalletPool {
 
         this.wallets.set(paymentAddress, state);
         this.walletList.push(state);
-        console.log(`[WALLET POOL] Added wallet "${config.label}" (${paymentAddress.slice(0, 10)}...)`);
-      } catch (error: any) {
-        console.error(`[WALLET POOL] Failed to initialize wallet "${config.label}": ${error.message}`);
+        Logger.debug(`[WALLET POOL] Added wallet "${config.label}" (${paymentAddress.slice(0, 10)}...)`);
+      } catch (error: unknown) {
+        Logger.error(`[WALLET POOL] Failed to initialize wallet "${config.label}": ${getErrorMessage(error)}`);
         throw new Error(`Invalid WIF for wallet "${config.label}"`);
       }
     }
@@ -135,6 +137,66 @@ class WalletPool {
   }
 
   /**
+   * Calculate how many milliseconds until the next wallet becomes available.
+   * Returns 0 if a wallet is already available or no timestamps exist.
+   */
+  private getNextAvailableWaitMs(): number {
+    const now = Date.now();
+    const windowStart = now - this.RATE_WINDOW_MS;
+    let earliestReset = Infinity;
+    for (const w of this.walletList) {
+      const earliestInWindow = w.bidTimestamps.find(t => t > windowStart);
+      if (earliestInWindow) {
+        const resetTime = earliestInWindow + this.RATE_WINDOW_MS;
+        if (resetTime < earliestReset) {
+          earliestReset = resetTime;
+        }
+      }
+    }
+    return earliestReset === Infinity ? 0 : Math.max(0, earliestReset - now);
+  }
+
+  /**
+   * Wait for a wallet to become available, retrying with sleeps.
+   * Returns null only if the wait would exceed maxWaitMs.
+   * The returned wallet already has its bid count incremented (same as getAvailableWalletAsync).
+   */
+  async waitForAvailableWallet(maxWaitMs: number): Promise<WalletState | null> {
+    const deadline = Date.now() + maxWaitMs;
+
+    while (true) {
+      const release = await this.selectionMutex.acquire();
+      let waitTime: number;
+      try {
+        const wallet = this.selectLeastRecentlyUsed();
+        if (wallet) {
+          // Pre-record timestamp (same as getAvailableWalletAsync)
+          const now = Date.now();
+          wallet.bidTimestamps.push(now);
+          wallet.lastBidTime = now;
+          wallet.isAvailable = wallet.bidTimestamps.length < this.BIDS_PER_MINUTE;
+          return wallet;
+        }
+
+        // Calculate wait time
+        waitTime = this.getNextAvailableWaitMs();
+
+        if (Date.now() + waitTime > deadline) {
+          Logger.warning(`[WALLET POOL] All wallets rate-limited. Wait ${(waitTime / 1000).toFixed(1)}s exceeds max ${(maxWaitMs / 1000).toFixed(0)}s, skipping`);
+          return null;
+        }
+
+        Logger.debug(`[WALLET POOL] All wallets rate-limited. Waiting ${(waitTime / 1000).toFixed(1)}s...`);
+      } finally {
+        release(); // Release mutex BEFORE sleeping
+      }
+
+      // Sleep outside the mutex so other callers aren't blocked
+      await new Promise(resolve => setTimeout(resolve, waitTime + 100));
+    }
+  }
+
+  /**
    * Get an available wallet using least-recently-used strategy
    * Returns null if all wallets are rate-limited
    * Uses proper mutex (async-mutex) to prevent TOCTOU race conditions
@@ -151,21 +213,8 @@ class WalletPool {
       const wallet = this.selectLeastRecentlyUsed();
 
       if (!wallet) {
-        // Calculate when next wallet will be available (earliest timestamp expiry)
-        const now = Date.now();
-        const windowStart = now - this.RATE_WINDOW_MS;
-        let earliestReset = Infinity;
-        for (const w of this.walletList) {
-          const earliestInWindow = w.bidTimestamps.find(t => t > windowStart);
-          if (earliestInWindow) {
-            const resetTime = earliestInWindow + this.RATE_WINDOW_MS;
-            if (resetTime < earliestReset) {
-              earliestReset = resetTime;
-            }
-          }
-        }
-        const waitTime = earliestReset === Infinity ? 0 : Math.max(0, earliestReset - now);
-        console.log(`[WALLET POOL] All wallets rate-limited. Next available in ${(waitTime / 1000).toFixed(1)}s`);
+        const waitTime = this.getNextAvailableWaitMs();
+        Logger.debug(`[WALLET POOL] All wallets rate-limited. Next available in ${(waitTime / 1000).toFixed(1)}s`);
         return null;
       }
 
@@ -188,7 +237,7 @@ class WalletPool {
   recordBid(paymentAddress: string): void {
     const wallet = this.wallets.get(paymentAddress);
     if (!wallet) {
-      console.warn(`[WALLET POOL] Unknown wallet address: ${paymentAddress}`);
+      Logger.warning(`[WALLET POOL] Unknown wallet address: ${paymentAddress}`);
       return;
     }
 
@@ -199,7 +248,7 @@ class WalletPool {
 
     const windowStart = now - this.RATE_WINDOW_MS;
     const bidsInWindow = wallet.bidTimestamps.filter(t => t > windowStart).length;
-    console.log(`[WALLET POOL] Recorded bid for "${wallet.config.label}" (${bidsInWindow}/${this.BIDS_PER_MINUTE} in window)`);
+    Logger.debug(`[WALLET POOL] Recorded bid for "${wallet.config.label}" (${bidsInWindow}/${this.BIDS_PER_MINUTE} in window)`);
   }
 
   /**
@@ -210,7 +259,7 @@ class WalletPool {
   decrementBidCount(paymentAddress: string): void {
     const wallet = this.wallets.get(paymentAddress);
     if (!wallet) {
-      console.warn(`[WALLET POOL] Unknown wallet address for decrement: ${paymentAddress}`);
+      Logger.warning(`[WALLET POOL] Unknown wallet address for decrement: ${paymentAddress}`);
       return;
     }
 
@@ -220,7 +269,7 @@ class WalletPool {
       const now = Date.now();
       const windowStart = now - this.RATE_WINDOW_MS;
       const bidsInWindow = wallet.bidTimestamps.filter(t => t > windowStart).length;
-      console.log(`[WALLET POOL] Decremented bid for "${wallet.config.label}" after failure (${bidsInWindow}/${this.BIDS_PER_MINUTE} in window)`);
+      Logger.debug(`[WALLET POOL] Decremented bid for "${wallet.config.label}" after failure (${bidsInWindow}/${this.BIDS_PER_MINUTE} in window)`);
     }
   }
 
@@ -302,7 +351,7 @@ class WalletPool {
       wallet.bidTimestamps = [];
       wallet.isAvailable = true;
     }
-    console.log('[WALLET POOL] All rate limit windows reset');
+    Logger.debug('[WALLET POOL] All rate limit windows reset');
   }
 }
 
@@ -321,7 +370,7 @@ export function initializeWalletPool(
   network: bitcoin.Network = bitcoin.networks.bitcoin
 ): WalletPool {
   if (poolInstance) {
-    console.warn('[WALLET POOL] Pool already initialized, reinitializing...');
+    Logger.warning('[WALLET POOL] Pool already initialized, reinitializing...');
   }
 
   if (!wallets || wallets.length === 0) {
@@ -356,6 +405,14 @@ export function isWalletPoolInitialized(): boolean {
  */
 export async function getAvailableWalletAsync(): Promise<WalletState | null> {
   return getWalletPool().getAvailableWalletAsync();
+}
+
+/**
+ * Quick access: Wait for an available wallet, retrying with sleeps until maxWaitMs.
+ * Returns null only if the wait would exceed the deadline.
+ */
+export async function waitForAvailableWallet(maxWaitMs: number): Promise<WalletState | null> {
+  return getWalletPool().waitForAvailableWallet(maxWaitMs);
 }
 
 /**

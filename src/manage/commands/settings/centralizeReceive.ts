@@ -8,6 +8,7 @@ import {
   showInfo,
 } from '../../utils/display';
 import { promptConfirm, promptSelect } from '../../utils/prompts';
+import { hasReceiveAddress, getReceiveAddress } from '../../../utils/fundingWallet';
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');
 
@@ -50,9 +51,12 @@ function setEnvValue(content: string, key: string, value: string): string {
 
 function getCurrentConfig(): EnvConfig {
   const content = readEnvFile();
+  // Check .env first, then fall back to wallets.json via state holder
+  const envReceiveAddr = getEnvValue(content, 'TOKEN_RECEIVE_ADDRESS') || '';
+  const receiveAddr = envReceiveAddr || (hasReceiveAddress() ? getReceiveAddress() : '');
   return {
     CENTRALIZE_RECEIVE_ADDRESS: getEnvValue(content, 'CENTRALIZE_RECEIVE_ADDRESS') === 'true',
-    TOKEN_RECEIVE_ADDRESS: getEnvValue(content, 'TOKEN_RECEIVE_ADDRESS') || '',
+    TOKEN_RECEIVE_ADDRESS: receiveAddr,
     ENABLE_WALLET_ROTATION: getEnvValue(content, 'ENABLE_WALLET_ROTATION') === 'true',
   };
 }
@@ -75,7 +79,7 @@ export async function centralizeReceiveSettings(): Promise<void> {
   console.log('');
 
   if (!config.TOKEN_RECEIVE_ADDRESS) {
-    showError('TOKEN_RECEIVE_ADDRESS not set in .env');
+    showError('TOKEN_RECEIVE_ADDRESS not set in wallets.json or .env');
     showInfo('Set TOKEN_RECEIVE_ADDRESS before enabling centralized receive.');
     console.log('');
     return;

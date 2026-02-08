@@ -150,7 +150,7 @@ export async function walletRotationSettings(): Promise<void> {
 
     console.log('');
     showSuccess('Wallet rotation DISABLED');
-    showInfo('Bot will use FUNDING_WIF and TOKEN_RECEIVE_ADDRESS from .env');
+    showInfo('Bot will use funding wallet from wallets.json (or .env fallback)');
     showInfo('Restart the bot for changes to take effect');
     console.log('');
   }

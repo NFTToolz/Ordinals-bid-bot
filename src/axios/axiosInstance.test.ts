@@ -8,14 +8,12 @@ import {
 
 describe('Axios Instance Helpers', () => {
   describe('getErrorMessage', () => {
-    it('should throw for null error (edge case)', () => {
-      // Note: Function doesn't handle null/undefined - this documents actual behavior
-      expect(() => getErrorMessage(null)).toThrow();
+    it('should return fallback for null error', () => {
+      expect(getErrorMessage(null)).toBe('Unknown error (no response data)');
     });
 
-    it('should throw for undefined error (edge case)', () => {
-      // Note: Function doesn't handle null/undefined - this documents actual behavior
-      expect(() => getErrorMessage(undefined)).toThrow();
+    it('should return fallback for undefined error', () => {
+      expect(getErrorMessage(undefined)).toBe('Unknown error (no response data)');
     });
 
     it('should return fallback message when no response data', () => {
@@ -116,10 +114,9 @@ describe('Axios Instance Helpers', () => {
       expect(isRateLimitError(error)).toBe(false);
     });
 
-    it('should throw for null/undefined (edge case)', () => {
-      // Note: Functions don't handle null/undefined - documents actual behavior
-      expect(() => isRateLimitError(null)).toThrow();
-      expect(() => isRateLimitError(undefined)).toThrow();
+    it('should return false for null/undefined', () => {
+      expect(isRateLimitError(null)).toBe(false);
+      expect(isRateLimitError(undefined)).toBe(false);
     });
   });
 
@@ -174,10 +171,9 @@ describe('Axios Instance Helpers', () => {
       expect(isNonRetryableError(error)).toBe(false);
     });
 
-    it('should throw for null/undefined (edge case)', () => {
-      // Note: Functions don't handle null/undefined - documents actual behavior
-      expect(() => isNonRetryableError(null)).toThrow();
-      expect(() => isNonRetryableError(undefined)).toThrow();
+    it('should return false for null/undefined', () => {
+      expect(isNonRetryableError(null)).toBe(false);
+      expect(isNonRetryableError(undefined)).toBe(false);
     });
   });
 
@@ -221,10 +217,9 @@ describe('Axios Instance Helpers', () => {
       expect(isDuplicateOfferError(error)).toBe(false);
     });
 
-    it('should throw for null/undefined (edge case)', () => {
-      // Note: Functions don't handle null/undefined - documents actual behavior
-      expect(() => isDuplicateOfferError(null)).toThrow();
-      expect(() => isDuplicateOfferError(undefined)).toThrow();
+    it('should return false for null/undefined', () => {
+      expect(isDuplicateOfferError(null)).toBe(false);
+      expect(isDuplicateOfferError(undefined)).toBe(false);
     });
   });
 });

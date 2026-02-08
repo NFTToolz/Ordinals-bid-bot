@@ -40,7 +40,7 @@ export async function getBalance(address: string): Promise<AddressBalance> {
       total: confirmed + unconfirmed,
       utxoCount,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     // Return zero balance on error
     return {
       address,

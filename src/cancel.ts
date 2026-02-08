@@ -25,11 +25,12 @@ import {
 } from "./utils/walletHelpers";
 import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerator";
 import { promptPasswordStdin } from "./utils/promptPassword";
-import { getFundingWIF, setFundingWIF } from "./utils/fundingWallet";
+import { getErrorMessage } from "./utils/errorUtils";
+import { getFundingWIF, setFundingWIF, hasReceiveAddress, setReceiveAddress, getReceiveAddress } from "./utils/fundingWallet";
 
 config()
 
-const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string
+let TOKEN_RECEIVE_ADDRESS: string = process.env.TOKEN_RECEIVE_ADDRESS as string
 const network = bitcoin.networks.bitcoin;
 
 // Multi-wallet rotation configuration
@@ -42,18 +43,20 @@ const collections: CollectionData[] = JSON.parse(fs.readFileSync(filePath, "utf-
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 
+// Holds the already-decrypted wallet config parsed in main()
+let parsedWalletConfig: Record<string, unknown> | null = null;
 
 // Get all unique receive addresses to check for offers
 function getReceiveAddressesToCheck(): { address: string; privateKey: string; publicKey: string; paymentAddress: string; label?: string }[] {
   const addresses: { address: string; privateKey: string; publicKey: string; paymentAddress: string; label?: string }[] = [];
   const seenAddresses = new Set<string>();
 
-  // If wallet rotation is enabled, add all wallet receive addresses from groups
-  if (ENABLE_WALLET_ROTATION && fs.existsSync(WALLET_CONFIG_PATH)) {
+  // If wallet rotation is enabled, use the already-decrypted wallet config from main()
+  if (ENABLE_WALLET_ROTATION && parsedWalletConfig) {
     try {
-      const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-      for (const groupName of Object.keys(walletConfig.groups || {})) {
-        const group = walletConfig.groups[groupName];
+      const groups = parsedWalletConfig.groups as Record<string, { wallets: Array<{ receiveAddress: string; wif: string; label?: string }> }> | undefined;
+      for (const groupName of Object.keys(groups || {})) {
+        const group = groups![groupName];
         for (const wallet of group.wallets || []) {
           if (!seenAddresses.has(wallet.receiveAddress.toLowerCase())) {
             const keyPair = ECPair.fromWIF(wallet.wif, network);
@@ -102,6 +105,7 @@ async function cancelAllItemOffers() {
     console.log(`\n[CHECKING] ${addr.address.slice(0, 10)}...${labelStr}`);
 
     try {
+      // addr.address is the taproot receive address (bc1p...) — required by the ME API
       const offerData = await getUserOffers(addr.address);
 
       if (offerData && Array.isArray(offerData.offers) && offerData.offers.length > 0) {
@@ -205,11 +209,24 @@ async function main() {
     }
 
     const walletConfig = JSON.parse(walletConfigContent);
+    parsedWalletConfig = walletConfig;
 
-    // Extract funding WIF from wallets.json if present
+    // Extract funding WIF and receive address from wallets.json if present
     if (walletConfig.fundingWallet?.wif) {
       setFundingWIF(walletConfig.fundingWallet.wif);
       console.log('[STARTUP] Funding WIF loaded from wallets.json');
+    }
+    if (walletConfig.fundingWallet?.receiveAddress) {
+      setReceiveAddress(walletConfig.fundingWallet.receiveAddress);
+      console.log('[STARTUP] Token receive address loaded from wallets.json');
+    }
+
+    // Resolve TOKEN_RECEIVE_ADDRESS: wallets.json > .env > warning
+    if (hasReceiveAddress()) {
+      TOKEN_RECEIVE_ADDRESS = getReceiveAddress();
+    } else if (process.env.TOKEN_RECEIVE_ADDRESS) {
+      console.log('[STARTUP] TOKEN_RECEIVE_ADDRESS loaded from .env (deprecated)');
+      TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS;
     }
 
     // Initialize wallet pool for cancellation lookup
@@ -228,8 +245,8 @@ async function main() {
             console.log(`[WALLET ROTATION] Initialized wallet pool with ${allWallets.length} wallets for cancellation`);
           }
         }
-      } catch (error: any) {
-        console.error(`[WALLET ROTATION] Failed to initialize wallet pool: ${error.message}`);
+      } catch (error: unknown) {
+        console.error(`[WALLET ROTATION] Failed to initialize wallet pool: ${getErrorMessage(error)}`);
       }
     }
   }
@@ -295,8 +312,8 @@ async function cancelBid(offer: IOffer, privateKey: string, collectionSymbol: st
     console.log('--------------------------------------------------------------------------------');
     console.log(`CANCELLED OFFER FOR ${collectionSymbol} ${tokenId}`);
     console.log('--------------------------------------------------------------------------------');
-  } catch (error: any) {
-    console.error(`Failed to cancel offer for ${collectionSymbol} ${tokenId}: ${error.message}`);
+  } catch (error: unknown) {
+    console.error(`Failed to cancel offer for ${collectionSymbol} ${tokenId}: ${getErrorMessage(error)}`);
   }
 }
 

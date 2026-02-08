@@ -1,6 +1,8 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { getErrorMessage } from '../../utils/errorUtils';
+import { getSessionPassword } from '../services/WalletGenerator';
 
 const PID_FILE = path.join(process.cwd(), '.bot.pid');
 const LOG_FILE = path.join(process.cwd(), 'bot.log');
@@ -132,13 +134,22 @@ export function start(): { success: boolean; pid?: number; error?: string } {
 
     const logStream = fs.openSync(LOG_FILE, 'a');
 
+    // If the manage session has a wallet password, pipe it to the child
+    const sessionPassword = getSessionPassword();
+
     // Start the bot process
     const child = spawn('npx', ['ts-node', 'src/bid.ts'], {
       cwd: process.cwd(),
       detached: true,
-      stdio: ['ignore', logStream, logStream],
+      stdio: [sessionPassword ? 'pipe' : 'ignore', logStream, logStream],
       env: { ...process.env },
     });
+
+    // Pipe the session password so the bot doesn't prompt again
+    if (sessionPassword && child.stdin) {
+      child.stdin.write(sessionPassword + '\n');
+      child.stdin.end();
+    }
 
     if (!child.pid) {
       return { success: false, error: 'Failed to start process' };
@@ -151,8 +162,8 @@ export function start(): { success: boolean; pid?: number; error?: string } {
     child.unref();
 
     return { success: true, pid: child.pid };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 
@@ -188,13 +199,13 @@ export async function stop(timeoutMs: number = 10000): Promise<{ success: boolea
 
     cleanupPidFile();
     return { success: true };
-  } catch (error: any) {
-    if (error.code === 'ESRCH') {
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && (error as {code: unknown}).code === 'ESRCH') {
       // Process already dead
       cleanupPidFile();
       return { success: true };
     }
-    return { success: false, error: error.message };
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 

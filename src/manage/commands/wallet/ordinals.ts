@@ -21,6 +21,8 @@ import {
 } from '../../utils/display';
 import { promptSelect, promptMultiWalletSelect } from '../../utils/prompts';
 import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
+import { hasReceiveAddress, getReceiveAddress } from '../../../utils/fundingWallet';
+import { getErrorMessage } from '../../../utils/errorUtils';
 import * as bitcoin from 'bitcoinjs-lib';
 import chalk = require('chalk');
 
@@ -52,7 +54,7 @@ export async function viewOrdinals(): Promise<void> {
 
   // Main wallet
   const FUNDING_WIF = process.env.FUNDING_WIF;
-  const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS;
+  const TOKEN_RECEIVE_ADDRESS = hasReceiveAddress() ? getReceiveAddress() : undefined;
 
   if (FUNDING_WIF && TOKEN_RECEIVE_ADDRESS) {
     try {
@@ -159,8 +161,8 @@ export async function viewOrdinals(): Promise<void> {
         };
       });
       usedMagicEden = true;
-    } catch (error: any) {
-      showWarning(`Magic Eden API failed: ${error.message}`);
+    } catch (error: unknown) {
+      showWarning(`Magic Eden API failed: ${getErrorMessage(error)}`);
       showInfo('Falling back to Hiro API...');
       console.log('');
     }

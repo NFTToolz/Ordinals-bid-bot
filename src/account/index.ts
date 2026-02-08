@@ -1,3 +1,4 @@
+/** @deprecated Use WalletGenerator from src/manage/services/WalletGenerator.ts instead. This file is legacy and will be removed in a future version. */
 import fs from "fs/promises";
 import { config } from "dotenv"
 import * as bitcoin from "bitcoinjs-lib";
@@ -7,6 +8,7 @@ import { ECPairInterface, ECPairFactory, ECPairAPI, TinySecp256k1Interface } fro
 import bip39 from "bip39"
 import axiosInstance from "../axios/axiosInstance";
 import axios from "axios";
+import { getErrorMessage } from "../utils/errorUtils";
 
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
@@ -130,8 +132,8 @@ async function fetchUTXOs(address: string) {
   try {
     const { data } = await axios.get(`https://mempool.space/api/address/${address}/utxo`);
     return data;
-  } catch (error: any) {
-    console.error('Error fetching UTXOs:', error.response.data);
+  } catch (error: unknown) {
+    console.error('Error fetching UTXOs:', getErrorMessage(error));
   }
 }
 

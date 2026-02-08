@@ -14,6 +14,7 @@ import {
   clearUpdateCache,
   UpdateInfo,
 } from '../../../utils/version';
+import { getErrorMessage } from '../../../utils/errorUtils';
 
 export async function checkForUpdatesCommand(): Promise<void> {
   showSectionHeader('CHECK FOR UPDATES');
@@ -102,8 +103,8 @@ export async function checkForUpdatesCommand(): Promise<void> {
       });
     });
     showSuccess('Code updated successfully.');
-  } catch (error: any) {
-    showError(`Failed to pull changes: ${error.message}`);
+  } catch (error: unknown) {
+    showError(`Failed to pull changes: ${getErrorMessage(error)}`);
     showInfo('You can update manually with: git pull origin main');
     return;
   }
@@ -118,8 +119,8 @@ export async function checkForUpdatesCommand(): Promise<void> {
       });
     });
     showSuccess('Dependencies installed.');
-  } catch (error: any) {
-    showWarning(`Dependency install had issues: ${error.message}`);
+  } catch (error: unknown) {
+    showWarning(`Dependency install had issues: ${getErrorMessage(error)}`);
     showInfo('You may need to run "yarn install" manually.');
   }
 

@@ -8,7 +8,7 @@ import {
   showTable,
   getSeparatorWidth,
 } from '../../utils/display';
-import { hasFundingWIF } from '../../../utils/fundingWallet';
+import { hasFundingWIF, hasReceiveAddress } from '../../../utils/fundingWallet';
 import chalk = require('chalk');
 
 export async function viewStatus(): Promise<void> {
@@ -26,14 +26,14 @@ export async function viewStatus(): Promise<void> {
   console.log('━'.repeat(getSeparatorWidth()));
 
   if (status.running) {
-    console.log(`  Status:   ${chalk.green('● RUNNING')}`);
+    console.log(`  Status:   ${chalk.green('RUNNING')}`);
     console.log(`  PID:      ${status.pid}`);
     console.log(`  Uptime:   ${status.uptime}`);
     if (status.startedAt) {
       console.log(`  Started:  ${status.startedAt.toLocaleString()}`);
     }
   } else {
-    console.log(`  Status:   ${chalk.red('● STOPPED')}`);
+    console.log(`  Status:   ${chalk.red('STOPPED')}`);
   }
 
   console.log('');
@@ -78,7 +78,7 @@ export async function viewStatus(): Promise<void> {
       console.log('━'.repeat(getSeparatorWidth()));
 
       wp.wallets.forEach(w => {
-        const statusIcon = w.isAvailable ? chalk.green('●') : chalk.yellow('⏸');
+        const statusIcon = w.isAvailable ? chalk.green('*') : chalk.yellow('-');
         const bidInfo = `${w.bidsInWindow}/${wp.bidsPerMinute} bids`;
         const resetInfo = !w.isAvailable ? chalk.dim(` (reset ${w.secondsUntilReset}s)`) : '';
         console.log(`  ${statusIcon} ${w.label}: ${bidInfo}${resetInfo}`);
@@ -97,8 +97,8 @@ export async function viewStatus(): Promise<void> {
     console.log(`  Queue:       ${runtimeStats.queue.size} events`);
 
     const wsStatus = runtimeStats.websocket.connected
-      ? chalk.green('● Connected')
-      : chalk.red('● Disconnected');
+      ? chalk.green('Connected')
+      : chalk.red('Disconnected');
     console.log(`  WebSocket:   ${wsStatus}`);
 
     const lastUpdateSec = Math.floor((Date.now() - runtimeStats.timestamp) / 1000);
@@ -157,13 +157,13 @@ export async function viewStatus(): Promise<void> {
 
   const envChecks = [
     { name: 'FUNDING_WIF', set: hasFundingWIF() },
-    { name: 'TOKEN_RECEIVE_ADDRESS', set: !!process.env.TOKEN_RECEIVE_ADDRESS },
+    { name: 'TOKEN_RECEIVE_ADDRESS', set: hasReceiveAddress() },
     { name: 'API_KEY', set: !!process.env.API_KEY },
     { name: 'ENABLE_WALLET_ROTATION', set: process.env.ENABLE_WALLET_ROTATION === 'true' },
   ];
 
   envChecks.forEach(check => {
-    const icon = check.set ? chalk.green('✓') : chalk.red('✗');
+    const icon = check.set ? chalk.green('[OK]') : chalk.red('[X]');
     console.log(`  ${icon} ${check.name}`);
   });
 

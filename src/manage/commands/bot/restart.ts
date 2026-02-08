@@ -7,6 +7,7 @@ import {
   withSpinner,
 } from '../../utils/display';
 import { promptConfirm } from '../../utils/prompts';
+import { followLogsUntilExit } from './logs';
 
 export async function restartBot(): Promise<void> {
   showSectionHeader('RESTART BOT');
@@ -50,8 +51,7 @@ export async function restartBot(): Promise<void> {
     console.log('');
     console.log(`  PID: ${result.pid}`);
     console.log(`  Log file: bot.log`);
-    console.log('');
-    console.log('Use "View logs" to see bot output.');
+    await followLogsUntilExit();
   } else {
     showError(`Failed to restart bot: ${result.error}`);
   }

@@ -24,6 +24,7 @@ import {
 } from '../../utils/prompts';
 import { getWalletsWithBalances } from './list';
 import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
+import { getErrorMessage } from '../../../utils/errorUtils';
 
 config();
 
@@ -265,7 +266,7 @@ export async function consolidateFunds(): Promise<void> {
     console.log(`  View on mempool.space: https://mempool.space/tx/${result.txid}`);
     console.log('');
 
-  } catch (error: any) {
-    showError(`Consolidation failed: ${error.message}`);
+  } catch (error: unknown) {
+    showError(`Consolidation failed: ${getErrorMessage(error)}`);
   }
 }

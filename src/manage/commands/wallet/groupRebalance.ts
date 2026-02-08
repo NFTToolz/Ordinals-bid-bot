@@ -28,6 +28,7 @@ import {
   promptConfirm,
 } from '../../utils/prompts';
 import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
+import { getErrorMessage } from '../../../utils/errorUtils';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -316,8 +317,8 @@ export async function rebalanceWalletGroup(): Promise<void> {
       });
 
       console.log(`  ${wallet.label.padEnd(15)} ${formatBTC(balance.total)}`);
-    } catch (error: any) {
-      showError(`Failed to get balance for ${wallet.label}: ${error.message}`);
+    } catch (error: unknown) {
+      showError(`Failed to get balance for ${wallet.label}: ${getErrorMessage(error)}`);
       return;
     }
   }
@@ -434,7 +435,7 @@ export async function rebalanceWalletGroup(): Promise<void> {
   // Show wallet status
   console.log('  Current Balances:');
   for (const w of walletBalances) {
-    const status = w.balance >= targetBalance - MIN_TRANSFER_SATS ? '✓ sufficient' : `✗ needs +${formatBTC(targetBalance - w.balance)}`;
+    const status = w.balance >= targetBalance - MIN_TRANSFER_SATS ? '[OK] sufficient' : `[X] needs +${formatBTC(targetBalance - w.balance)}`;
     console.log(`    ${w.label.padEnd(15)} ${formatBTC(w.balance).padEnd(18)} ${status}`);
   }
   console.log('');
@@ -491,8 +492,8 @@ export async function rebalanceWalletGroup(): Promise<void> {
       if (i < transfers.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
-    } catch (error: any) {
-      showError(`  Failed: ${error.message}`);
+    } catch (error: unknown) {
+      showError(`  Failed: ${getErrorMessage(error)}`);
       failedCount++;
 
       // Ask if user wants to continue after failure
@@ -595,8 +596,8 @@ export async function rebalanceAllWalletGroups(): Promise<void> {
           paymentAddress,
           balance: balance.total,
         });
-      } catch (error: any) {
-        showError(`Failed to get balance for ${wallet.label} in ${groupName}: ${error.message}`);
+      } catch (error: unknown) {
+        showError(`Failed to get balance for ${wallet.label} in ${groupName}: ${getErrorMessage(error)}`);
         continue;
       }
     }
@@ -767,8 +768,8 @@ export async function rebalanceAllWalletGroups(): Promise<void> {
         if (i < info.transfers.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
-      } catch (error: any) {
-        showError(`    Failed: ${error.message}`);
+      } catch (error: unknown) {
+        showError(`    Failed: ${getErrorMessage(error)}`);
         totalFailedCount++;
       }
     }

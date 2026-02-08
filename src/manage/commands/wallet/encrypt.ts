@@ -18,6 +18,73 @@ import {
   promptPassword,
   promptConfirm,
 } from '../../utils/prompts';
+import { getErrorMessage } from '../../../utils/errorUtils';
+
+/**
+ * Remove specific keys from the .env file.
+ * Reads the file, strips matching lines (^KEY=...), writes back with mode 0o600.
+ */
+function removeEnvKeys(keys: string[]): { removed: string[]; error?: string } {
+  const envPath = path.join(process.cwd(), '.env');
+  if (!fs.existsSync(envPath)) {
+    return { removed: [], error: '.env file not found' };
+  }
+
+  try {
+    const content = fs.readFileSync(envPath, 'utf-8');
+    const lines = content.split('\n');
+    const removed: string[] = [];
+
+    const filtered = lines.filter((line) => {
+      for (const key of keys) {
+        // Match KEY=... (with optional leading whitespace)
+        if (line.match(new RegExp(`^\\s*${key}\\s*=`))) {
+          removed.push(key);
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (removed.length > 0) {
+      fs.writeFileSync(envPath, filtered.join('\n'), { mode: 0o600 });
+    }
+
+    return { removed };
+  } catch (error: unknown) {
+    return { removed: [], error: getErrorMessage(error) };
+  }
+}
+
+/**
+ * Prompt user to remove migrated secrets from .env, then do it automatically.
+ */
+async function promptRemoveMigratedEnvKeys(migratedWif: boolean, migratedAddr: boolean): Promise<void> {
+  const keysToRemove: string[] = [];
+  if (migratedWif && process.env.FUNDING_WIF) keysToRemove.push('FUNDING_WIF');
+  if (migratedAddr && process.env.TOKEN_RECEIVE_ADDRESS) keysToRemove.push('TOKEN_RECEIVE_ADDRESS');
+
+  if (keysToRemove.length === 0) return;
+
+  console.log('');
+  const keyList = keysToRemove.join(' and ');
+  const remove = await promptConfirm(
+    `Remove ${keyList} from .env? (now stored in encrypted wallets.json)`,
+    true
+  );
+
+  if (remove) {
+    const result = removeEnvKeys(keysToRemove);
+    if (result.error) {
+      showWarning(`Could not remove from .env: ${result.error}`);
+      showWarning(`Please manually remove ${keyList} from your .env file`);
+    } else if (result.removed.length > 0) {
+      showSuccess(`Removed ${result.removed.join(', ')} from .env`);
+    }
+  } else {
+    showWarning(`Remember to manually remove ${keyList} from your .env file`);
+  }
+}
 
 /**
  * Migrate FUNDING_WIF from .env into wallets.json data object.
@@ -48,6 +115,37 @@ async function migrateFundingWIF(data: any): Promise<boolean> {
 }
 
 /**
+ * Migrate TOKEN_RECEIVE_ADDRESS from .env into wallets.json data object.
+ * Returns true if migration happened, false otherwise.
+ */
+async function migrateTokenReceiveAddress(data: any): Promise<boolean> {
+  const receiveAddress = process.env.TOKEN_RECEIVE_ADDRESS;
+  if (!receiveAddress) return false;
+
+  // Already migrated
+  if (data.fundingWallet?.receiveAddress) {
+    if (data.fundingWallet.receiveAddress === receiveAddress) {
+      showInfo('TOKEN_RECEIVE_ADDRESS already present in wallets.json (matches .env)');
+      return false;
+    }
+    // Different address — warn but don't overwrite
+    showWarning('wallets.json already has a different fundingWallet.receiveAddress — skipping migration');
+    return false;
+  }
+
+  console.log('');
+  showInfo('Detected TOKEN_RECEIVE_ADDRESS in your .env file.');
+  const migrate = await promptConfirm('Migrate TOKEN_RECEIVE_ADDRESS from .env into encrypted wallets.json?', true);
+  if (!migrate) return false;
+
+  if (!data.fundingWallet) {
+    data.fundingWallet = {};
+  }
+  data.fundingWallet.receiveAddress = receiveAddress;
+  return true;
+}
+
+/**
  * Encrypt the wallets.json file (migration command)
  */
 export async function encryptWalletsFile(): Promise<void> {
@@ -74,8 +172,12 @@ export async function encryptWalletsFile(): Promise<void> {
         return;
       }
 
-      const data = { fundingWallet: { wif: fundingWif, label: 'funding' } };
-      saveWalletsEncrypted(data as any, password);
+      const data: any = { fundingWallet: { wif: fundingWif, label: 'funding' } };
+      const receiveAddress = process.env.TOKEN_RECEIVE_ADDRESS;
+      if (receiveAddress) {
+        data.fundingWallet.receiveAddress = receiveAddress;
+      }
+      saveWalletsEncrypted(data, password);
 
       // Verify
       const verifyRaw = readWalletsFileRaw();
@@ -96,12 +198,12 @@ export async function encryptWalletsFile(): Promise<void> {
         return;
       }
 
-      showSuccess('Wallets file created and encrypted with FUNDING_WIF!');
+      showSuccess('Wallets file created and encrypted!');
+      await promptRemoveMigratedEnvKeys(true, !!receiveAddress);
       console.log('');
-      console.log('Next steps:');
-      console.log('  1. Remove FUNDING_WIF from your .env file');
-      console.log('  2. Remember your password — there is no recovery without it');
-      console.log('  3. You will be prompted for the password at bot startup');
+      console.log('Important:');
+      console.log('  - Remember your password — there is no recovery without it');
+      console.log('  - You will be prompted for the password at bot startup');
       console.log('');
       return;
     }
@@ -131,9 +233,11 @@ export async function encryptWalletsFile(): Promise<void> {
       return;
     }
 
-    // Check if FUNDING_WIF should be migrated into re-encrypted data
+    // Check if FUNDING_WIF / TOKEN_RECEIVE_ADDRESS should be migrated into re-encrypted data
     const data = JSON.parse(decrypted);
-    const migrated = await migrateFundingWIF(data);
+    const migratedWif = await migrateFundingWIF(data);
+    const migratedAddr = await migrateTokenReceiveAddress(data);
+    const migrated = migratedWif || migratedAddr;
 
     // Get new password
     const newPassword = await promptPassword('Enter new encryption password (min 8 chars):');
@@ -170,8 +274,9 @@ export async function encryptWalletsFile(): Promise<void> {
     showSuccess('Wallets file re-encrypted with new password');
     if (migrated) {
       console.log('');
-      showSuccess('FUNDING_WIF migrated into encrypted wallets.json');
-      console.log('  → Remove FUNDING_WIF from your .env file');
+      if (migratedWif) showSuccess('FUNDING_WIF migrated into encrypted wallets.json');
+      if (migratedAddr) showSuccess('TOKEN_RECEIVE_ADDRESS migrated into encrypted wallets.json');
+      await promptRemoveMigratedEnvKeys(migratedWif, migratedAddr);
     }
     return;
   }
@@ -195,8 +300,10 @@ export async function encryptWalletsFile(): Promise<void> {
   showWarning('You will need this password every time you start the bot or use manage commands.');
   console.log('');
 
-  // Migrate FUNDING_WIF from .env before encrypting
-  const migrated = await migrateFundingWIF(data);
+  // Migrate FUNDING_WIF and TOKEN_RECEIVE_ADDRESS from .env before encrypting
+  const migratedWif = await migrateFundingWIF(data);
+  const migratedAddr = await migrateTokenReceiveAddress(data);
+  const migrated = migratedWif || migratedAddr;
 
   const proceed = await promptConfirm('Encrypt wallets file?', true);
   if (!proceed) {
@@ -245,16 +352,19 @@ export async function encryptWalletsFile(): Promise<void> {
   }
 
   showSuccess('Wallets file encrypted successfully!');
-  if (migrated) {
+  if (migratedWif) {
     showSuccess('FUNDING_WIF migrated into encrypted wallets.json');
+  }
+  if (migratedAddr) {
+    showSuccess('TOKEN_RECEIVE_ADDRESS migrated into encrypted wallets.json');
+  }
+  if (migrated) {
+    await promptRemoveMigratedEnvKeys(migratedWif, migratedAddr);
   }
   console.log('');
   console.log('Important:');
   console.log('  - Remember your password — there is no recovery without it');
   console.log('  - You will be prompted for the password at bot startup');
   console.log('  - Manage commands will also prompt for the password');
-  if (migrated) {
-    console.log('  - Remove FUNDING_WIF from your .env file');
-  }
   console.log('');
 }

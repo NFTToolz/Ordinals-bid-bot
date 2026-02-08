@@ -16,17 +16,28 @@ import {
   isWalletGroupManagerInitialized,
   getWalletGroupManager,
 } from './walletGroups';
-import { getFundingWIF, hasFundingWIF } from './fundingWallet';
+import { getFundingWIF, hasFundingWIF, getReceiveAddress, hasReceiveAddress } from './fundingWallet';
 
 config();
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 
-const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string;
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
 const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 const network = bitcoin.networks.bitcoin;
+
+/**
+ * Get the token receive address, or undefined if not configured.
+ * Wraps getReceiveAddress() with a try/catch for safe fallback.
+ */
+function getTokenReceiveAddress(): string | undefined {
+  try {
+    return hasReceiveAddress() ? getReceiveAddress() : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // Cache the primary payment address to avoid repeated derivation
 let cachedPrimaryPaymentAddress: string | null = null;
@@ -112,8 +123,9 @@ export function isOurReceiveAddress(address: string): boolean {
   if (!address) return false;
   const normalizedAddress = address.toLowerCase();
 
-  // Check primary receive address from env
-  if (TOKEN_RECEIVE_ADDRESS && normalizedAddress === TOKEN_RECEIVE_ADDRESS.toLowerCase()) {
+  // Check primary receive address
+  const primaryReceive = getTokenReceiveAddress();
+  if (primaryReceive && normalizedAddress === primaryReceive.toLowerCase()) {
     return true;
   }
 
@@ -188,8 +200,9 @@ export function getAllOurReceiveAddresses(): Set<string> {
   const addresses = new Set<string>();
 
   // Add primary receive address
-  if (TOKEN_RECEIVE_ADDRESS) {
-    addresses.add(TOKEN_RECEIVE_ADDRESS.toLowerCase());
+  const primaryReceive = getTokenReceiveAddress();
+  if (primaryReceive) {
+    addresses.add(primaryReceive.toLowerCase());
   }
 
   // Add wallet group manager addresses
@@ -235,7 +248,8 @@ export function getAllWalletCredentialsForCancellation(): Array<{
   const seenPaymentAddresses = new Set<string>();
 
   // Add primary wallet
-  if (hasFundingWIF() && TOKEN_RECEIVE_ADDRESS) {
+  const primaryReceiveAddr = getTokenReceiveAddress();
+  if (hasFundingWIF() && primaryReceiveAddr) {
     try {
       const fundingWif = getFundingWIF();
       const keyPair = ECPair.fromWIF(fundingWif, network);
@@ -247,7 +261,7 @@ export function getAllWalletCredentialsForCancellation(): Array<{
       if (!seenPaymentAddresses.has(paymentAddress.toLowerCase())) {
         wallets.push({
           paymentAddress,
-          receiveAddress: TOKEN_RECEIVE_ADDRESS,
+          receiveAddress: primaryReceiveAddr,
           privateKey: fundingWif,
           publicKey: keyPair.publicKey.toString('hex'),
           label: 'primary',

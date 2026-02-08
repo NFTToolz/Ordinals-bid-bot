@@ -194,7 +194,7 @@ export async function getEnhancedStatus(): Promise<EnhancedStatus> {
   const botStatus = isRunning() ? 'RUNNING' : 'STOPPED';
 
   const walletsData = loadWallets();
-  let walletCount = 1; // main wallet
+  let walletCount = hasFundingWIF() ? 1 : 0;
   if (walletsData) {
     if (isGroupsFormat(walletsData)) {
       walletCount += getAllWalletsFromGroups().length;
@@ -252,7 +252,7 @@ export function getQuickStatus(): EnhancedStatus {
   const botStatus = isRunning() ? 'RUNNING' : 'STOPPED';
 
   const walletsData = loadWallets();
-  let walletCount = 1;
+  let walletCount = hasFundingWIF() ? 1 : 0;
   if (walletsData) {
     if (isGroupsFormat(walletsData)) {
       walletCount += getAllWalletsFromGroups().length;

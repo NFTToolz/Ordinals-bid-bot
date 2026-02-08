@@ -11,11 +11,12 @@ import { retrieveTokens, ITokenData } from "./functions/Tokens";
 import axiosInstance from "./axios/axiosInstance";
 import limiter from "./bottleneck";
 import WebSocket from 'ws';
-import Logger, { getBidStatsData } from "./utils/logger";
+import Logger, { getBidStatsData, formatBTC } from "./utils/logger";
 import { printVersionBanner } from "./utils/version";
 import { getErrorMessage, getErrorResponseData, getErrorStatus } from "./utils/errorUtils";
 import {
   initializeBidPacer,
+  getBidPacer,
   waitForBidSlot,
   recordBid as recordPacerBid,
   onRateLimitError,
@@ -27,6 +28,7 @@ import {
 import {
   initializeWalletPool,
   getAvailableWalletAsync,
+  waitForAvailableWallet,
   recordBid as recordWalletBid,
   decrementBidCount as decrementWalletBidCount,
   getWalletByPaymentAddress,
@@ -105,21 +107,69 @@ import {
 import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerator";
 import { promptPasswordStdin } from "./utils/promptPassword";
 import { getFundingWIF, setFundingWIF, hasFundingWIF } from "./utils/fundingWallet";
+import { setReceiveAddress, getReceiveAddress, hasReceiveAddress } from "./utils/fundingWallet";
 
+/** Centralized bot timing and limit constants */
+const BOT_CONSTANTS = {
+  /** Maximum time to wait for scheduled/queue processing locks (ms) */
+  LOCK_WAIT_TIMEOUT_MS: 30_000,
+  /** WebSocket connection timeout (ms) */
+  WS_CONNECT_TIMEOUT_MS: 30_000,
+  /** Graceful shutdown timeout (ms) */
+  SHUTDOWN_TIMEOUT_MS: 5_000,
+  /** Maximum events in the processing queue */
+  EVENT_QUEUE_CAP: 1_000,
+  /** Maximum tracked bids per collection */
+  MAX_BIDS_PER_COLLECTION: 100,
+  /** Bid history TTL (ms) — 24 hours */
+  BID_HISTORY_TTL_MS: 24 * 60 * 60 * 1000,
+  /** Memory usage warning threshold (fraction) */
+  MEMORY_USAGE_THRESHOLD: 0.8,
+  /** Heap growth rate warning threshold (MB/min) */
+  HEAP_GROWTH_WARNING_RATE: 5,
+  /** Bot stats write interval (ms) — 30 seconds */
+  BOT_STATS_WRITE_INTERVAL_MS: 30_000,
+  /** Bid history write interval (ms) — 5 minutes */
+  BID_HISTORY_WRITE_INTERVAL_MS: 300_000,
+  /** Memory monitor interval (ms) — 5 minutes */
+  MEMORY_MONITOR_INTERVAL_MS: 300_000,
+  /** Bid history cleanup interval (ms) — 1 hour */
+  BID_HISTORY_CLEANUP_INTERVAL_MS: 3_600_000,
+  /** Recent bids cleanup interval (ms) — 1 minute */
+  RECENT_BIDS_CLEANUP_INTERVAL_MS: 60_000,
+  /** Purchase events cleanup interval (ms) — 1 minute */
+  PURCHASE_EVENTS_CLEANUP_INTERVAL_MS: 60_000,
+  /** Stale locks cleanup interval (ms) — 2 minutes */
+  STALE_LOCKS_CLEANUP_INTERVAL_MS: 120_000,
+  /** Pacer status log interval (ms) — 30 seconds */
+  PACER_STATUS_INTERVAL_MS: 30_000,
+  /** Bid stats print interval (ms) — 30 minutes */
+  BID_STATS_PRINT_INTERVAL_MS: 1_800_000,
+  /** Max staleness before forced stats write (ms) — 90 seconds */
+  STATS_MAX_STALENESS_MS: 90_000,
+  /** Initial stats write delay (ms) — 5 seconds */
+  INITIAL_STATS_DELAY_MS: 5_000,
+  /** Initial memory check delay (ms) — 1 minute */
+  INITIAL_MEMORY_CHECK_DELAY_MS: 60_000,
+  /** Maximum time to wait for a rate-limited wallet to become available (ms) */
+  WALLET_WAIT_MAX_MS: 15_000,
+  /** Maximum time WS events wait for scheduled task to finish (ms) — shorter than LOCK_WAIT_TIMEOUT_MS */
+  WS_SCHEDULED_WAIT_MS: 5_000,
+} as const;
 
 config()
 
 // Validate required environment variables at startup
-// Note: FUNDING_WIF is no longer required here — it can come from encrypted wallets.json
-const requiredEnvVars = ['TOKEN_RECEIVE_ADDRESS', 'API_KEY'] as const;
+// Note: FUNDING_WIF and TOKEN_RECEIVE_ADDRESS can come from encrypted wallets.json
+const requiredEnvVars = ['API_KEY'] as const;
 const missingVars = requiredEnvVars.filter(v => !process.env[v]);
 if (missingVars.length > 0) {
-  console.error(`[STARTUP] Missing required environment variables: ${missingVars.join(', ')}`);
-  console.error('[STARTUP] Copy .env.example to .env and configure your settings');
+  Logger.error(`[STARTUP] Missing required environment variables: ${missingVars.join(', ')}`);
+  Logger.error('[STARTUP] Copy .env.example to .env and configure your settings');
   process.exit(1);
 }
 
-const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string
+let TOKEN_RECEIVE_ADDRESS: string = process.env.TOKEN_RECEIVE_ADDRESS as string
 const DEFAULT_OUTBID_MARGIN = Number(process.env.DEFAULT_OUTBID_MARGIN) || 0.00001
 const API_KEY = process.env.API_KEY as string;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 32
@@ -149,7 +199,7 @@ function safeECPairFromWIF(wif: string, networkParam: typeof network, context: s
   }
   try {
     return ECPair.fromWIF(wif, networkParam);
-  } catch (error: any) {
+  } catch (error: unknown) {
     throw new Error(`[${context}] Invalid WIF format: ${getErrorMessage(error)}. Check your FUNDING_WIF or fundingWalletWIF configuration.`);
   }
 }
@@ -364,7 +414,7 @@ function cleanupPurchaseEvents(): void {
     }
   }
   if (cleaned > 0) {
-    Logger.info(`[CLEANUP] Removed ${cleaned} expired purchase events (TTL: ${PURCHASE_EVENT_TTL_MS / 1000}s)`);
+    Logger.debug(`[CLEANUP] Removed ${cleaned} expired purchase events (TTL: ${PURCHASE_EVENT_TTL_MS / 1000}s)`);
   }
 }
 
@@ -456,8 +506,8 @@ function loadCollections(): CollectionData[] {
     let parsed: unknown;
     try {
       parsed = JSON.parse(fileContent);
-    } catch (parseError: any) {
-      Logger.error(`[STARTUP] Invalid JSON in collections.json: ${parseError?.message || parseError}`);
+    } catch (parseError: unknown) {
+      Logger.error(`[STARTUP] Invalid JSON in collections.json: ${getErrorMessage(parseError)}`);
       process.exit(1);
     }
 
@@ -526,8 +576,8 @@ function loadCollections(): CollectionData[] {
         errors.push('bidCount must be a positive number');
       }
       // L1: Upper bounds for bidCount and scheduledLoop
-      if (typeof item.bidCount === 'number' && item.bidCount > 1000) {
-        errors.push(`bidCount (${item.bidCount}) must be <= 1000`);
+      if (typeof item.bidCount === 'number' && item.bidCount > 200) {
+        errors.push(`bidCount (${item.bidCount}) must be <= 200`);
       }
       if (item.scheduledLoop !== undefined && (typeof item.scheduledLoop !== 'number' || item.scheduledLoop <= 0)) {
         errors.push('scheduledLoop must be a positive number');
@@ -555,7 +605,7 @@ function loadCollections(): CollectionData[] {
     }
 
     return validatedCollections;
-  } catch (error: any) {
+  } catch (error: unknown) {
     Logger.error(`[STARTUP] Failed to load collections.json: ${getErrorMessage(error)}`);
     process.exit(1);
   }
@@ -667,8 +717,8 @@ function loadBidHistoryFromFile(): void {
       let savedHistory: Record<string, { quantity?: number }>;
       try {
         savedHistory = JSON.parse(fileContent);
-      } catch (parseError: any) {
-        Logger.warning(`[STARTUP] Corrupted bidHistory.json, starting fresh: ${parseError?.message || parseError}`);
+      } catch (parseError: unknown) {
+        Logger.warning(`[STARTUP] Corrupted bidHistory.json, starting fresh: ${getErrorMessage(parseError)}`);
         return;
       }
 
@@ -694,7 +744,7 @@ function loadBidHistoryFromFile(): void {
         Logger.info(`[STARTUP] Restored quantity values for ${restoredCount} collection(s)`);
       }
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     Logger.warning(`[STARTUP] Could not load bid history: ${getErrorMessage(error)}`);
   }
 }
@@ -737,8 +787,8 @@ async function getWalletCredentials(
       return null;
     }
 
-    // Use async version with proper mutex to prevent race conditions
-    const wallet = await manager.getAvailableWalletAsync(groupName);
+    // Wait for an available wallet (retries with sleep instead of skipping)
+    const wallet = await manager.waitForAvailableWallet(groupName, BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
     if (!wallet) {
       Logger.wallet.allRateLimited();
       return null;
@@ -759,9 +809,9 @@ async function getWalletCredentials(
   }
 
   // Priority 2: Legacy single wallet pool (backward compatibility)
-  // Uses async version with proper mutex to prevent race conditions
+  // Wait for an available wallet (retries with sleep instead of skipping)
   if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized() && !isWalletGroupManagerInitialized()) {
-    const wallet = await getAvailableWalletAsync();
+    const wallet = await waitForAvailableWallet(BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
     if (!wallet) {
       Logger.wallet.allRateLimited();
       return null;
@@ -846,9 +896,9 @@ function getReceiveAddressesToQuery(): string[] {
 }
 
 // Memory leak fix: bidHistory cleanup configuration
-const BID_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours TTL
-const BID_HISTORY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // Run cleanup every hour
-const MAX_BIDS_PER_COLLECTION = 100; // Limit bids per collection
+const BID_HISTORY_MAX_AGE_MS = BOT_CONSTANTS.BID_HISTORY_TTL_MS;
+const BID_HISTORY_CLEANUP_INTERVAL_MS = BOT_CONSTANTS.BID_HISTORY_CLEANUP_INTERVAL_MS;
+const MAX_BIDS_PER_COLLECTION = BOT_CONSTANTS.MAX_BIDS_PER_COLLECTION;
 
 // Must be 1 to ensure pacer works correctly - prevents race conditions where multiple
 // tasks call waitForSlot() before any recordBid() completes
@@ -865,7 +915,7 @@ class EventManager {
   queue: any[];
   isScheduledRunning: boolean;
   isProcessingQueue: boolean;
-  private readonly MAX_QUEUE_SIZE = 1000; // Memory leak fix: Limit queue size
+  private readonly MAX_QUEUE_SIZE = BOT_CONSTANTS.EVENT_QUEUE_CAP;
   private droppedEventsCount = 0;
 
 
@@ -892,7 +942,7 @@ class EventManager {
     this.queue.push(event);
 
     // Log warning when queue is 80% full
-    if (this.queue.length > this.MAX_QUEUE_SIZE * 0.8 && this.queue.length % 100 === 0) {
+    if (this.queue.length > this.MAX_QUEUE_SIZE * BOT_CONSTANTS.MEMORY_USAGE_THRESHOLD && this.queue.length % 100 === 0) {
       Logger.warning(`[EVENT QUEUE] Queue is ${Math.round((this.queue.length / this.MAX_QUEUE_SIZE) * 100)}% full (${this.queue.length}/${this.MAX_QUEUE_SIZE})`);
     }
 
@@ -909,13 +959,13 @@ class EventManager {
     this.isProcessingQueue = true;
     try {
       while (this.queue.length > 0) {
-        // M1: Timeout guard to prevent infinite wait if scheduled task hangs
+        // Wait briefly for scheduled task — 5s is enough since p-queue serializes bids
         let waitedMs = 0;
         while (this.isScheduledRunning) {
           await new Promise(resolve => setTimeout(resolve, 500));
           waitedMs += 500;
-          if (waitedMs >= 30000) {
-            Logger.warning('[EVENT QUEUE] Waited 30s for scheduled task to finish, proceeding anyway');
+          if (waitedMs >= BOT_CONSTANTS.WS_SCHEDULED_WAIT_MS) {
+            Logger.debug('[EVENT QUEUE] Scheduled task still running after 5s, proceeding (p-queue serializes bids)');
             break;
           }
         }
@@ -923,8 +973,8 @@ class EventManager {
         if (event) {
           try {
             await this.handleIncomingBid(event);
-          } catch (err: any) {
-            Logger.error(`[EVENT QUEUE] Error processing event for ${event?.collectionSymbol || 'unknown'}`, err?.message || err);
+          } catch (err: unknown) {
+            Logger.error(`[EVENT QUEUE] Error processing event for ${event?.collectionSymbol || 'unknown'}`, getErrorMessage(err));
           }
         }
       }
@@ -971,8 +1021,8 @@ class EventManager {
       let collectionData;
       try {
         collectionData = await collectionDetails(collectionSymbol);
-      } catch (collectionError: any) {
-        Logger.warning(`[WS] API error fetching collection details for ${collectionSymbol}, skipping event: ${collectionError?.message || collectionError}`);
+      } catch (collectionError: unknown) {
+        Logger.warning(`[WS] API error fetching collection details for ${collectionSymbol}, skipping event: ${getErrorMessage(collectionError)}`);
         return;
       }
       // Validate floor price data - skip if unavailable
@@ -1003,7 +1053,7 @@ class EventManager {
           // Early exit: Check if this bid is from one of our wallets (using buyerPaymentAddress from WebSocket)
           const incomingPaymentAddress = message.buyerPaymentAddress;
           if (isOurPaymentAddress(incomingPaymentAddress)) {
-            Logger.info(`[WS] ${tokenId.slice(-8)}: Our own bid (wallet: ${incomingPaymentAddress.slice(0, 10)}...), ignoring`);
+            Logger.debug(`[WS] ${tokenId.slice(-8)}: Our own bid (wallet: ${incomingPaymentAddress.slice(0, 10)}...), ignoring`);
             return;
           }
 
@@ -1178,7 +1228,7 @@ class EventManager {
 
           // Early exit: Check if this bid is from one of our wallets
           if (isOurPaymentAddress(incomingBuyerPaymentAddress)) {
-            Logger.info(`[WS] ${collectionSymbol}: Our own collection offer (wallet: ${incomingBuyerPaymentAddress.slice(0, 10)}...), ignoring`);
+            Logger.debug(`[WS] ${collectionSymbol}: Our own collection offer (wallet: ${incomingBuyerPaymentAddress.slice(0, 10)}...), ignoring`);
             return;
           }
 
@@ -1285,12 +1335,17 @@ class EventManager {
   }
 
   async runScheduledTask(item: CollectionData): Promise<void> {
+    // Guard: skip if another collection's scheduled task is already running
+    if (this.isScheduledRunning) {
+      Logger.info(`[SCHEDULE] Skipping cycle for ${item.collectionSymbol} — another scheduled task is running`);
+      return;
+    }
     // M1: Timeout guard to prevent infinite wait if queue processing hangs
     let waitedMs = 0;
     while (this.isProcessingQueue) {
       await new Promise(resolve => setTimeout(resolve, 100));
       waitedMs += 100;
-      if (waitedMs >= 30000) {
+      if (waitedMs >= BOT_CONSTANTS.LOCK_WAIT_TIMEOUT_MS) {
         Logger.warning(`[SCHEDULE] Waited 30s for queue processing to finish for ${item.collectionSymbol}, proceeding anyway`);
         break;
       }
@@ -1309,7 +1364,7 @@ class EventManager {
 
     // Log pacer status at start of cycle
     const pacerStatus = getBidPacerStatus();
-    Logger.pacer.cycleStart(pacerStatus.bidsRemaining, BIDS_PER_MINUTE, pacerStatus.windowResetIn);
+    Logger.pacer.cycleStart(pacerStatus.bidsRemaining, getBidPacer().getLimit(), pacerStatus.windowResetIn);
 
     const collectionSymbol = item.collectionSymbol
     const traits = item.traits
@@ -1351,8 +1406,8 @@ class EventManager {
       let collectionData;
       try {
         collectionData = await collectionDetails(collectionSymbol);
-      } catch (collectionError: any) {
-        Logger.warning(`[SCHEDULE] API error fetching collection details for ${collectionSymbol}, skipping cycle: ${collectionError?.message || collectionError}`);
+      } catch (collectionError: unknown) {
+        Logger.warning(`[SCHEDULE] API error fetching collection details for ${collectionSymbol}, skipping cycle: ${getErrorMessage(collectionError)}`);
         return;
       }
 
@@ -1402,8 +1457,8 @@ class EventManager {
       let tokens: ITokenData[];
       try {
         tokens = await retrieveTokens(collectionSymbol, bidCount, traits);
-      } catch (tokenError: any) {
-        Logger.warning(`[SCHEDULE] API error retrieving tokens for ${collectionSymbol}, skipping cycle: ${tokenError?.message || tokenError}`);
+      } catch (tokenError: unknown) {
+        Logger.warning(`[SCHEDULE] API error retrieving tokens for ${collectionSymbol}, skipping cycle: ${getErrorMessage(tokenError)}`);
         return;
       }
       // Keep all fetched tokens - we'll limit by successful bids placed, not tokens processed
@@ -1464,8 +1519,9 @@ class EventManager {
       const minOffer = Math.max(minPrice, Math.round(minFloorBid * floorPrice / 100))
       const maxOffer = Math.min(maxPrice, Math.round(maxFloorBid * floorPrice / 100))
 
-      // Enhanced logging: Show bid calculation details
-      Logger.info(`Bid calculations for ${collectionSymbol}:`, {
+      // Compact bid calculation summary (full details at LOG_LEVEL=debug)
+      Logger.info(`[SCHEDULE] ${collectionSymbol}: floor=${formatBTC(floorPrice)}, bid range=${formatBTC(minOffer)}-${formatBTC(maxOffer)} (${minFloorBid}-${maxFloorBid}% of floor)`);
+      Logger.debug(`[SCHEDULE] Bid calc detail for ${collectionSymbol}:`, {
         floorPrice: `${(floorPrice / 1e8).toFixed(8)} BTC (${floorPrice} sats)`,
         config: {
           minBid: `${(minPrice / 1e8).toFixed(8)} BTC`,
@@ -1505,7 +1561,15 @@ class EventManager {
       const collectionBottomBids: CollectionBottomBid[] = tokens.map((item) => ({ tokenId: item.id, collectionSymbol: item.collectionSymbol })).filter((item) => item.collectionSymbol === collectionSymbol)
       const tokensToCancel = findTokensToCancel(collectionBottomBids, ourBids)
       const bottomListingBids = combineBidsAndListings(userBids, bottomListings)
-      Logger.info(`[SCHEDULE] Bottom listing bids for ${collectionSymbol}:`, bottomListingBids);
+      if (bottomListingBids.length > 0) {
+        const prices = bottomListingBids.filter((b): b is NonNullable<typeof b> => b !== null).map(b => b.price);
+        const minP = Math.min(...prices);
+        const maxP = Math.max(...prices);
+        Logger.info(`[SCHEDULE] ${collectionSymbol}: ${bottomListingBids.length} bids queued, price range ${formatBTC(minP)}-${formatBTC(maxP)}`);
+        Logger.debug(`[SCHEDULE] Bottom listing bids for ${collectionSymbol}:`, bottomListingBids);
+      } else {
+        Logger.info(`[SCHEDULE] ${collectionSymbol}: no bids to place`);
+      }
 
       if (tokensToCancel.length > 0) {
         await queue.addAll(
@@ -1573,7 +1637,7 @@ class EventManager {
       let skippedAlreadyOurs = 0;
       let noActionNeeded = 0;          // Existing bid is optimal, no adjustment needed
       let bestOfferIssue = 0;          // bestOffer is null/empty/malformed
-      let unhandledPath = 0;           // Token didn't match any known code path
+      let bidsFailed = 0;              // Bids that failed (rate limit, wallet exhaustion, API error, etc.)
       let successfulBidsPlaced = 0;    // Tokens where we have/placed a valid bid (counts toward bidCount target)
       const targetBidCount = bidCount;
 
@@ -1622,8 +1686,8 @@ class EventManager {
                 try {
                   bestOffer = await getBestOffer(tokenId);
                   offerData = await getOffers(tokenId, buyerTokenReceiveAddress);
-                } catch (apiError: any) {
-                  Logger.warning(`[SCHEDULE] ${tokenId.slice(-8)}: API error fetching offers, skipping: ${apiError?.message || apiError}`);
+                } catch (apiError: unknown) {
+                  Logger.warning(`[SCHEDULE] ${tokenId.slice(-8)}: API error fetching offers, skipping: ${getErrorMessage(apiError)}`);
                   return;
                 }
 
@@ -1714,11 +1778,12 @@ class EventManager {
                           newBidsPlaced++;
                           successfulBidsPlaced++;
                         } else {
-                          unhandledPath++;
+                          Logger.warning(`[BID] Bid failed for ${collectionSymbol} ${tokenId.slice(-8)}: ${result.reason || 'unknown'}`);
+                          bidsFailed++;
                         }
                       } catch (error) {
                         Logger.error(`Failed to place bid for ${collectionSymbol} ${tokenId}`, error);
-                        unhandledPath++;
+                        bidsFailed++;
                       }
                     } else {
                       skippedBidTooHigh++;
@@ -1760,11 +1825,12 @@ class EventManager {
                         newBidsPlaced++;
                         successfulBidsPlaced++;
                       } else {
-                        unhandledPath++;
+                        Logger.warning(`[BID] Bid failed for ${collectionSymbol} ${tokenId.slice(-8)}: ${result.reason || 'unknown'}`);
+                        bidsFailed++;
                       }
                     } catch (error) {
                       Logger.error(`Failed to place minimum bid for ${collectionSymbol} ${tokenId}`, error);
-                      unhandledPath++;
+                      bidsFailed++;
                     }
                   } else {
                     skippedBidTooHigh++;
@@ -1899,7 +1965,7 @@ class EventManager {
               }
               } catch (error: unknown) {
                 Logger.error(`[CRITICAL] Token ${tokenId.slice(-8)} crashed`, getErrorMessage(error));
-                unhandledPath++;
+                bidsFailed++;
               }
             })
         )
@@ -2111,7 +2177,7 @@ class EventManager {
         skippedOfferTooHigh,
         skippedBidTooHigh,
         skippedAlreadyOurs,
-        unhandledPath,
+        bidsFailed,
         currentActiveBids,
         bidCount,
         successfulBidsPlaced,
@@ -2150,8 +2216,8 @@ function connectWebSocket(): void {
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close();
       }
-    } catch (err: any) {
-      Logger.warning('[WEBSOCKET] Error cleaning up old WebSocket:', err?.message || err);
+    } catch (err: unknown) {
+      Logger.warning('[WEBSOCKET] Error cleaning up old WebSocket:', getErrorMessage(err));
     }
   }
 
@@ -2163,7 +2229,7 @@ function connectWebSocket(): void {
       Logger.warning('[WEBSOCKET] Connection timeout after 30s, triggering reconnect');
       try { ws.close(); } catch {}
     }
-  }, 30000);
+  }, BOT_CONSTANTS.WS_CONNECT_TIMEOUT_MS);
 
   // FIX: Register message listener OUTSIDE open handler to prevent accumulation on reconnects
   ws.on("message", function incoming(data: string) {
@@ -2367,16 +2433,12 @@ try {
     fs.chmodSync(envPath, 0o600);
     Logger.info(`[STARTUP] Set secure permissions on ${envPath}`);
   }
-} catch (err: any) {
-  Logger.warning(`[STARTUP] Could not set file permissions: ${err?.message || err}`);
+} catch (err: unknown) {
+  Logger.warning(`[STARTUP] Could not set file permissions: ${getErrorMessage(err)}`);
 }
 
 // Load persisted bid history (for quantity restoration after restart)
 loadBidHistoryFromFile();
-
-// Initialize bid pacer for rate limiting (5 bids/min by default)
-initializeBidPacer(BIDS_PER_MINUTE);
-Logger.info(`[BID PACER] Initialized with ${BIDS_PER_MINUTE} bids/minute limit`);
 
 // Initialize wallet groups/pool if multi-wallet rotation is enabled
 // Wrapped in async IIFE because encrypted wallets.json requires async password prompt
@@ -2405,6 +2467,12 @@ if (fs.existsSync(WALLET_CONFIG_PATH)) {
     setFundingWIF(walletConfig.fundingWallet.wif);
     Logger.info('[STARTUP] Funding WIF loaded from encrypted wallets.json');
   }
+
+  // Extract receive address from wallets.json if present
+  if (walletConfig.fundingWallet?.receiveAddress) {
+    setReceiveAddress(walletConfig.fundingWallet.receiveAddress);
+    Logger.info('[STARTUP] Token receive address loaded from encrypted wallets.json');
+  }
 }
 
 // Resolve funding WIF: wallets.json > .env > error
@@ -2427,6 +2495,21 @@ try {
   Logger.error('[STARTUP] Check your wallets.json or .env — FUNDING_WIF must be a valid Bitcoin WIF private key');
   process.exit(1);
 }
+
+// Resolve TOKEN_RECEIVE_ADDRESS: wallets.json > .env > error
+if (!hasReceiveAddress()) {
+  if (process.env.TOKEN_RECEIVE_ADDRESS) {
+    Logger.warning('[STARTUP] TOKEN_RECEIVE_ADDRESS loaded from .env (deprecated)');
+    Logger.warning('[STARTUP] Run: yarn manage → "Encrypt wallets file" to migrate TOKEN_RECEIVE_ADDRESS into encrypted wallets.json');
+  } else {
+    Logger.error('[STARTUP] No TOKEN_RECEIVE_ADDRESS found in wallets.json or .env');
+    Logger.error('[STARTUP] Run: yarn manage → "Encrypt wallets file" to configure');
+    process.exit(1);
+  }
+}
+TOKEN_RECEIVE_ADDRESS = getReceiveAddress();
+
+let pacerLimit = BIDS_PER_MINUTE;
 
 if (ENABLE_WALLET_ROTATION) {
   try {
@@ -2484,8 +2567,8 @@ if (ENABLE_WALLET_ROTATION) {
             for (const wallet of group.wallets) {
               try {
                 ECPair.fromWIF(wallet.wif, network);
-              } catch (wifError: any) {
-                Logger.error(`[STARTUP] Invalid WIF for wallet in group "${groupName}": ${wifError.message}`);
+              } catch (wifError: unknown) {
+                Logger.error(`[STARTUP] Invalid WIF for wallet in group "${groupName}": ${getErrorMessage(wifError)}`);
                 process.exit(1);
               }
             }
@@ -2503,9 +2586,7 @@ if (ENABLE_WALLET_ROTATION) {
         if (totalThroughput > 0) {
           minBidIntervalMs = Math.max(2000, Math.floor(60000 / totalThroughput));
           Logger.info(`[GLOBAL PACER] Interval set to ${(minBidIntervalMs / 1000).toFixed(1)}s (${totalThroughput} bids/min across all wallets)`);
-          // Reinitialize BidPacer with total throughput so its "X/Y" display is accurate
-          initializeBidPacer(totalThroughput);
-          Logger.info(`[BID PACER] Reinitialized with ${totalThroughput} bids/minute (total wallet throughput)`);
+          pacerLimit = totalThroughput;
         }
 
       } else if (walletConfig.wallets && walletConfig.wallets.length > 0) {
@@ -2521,17 +2602,15 @@ if (ENABLE_WALLET_ROTATION) {
         if (totalThroughput > 0) {
           minBidIntervalMs = Math.max(2000, Math.floor(60000 / totalThroughput));
           Logger.info(`[GLOBAL PACER] Interval set to ${(minBidIntervalMs / 1000).toFixed(1)}s (${totalThroughput} bids/min across all wallets)`);
-          // Reinitialize BidPacer with total throughput so its "X/Y" display is accurate
-          initializeBidPacer(totalThroughput);
-          Logger.info(`[BID PACER] Reinitialized with ${totalThroughput} bids/minute (total wallet throughput)`);
+          pacerLimit = totalThroughput;
         }
 
         // M5: Validate all wallet WIFs at startup (fail-fast before bot loop)
         for (const wallet of walletConfig.wallets) {
           try {
             ECPair.fromWIF(wallet.wif, network);
-          } catch (wifError: any) {
-            Logger.error(`[STARTUP] Invalid WIF for wallet in legacy pool: ${wifError.message}`);
+          } catch (wifError: unknown) {
+            Logger.error(`[STARTUP] Invalid WIF for wallet in legacy pool: ${getErrorMessage(wifError)}`);
             process.exit(1);
           }
         }
@@ -2540,11 +2619,14 @@ if (ENABLE_WALLET_ROTATION) {
         Logger.warning('[WALLET GROUPS] Continuing with single wallet mode...');
       }
     }
-  } catch (error: any) {
-    Logger.error(`[WALLET GROUPS] Failed to initialize: ${error.message}`);
+  } catch (error: unknown) {
+    Logger.error(`[WALLET GROUPS] Failed to initialize: ${getErrorMessage(error)}`);
     Logger.warning('[WALLET GROUPS] Continuing with single wallet mode...');
   }
 }
+
+// Initialize bid pacer once (after wallet loading determines actual throughput)
+initializeBidPacer(pacerLimit);
 
 connectWebSocket();
 
@@ -2569,7 +2651,7 @@ const fileWriteMutex = new Mutex();
 const botStatsDirtyTracker = new BotStatsDirtyTracker(5);
 const bidHistoryDirtyTracker = new BidHistoryDirtyTracker(15_000);
 let lastStatsWriteTime = 0;
-const STATS_MAX_STALENESS_MS = 90_000; // Force write if last write >90s ago
+const STATS_MAX_STALENESS_MS = BOT_CONSTANTS.STATS_MAX_STALENESS_MS;
 
 async function writeBidHistoryToFile(force = false): Promise<void> {
   if (!force && !bidHistoryDirtyTracker.isDirty()) return;
@@ -2667,7 +2749,7 @@ async function writeBotStatsToFile(force = false): Promise<void> {
       windowResetIn: pacerStatus.windowResetIn,
       totalBidsPlaced: pacerStatus.totalBidsPlaced,
       totalWaits: pacerStatus.totalWaits,
-      bidsPerMinute: BIDS_PER_MINUTE,
+      bidsPerMinute: getBidPacer().getLimit(),
     },
     walletPool: walletPoolData,
     walletGroups: walletGroupsData,
@@ -2729,34 +2811,32 @@ async function writeBotStatsToFile(force = false): Promise<void> {
   }
 }
 
-// Write bot stats every 30 seconds
-const BOT_STATS_WRITE_INTERVAL_MS = 30 * 1000; // 30 seconds
+// Write bot stats periodically
 const botStatsIntervalId = setInterval(() => {
   try {
     writeBotStatsToFile();
   } catch (err) {
     Logger.error('[INTERVAL] writeBotStatsToFile failed:', err);
   }
-}, BOT_STATS_WRITE_INTERVAL_MS);
+}, BOT_CONSTANTS.BOT_STATS_WRITE_INTERVAL_MS);
 
-// Initial write after 5 seconds (forced - always write on startup)
+// Initial write after startup (forced - always write on startup)
 setTimeout(() => {
   try {
     writeBotStatsToFile(true);
   } catch (err) {
     Logger.error('[TIMEOUT] Initial writeBotStatsToFile failed:', err);
   }
-}, 5000);
+}, BOT_CONSTANTS.INITIAL_STATS_DELAY_MS);
 
-// Write bid history every 5 minutes for crash recovery
-const BID_HISTORY_WRITE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+// Write bid history periodically for crash recovery
 const bidHistoryIntervalId = setInterval(() => {
   try {
     writeBidHistoryToFile();
   } catch (err) {
     Logger.error('[INTERVAL] writeBidHistoryToFile failed:', err);
   }
-}, BID_HISTORY_WRITE_INTERVAL_MS);
+}, BOT_CONSTANTS.BID_HISTORY_WRITE_INTERVAL_MS);
 
 // Memory leak fix: Clean up expired entries from recentBids deduplication map
 // Runs every 1 minute to prevent unbounded growth during heavy bidding
@@ -2781,11 +2861,11 @@ function cleanupRecentBids() {
       recentBids.delete(tokenId);
       recentBidsCleaned++;
     }
-    Logger.info(`[CLEANUP] Enforced max size cap on recentBids (removed ${toRemove.length} oldest entries)`);
+    Logger.debug(`[CLEANUP] Enforced max size cap on recentBids (removed ${toRemove.length} oldest entries)`);
   }
 
   if (recentBidsCleaned > 0) {
-    Logger.info(`[CLEANUP] Removed ${recentBidsCleaned} entries from recentBids map (size: ${recentBids.size})`);
+    Logger.debug(`[CLEANUP] Removed ${recentBidsCleaned} entries from recentBids map (size: ${recentBids.size})`);
   }
 }
 
@@ -2796,7 +2876,7 @@ let isCleaningUp = false;
 function cleanupBidHistory() {
   // Prevent concurrent cleanup runs
   if (isCleaningUp) {
-    Logger.info('[CLEANUP] Cleanup already in progress, skipping');
+    Logger.debug('[CLEANUP] Cleanup already in progress, skipping');
     return;
   }
   isCleaningUp = true;
@@ -2876,28 +2956,24 @@ const cleanupBidHistoryIntervalId = setInterval(() => {
 }, BID_HISTORY_CLEANUP_INTERVAL_MS);
 
 // More frequent cleanup for recentBids to prevent memory growth during heavy bidding
-const RECENT_BIDS_CLEANUP_INTERVAL_MS = 1 * 60 * 1000; // 1 minute (reduced from 5 minutes)
 const cleanupRecentBidsIntervalId = setInterval(() => {
   try {
     cleanupRecentBids();
   } catch (err) {
     Logger.error('[INTERVAL] cleanupRecentBids failed:', err);
   }
-}, RECENT_BIDS_CLEANUP_INTERVAL_MS);
+}, BOT_CONSTANTS.RECENT_BIDS_CLEANUP_INTERVAL_MS);
 
 // Periodic cleanup for purchase events to enforce TTL and prevent memory leak
-const PURCHASE_EVENTS_CLEANUP_INTERVAL_MS = 1 * 60 * 1000; // 1 minute
 const cleanupPurchaseEventsIntervalId = setInterval(() => {
   try {
     cleanupPurchaseEvents();
   } catch (err) {
     Logger.error('[INTERVAL] cleanupPurchaseEvents failed:', err);
   }
-}, PURCHASE_EVENTS_CLEANUP_INTERVAL_MS);
+}, BOT_CONSTANTS.PURCHASE_EVENTS_CLEANUP_INTERVAL_MS);
 
 // Periodic cleanup for stale processing token locks
-// Runs every 2 minutes to clean up locks from crashed processes
-const STALE_LOCK_CLEANUP_INTERVAL_MS = 2 * 60 * 1000;
 function cleanupStaleLocks() {
   const now = Date.now();
   let staleLocksRemoved = 0;
@@ -2912,7 +2988,7 @@ function cleanupStaleLocks() {
   }
 
   if (staleLocksRemoved > 0) {
-    Logger.info(`[LOCK CLEANUP] Removed ${staleLocksRemoved} stale lock(s)`);
+    Logger.debug(`[LOCK CLEANUP] Removed ${staleLocksRemoved} stale lock(s)`);
   }
 }
 
@@ -2922,11 +2998,10 @@ const cleanupStaleLocksIntervalId = setInterval(() => {
   } catch (err) {
     Logger.error('[INTERVAL] cleanupStaleLocks failed:', err);
   }
-}, STALE_LOCK_CLEANUP_INTERVAL_MS);
+}, BOT_CONSTANTS.STALE_LOCKS_CLEANUP_INTERVAL_MS);
 
 // Memory leak fix: Add memory monitoring and alerting
 let lastMemoryCheck = { heapUsed: process.memoryUsage().heapUsed, timestamp: Date.now() };
-const MEMORY_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 const MEMORY_WARNING_THRESHOLD_MB = 1500; // Warn if heap exceeds 1.5GB
 const MEMORY_GROWTH_RATE_THRESHOLD_MB_PER_MIN = 10; // Warn if growing faster than 10MB/min
 
@@ -2947,7 +3022,7 @@ function monitorMemoryUsage() {
     totalBidsTracked += Object.keys(bidHistory[collectionSymbol]?.ourBids || {}).length;
   }
 
-  Logger.memory.status(heapUsedMB, heapTotalMB, eventManager.queue.length, totalBidsTracked);
+  Logger.memory.status(heapUsedMB, heapTotalMB, eventManager.queue.length, totalBidsTracked, queue.size, queue.pending);
 
   // Warning checks
   if (heapUsedMB > MEMORY_WARNING_THRESHOLD_MB) {
@@ -2968,7 +3043,7 @@ const memoryMonitorIntervalId = setInterval(() => {
   } catch (err) {
     Logger.error('[INTERVAL] monitorMemoryUsage failed:', err);
   }
-}, MEMORY_CHECK_INTERVAL_MS);
+}, BOT_CONSTANTS.MEMORY_MONITOR_INTERVAL_MS);
 
 // Initial memory check after 1 minute
 setTimeout(() => {
@@ -2977,23 +3052,21 @@ setTimeout(() => {
   } catch (err) {
     Logger.error('[TIMEOUT] Initial monitorMemoryUsage failed:', err);
   }
-}, 60000);
+}, BOT_CONSTANTS.INITIAL_MEMORY_CHECK_DELAY_MS);
 
-// Print bid pacer progress every 30 seconds when queue has pending items
-const PACER_PROGRESS_INTERVAL_MS = 30 * 1000; // 30 seconds
+// Print bid pacer progress when queue has pending items
 const pacerProgressIntervalId = setInterval(() => {
   try {
     if (queue.size > 0 || queue.pending > 0) {
       const status = getBidPacerStatus();
-      Logger.queue.progress(queue.size, queue.pending, status.bidsUsed, BIDS_PER_MINUTE, status.windowResetIn, status.totalBidsPlaced);
+      Logger.queue.progress(queue.size, queue.pending, status.bidsUsed, getBidPacer().getLimit(), status.windowResetIn, status.totalBidsPlaced);
     }
   } catch (err) {
     Logger.error('[INTERVAL] pacer progress failed:', err);
   }
-}, PACER_PROGRESS_INTERVAL_MS);
+}, BOT_CONSTANTS.PACER_STATUS_INTERVAL_MS);
 
-// Print bid statistics every 30 minutes
-const BID_STATS_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+// Print bid statistics periodically
 const bidStatsIntervalId = setInterval(() => {
   try {
     Logger.printStats();
@@ -3005,7 +3078,7 @@ const bidStatsIntervalId = setInterval(() => {
       '━'.repeat(60),
       'BID PACER STATUS',
       '━'.repeat(60),
-      `  Bids in window:     ${pacerStatus.bidsUsed}/${BIDS_PER_MINUTE}`,
+      `  Bids in window:     ${pacerStatus.bidsUsed}/${getBidPacer().getLimit()}`,
       `  Window resets in:   ${pacerStatus.windowResetIn}s`,
       `  Total bids placed:  ${pacerStatus.totalBidsPlaced}`,
       `  Total waits:        ${pacerStatus.totalWaits}`,
@@ -3036,7 +3109,7 @@ const bidStatsIntervalId = setInterval(() => {
   } catch (err) {
     Logger.error('[INTERVAL] bid stats print failed:', err);
   }
-}, BID_STATS_INTERVAL_MS);
+}, BOT_CONSTANTS.BID_STATS_PRINT_INTERVAL_MS);
 
 // B6: Shared graceful shutdown with timeout guard and WebSocket cleanup
 async function gracefulShutdown(signal: string): Promise<void> {
@@ -3044,9 +3117,9 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   // B6: Safety net - force exit if shutdown hangs
   const forceExitTimer = setTimeout(() => {
-    console.error('[SHUTDOWN] Graceful shutdown timed out after 5s, forcing exit');
+    Logger.error('[SHUTDOWN] Graceful shutdown timed out after 5s, forcing exit');
     process.exit(1);
-  }, 5000);
+  }, BOT_CONSTANTS.SHUTDOWN_TIMEOUT_MS);
   forceExitTimer.unref(); // Don't keep process alive just for this timer
 
   // M6: Wrap each clearInterval in try-catch so one failure doesn't skip the rest
@@ -3121,6 +3194,7 @@ interface LocalCollectionBottomBid {
 
 interface PlaceBidResult {
   success: boolean;
+  reason?: string;
   paymentAddress?: string;
   walletLabel?: string;
 }
@@ -3167,10 +3241,10 @@ async function placeBidWithRotation(
     const groupName = collectionConfig.walletGroup;
 
     if (manager.hasGroup(groupName)) {
-      const wallet = await manager.getAvailableWalletAsync(groupName);
+      const wallet = await manager.waitForAvailableWallet(groupName, BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
       if (!wallet) {
         Logger.wallet.allRateLimited(tokenId);
-        return { success: false };
+        return { success: false, reason: 'wallet_exhausted' };
       }
 
       buyerTokenReceiveAddress = CENTRALIZE_RECEIVE_ADDRESS
@@ -3186,12 +3260,12 @@ async function placeBidWithRotation(
     }
   }
   // Priority 2: Legacy single wallet pool (backward compatibility)
-  // Use async version with mutex to prevent race conditions
+  // Wait for an available wallet (retries with sleep instead of skipping)
   else if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    const wallet = await getAvailableWalletAsync();
+    const wallet = await waitForAvailableWallet(BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
     if (!wallet) {
       Logger.wallet.allRateLimited(tokenId);
-      return { success: false };
+      return { success: false, reason: 'wallet_exhausted' };
     }
 
     // Use central receive address if enabled, otherwise use wallet's receive address
@@ -3212,11 +3286,11 @@ async function placeBidWithRotation(
   // M4: Validate offer price before proceeding to API call
   if (offerPrice <= 0) {
     Logger.warning(`[BID] Rejected zero/negative offer price (${offerPrice}) for ${tokenId.slice(-8)}`);
-    return { success: false };
+    return { success: false, reason: 'invalid_price' };
   }
   if (maxAllowedPrice && offerPrice > maxAllowedPrice) {
     Logger.warning(`[BID] Rejected offer price ${offerPrice} exceeding max ${maxAllowedPrice} for ${tokenId.slice(-8)}`);
-    return { success: false };
+    return { success: false, reason: 'price_exceeds_max' };
   }
 
   // Enforce global minimum interval between ALL bids (regardless of wallet rotation)
@@ -3264,6 +3338,7 @@ async function placeBidWithRotation(
 
     return {
       success: success === true,
+      reason: success ? undefined : 'bid_rejected',
       paymentAddress: success ? buyerPaymentAddress : undefined,
       walletLabel,
     };
@@ -3300,7 +3375,7 @@ async function placeBidWithRotation(
       Logger.pacer.error(tokenId);
     }
 
-    return { success: false };
+    return { success: false, reason: isRateLimitError ? 'rate_limit' : 'error' };
   }
 }
 
@@ -3325,7 +3400,7 @@ async function placeBid(
     let offerData;
     try {
       offerData = await getOffers(tokenId, ENABLE_WALLET_ROTATION ? undefined : buyerTokenReceiveAddress);
-    } catch (apiError: any) {
+    } catch (apiError: unknown) {
       const status = getErrorStatus(apiError);
       const msg = getErrorMessage(apiError);
       // Detect rate limit errors and trigger the rate limit handler before returning
@@ -3333,7 +3408,7 @@ async function placeBid(
         onRateLimitError(msg);
         throw apiError; // Re-throw for rotation handling
       }
-      Logger.warning(`[PLACEBID] ${tokenId.slice(-8)}: API error getting existing offers, aborting bid to prevent duplicates: ${apiError?.message || apiError}`);
+      Logger.warning(`[PLACEBID] ${tokenId.slice(-8)}: API error getting existing offers, aborting bid to prevent duplicates: ${msg}`);
       return false;
     }
 

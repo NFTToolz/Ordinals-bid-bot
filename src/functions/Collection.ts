@@ -20,13 +20,14 @@ export async function collectionDetails(collectionSymbol: string): Promise<Colle
 
     return data
 
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const err = error as { response?: { status?: number; data?: unknown }; message?: string };
     // 404 means collection doesn't exist - return null (not an error)
-    if (error?.response?.status === 404) {
+    if (err?.response?.status === 404) {
       return null;
     }
     // All other errors should be thrown so callers know the API failed
-    Logger.error(`[COLLECTION] collectionDetails error for ${collectionSymbol}`, error?.response?.data || error?.message);
+    Logger.error(`[COLLECTION] collectionDetails error for ${collectionSymbol}`, err?.response?.data || err?.message);
     throw error;
   }
 }
@@ -67,8 +68,9 @@ export async function fetchCollections() {
 
     const { data: collections } = await limiter.schedule(() => axiosInstance.get(url, { params, headers }))
     return collections
-  } catch (error: any) {
-    Logger.error("[COLLECTION] fetchCollections error", error.response?.data || error.message);
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: unknown }; message?: string };
+    Logger.error("[COLLECTION] fetchCollections error", err?.response?.data || err?.message);
     throw error;
   }
 }
@@ -81,13 +83,16 @@ export interface Token {
   inscriptionNumber: string;
   contentURI: string;
   contentType: string;
-  contentBody: any;
+  contentBody: string | null;
   contentPreviewURI: string;
-  meta: object;
+  meta: {
+    name?: string;
+    attributes?: Array<{ trait_type: string; value: string }>;
+  };
   satRarity: string;
   satBlockHeight: number;
   satBlockTime: string;
-  domain: any;
+  domain: string | null;
 }
 
 interface Collection {

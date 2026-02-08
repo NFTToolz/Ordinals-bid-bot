@@ -8,6 +8,66 @@ import {
 import { promptInteger, promptConfirm, promptSelect } from '../../utils/prompts';
 import chalk = require('chalk');
 
+export async function followLogsUntilExit(): Promise<void> {
+  console.log('');
+  console.log('Following logs... (Press Enter to return to menu)');
+  console.log('━'.repeat(getSeparatorWidth()));
+
+  let stopFollowing: (() => void) | null = null;
+
+  // Start following
+  stopFollowing = followLogs(line => {
+    if (line.includes('[ERROR]') || line.includes('Error')) {
+      console.log(chalk.red(line));
+    } else if (line.includes('[WARNING]') || line.includes('Warning')) {
+      console.log(chalk.yellow(line));
+    } else if (line.includes('[SUCCESS]') || line.includes('[OK]')) {
+      console.log(chalk.green(line));
+    } else if (line.includes('[BID]') || line.includes('placed')) {
+      console.log(chalk.cyan(line));
+    } else {
+      console.log(line);
+    }
+  });
+
+  // Wait for Enter key
+  await new Promise<void>((resolve) => {
+    const wasRaw = process.stdin.isRaw;
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+    process.stdin.resume();
+
+    const cleanup = () => {
+      process.stdin.removeListener('data', onData);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(wasRaw ?? false);
+      }
+      if (stopFollowing) {
+        stopFollowing();
+      }
+      console.log('');
+      console.log('━'.repeat(getSeparatorWidth()));
+      console.log('Stopped following logs.');
+    };
+
+    const onData = (key: Buffer) => {
+      // Enter key (carriage return or newline)
+      if (key[0] === 13 || key[0] === 10) {
+        cleanup();
+        resolve();
+      }
+      // Also handle Ctrl+C as fallback
+      if (key[0] === 3) {
+        cleanup();
+        resolve();
+      }
+    };
+
+    process.stdin.on('data', onData);
+  });
+}
+
 export async function viewLogs(): Promise<void> {
   showSectionHeader('VIEW LOGS');
 
@@ -56,7 +116,7 @@ export async function viewLogs(): Promise<void> {
         console.log(chalk.red(line));
       } else if (line.includes('[WARNING]') || line.includes('Warning')) {
         console.log(chalk.yellow(line));
-      } else if (line.includes('[SUCCESS]') || line.includes('✓')) {
+      } else if (line.includes('[SUCCESS]') || line.includes('[OK]')) {
         console.log(chalk.green(line));
       } else if (line.includes('[BID]') || line.includes('placed')) {
         console.log(chalk.cyan(line));
@@ -69,64 +129,7 @@ export async function viewLogs(): Promise<void> {
     console.log('');
 
   } else if (action === 'follow') {
-    console.log('');
-    console.log('Following logs... (Press Enter to return to menu)');
-    console.log('━'.repeat(getSeparatorWidth()));
-
-    let stopFollowing: (() => void) | null = null;
-
-    // Start following
-    stopFollowing = followLogs(line => {
-      // Color code log lines
-      if (line.includes('[ERROR]') || line.includes('Error')) {
-        console.log(chalk.red(line));
-      } else if (line.includes('[WARNING]') || line.includes('Warning')) {
-        console.log(chalk.yellow(line));
-      } else if (line.includes('[SUCCESS]') || line.includes('✓')) {
-        console.log(chalk.green(line));
-      } else if (line.includes('[BID]') || line.includes('placed')) {
-        console.log(chalk.cyan(line));
-      } else {
-        console.log(line);
-      }
-    });
-
-    // Wait for Enter key
-    await new Promise<void>((resolve) => {
-      const wasRaw = process.stdin.isRaw;
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(true);
-      }
-      process.stdin.resume();
-
-      const cleanup = () => {
-        process.stdin.removeListener('data', onData);
-        if (process.stdin.isTTY) {
-          process.stdin.setRawMode(wasRaw ?? false);
-        }
-        if (stopFollowing) {
-          stopFollowing();
-        }
-        console.log('');
-        console.log('━'.repeat(getSeparatorWidth()));
-        console.log('Stopped following logs.');
-      };
-
-      const onData = (key: Buffer) => {
-        // Enter key (carriage return or newline)
-        if (key[0] === 13 || key[0] === 10) {
-          cleanup();
-          resolve();
-        }
-        // Also handle Ctrl+C as fallback
-        if (key[0] === 3) {
-          cleanup();
-          resolve();
-        }
-      };
-
-      process.stdin.on('data', onData);
-    });
+    await followLogsUntilExit();
 
   } else if (action === 'clear') {
     const confirm = await promptConfirm('Clear all logs?', false);

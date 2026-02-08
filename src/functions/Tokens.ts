@@ -62,8 +62,9 @@ export async function retrieveTokens(collectionSymbol: string, bidCount: number 
       const tokens = (data?.tokens ?? []).filter(item => item.listed === true)
       return tokens
     }
-  } catch (error: any) {
-    Logger.error(`[TOKENS] retrieveTokens error for ${collectionSymbol}`, error?.response?.data || error?.message);
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: unknown }; message?: string };
+    Logger.error(`[TOKENS] retrieveTokens error for ${collectionSymbol}`, err?.response?.data || err?.message);
     throw error;
   }
 }
@@ -78,7 +79,10 @@ export function getLimit(bidCount: number): number {
   return Math.min(Math.max(bidCount * 3, 60), 100);
 }
 
-interface Attribute { }
+interface Attribute {
+  trait_type: string;
+  value: string;
+}
 
 interface Meta {
   name: string;
@@ -115,14 +119,14 @@ export interface ITokenData {
   listedSellerReceiveAddress: string;
   listedForMint: boolean;
   collectionSymbol: string;
-  collection: object; // You may want to define a more specific type for `collection`
+  collection: Collection;
   itemType: string;
   sat: number;
   satName: string;
   satRarity: string;
   satBlockHeight: number;
   satBlockTime: string;
-  satributes: any[]; // You may want to define a more specific type for `satributes`
+  satributes: string[];
 }
 
 

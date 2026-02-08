@@ -33,6 +33,7 @@ export interface WalletConfig {
 export interface FundingWalletConfig {
   wif: string;
   label?: string;
+  receiveAddress?: string;
 }
 
 export interface WalletsFile {

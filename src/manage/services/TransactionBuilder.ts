@@ -2,6 +2,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
 import axios from 'axios';
 import { UTXO, getUTXOs, getFeeRates, getAllUTXOs } from './BalanceService';
+import { getErrorMessage, getErrorResponseData } from '../../utils/errorUtils';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -349,8 +350,8 @@ export async function broadcastTransaction(txHex: string): Promise<string> {
       headers: { 'Content-Type': 'text/plain' },
     });
     return response.data;
-  } catch (error: any) {
-    const message = error.response?.data || error.message;
+  } catch (error: unknown) {
+    const message = getErrorResponseData(error) || getErrorMessage(error);
     throw new Error(`Broadcast failed: ${message}`);
   }
 }

@@ -33,6 +33,19 @@ vi.mock('../../services/WalletGenerator', () => ({
   getAllWalletsFromGroups: vi.fn().mockReturnValue([]),
 }));
 
+// Mock fundingWallet - default to not having a receive address
+let mockHasReceiveAddress = false;
+let mockReceiveAddress = '';
+vi.mock('../../../utils/fundingWallet', () => ({
+  hasFundingWIF: vi.fn().mockReturnValue(true),
+  getFundingWIF: vi.fn().mockReturnValue('mock-wif'),
+  hasReceiveAddress: vi.fn().mockImplementation(() => mockHasReceiveAddress),
+  getReceiveAddress: vi.fn().mockImplementation(() => {
+    if (!mockReceiveAddress) throw new Error('TOKEN_RECEIVE_ADDRESS not configured');
+    return mockReceiveAddress;
+  }),
+}));
+
 // Mock fs
 let mockEnvContent = '';
 vi.mock('fs', () => ({
@@ -68,6 +81,8 @@ describe('Settings Commands', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockEnvContent = '';
+    mockHasReceiveAddress = false;
+    mockReceiveAddress = '';
   });
 
   describe('centralizeReceiveSettings', () => {
@@ -90,7 +105,7 @@ describe('Settings Commands', () => {
 
       await centralizeReceiveSettings();
 
-      expect(display.showError).toHaveBeenCalledWith('TOKEN_RECEIVE_ADDRESS not set in .env');
+      expect(display.showError).toHaveBeenCalledWith('TOKEN_RECEIVE_ADDRESS not set in wallets.json or .env');
     });
 
     it('should show info when wallet rotation is disabled', async () => {

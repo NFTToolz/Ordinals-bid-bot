@@ -28,6 +28,25 @@ const colors = {
   bgCyan: '\x1b[46m',
 };
 
+// Log level system
+export enum LogLevel { DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3 }
+
+function parseLogLevel(value: string | undefined): LogLevel {
+  switch (value?.toLowerCase()) {
+    case 'debug': return LogLevel.DEBUG;
+    case 'warn': case 'warning': return LogLevel.WARN;
+    case 'error': return LogLevel.ERROR;
+    default: return LogLevel.INFO;
+  }
+}
+
+let currentLogLevel: LogLevel = parseLogLevel(process.env.LOG_LEVEL);
+
+export function setLogLevel(level: LogLevel): void { currentLogLevel = level; }
+export function getLogLevel(): LogLevel { return currentLogLevel; }
+
+function shouldLog(level: LogLevel): boolean { return level >= currentLogLevel; }
+
 // Bid statistics tracking
 export class BidStats {
   private stats = {
@@ -109,10 +128,21 @@ export function formatTokenId(tokenId: string): string {
 }
 
 export const Logger = {
+  // Debug - Verbose diagnostic output (only visible at LOG_LEVEL=debug)
+  debug(message: string, details?: unknown) {
+    if (!shouldLog(LogLevel.DEBUG)) return;
+    const timestamp = getTimestamp();
+    console.log(`${colors.dim}[${timestamp}] ${message}${colors.reset}`);
+    if (details) {
+      console.log(`  ${colors.dim}${JSON.stringify(details, null, 2)}${colors.reset}`);
+    }
+  },
+
   // Success - Bids placed, adjusted
   success(message: string, details?: unknown) {
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.green}✓ [${timestamp}]${colors.reset} ${colors.green}${message}${colors.reset}`);
+    console.log(`${colors.bright}${colors.green}[OK] [${timestamp}]${colors.reset} ${colors.green}${message}${colors.reset}`);
     if (details) {
       console.log(`  ${colors.dim}${JSON.stringify(details, null, 2)}${colors.reset}`);
     }
@@ -120,8 +150,9 @@ export const Logger = {
 
   // Info - General information
   info(message: string, details?: unknown) {
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.cyan}ℹ [${timestamp}]${colors.reset} ${message}`);
+    console.log(`${colors.bright}${colors.cyan}[INFO] [${timestamp}]${colors.reset} ${message}`);
     if (details) {
       console.log(`  ${colors.dim}${JSON.stringify(details, null, 2)}${colors.reset}`);
     }
@@ -129,8 +160,9 @@ export const Logger = {
 
   // Warning - Skipped bids, thresholds exceeded
   warning(message: string, details?: unknown) {
+    if (!shouldLog(LogLevel.WARN)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.yellow}⚠ [${timestamp}]${colors.reset} ${colors.yellow}${message}${colors.reset}`);
+    console.log(`${colors.bright}${colors.yellow}[WARN] [${timestamp}]${colors.reset} ${colors.yellow}${message}${colors.reset}`);
     if (details) {
       console.log(`  ${colors.dim}${JSON.stringify(details, null, 2)}${colors.reset}`);
     }
@@ -138,8 +170,9 @@ export const Logger = {
 
   // Error - Failed operations
   error(message: string, error?: unknown) {
+    if (!shouldLog(LogLevel.ERROR)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.red}✗ [${timestamp}]${colors.reset} ${colors.red}${message}${colors.reset}`);
+    console.log(`${colors.bright}${colors.red}[ERR] [${timestamp}]${colors.reset} ${colors.red}${message}${colors.reset}`);
     if (error) {
       if (error instanceof Error && error.stack) {
         console.log(`  ${colors.dim}${error.stack}${colors.reset}`);
@@ -151,8 +184,9 @@ export const Logger = {
 
   // Critical - System issues, memory warnings
   critical(message: string, details?: unknown) {
+    if (!shouldLog(LogLevel.ERROR)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bgRed}${colors.bright}${colors.white} ⚠ CRITICAL [${timestamp}] ${colors.reset} ${colors.red}${colors.bright}${message}${colors.reset}`);
+    console.log(`${colors.bgRed}${colors.bright}${colors.white} CRITICAL [${timestamp}] ${colors.reset} ${colors.red}${colors.bright}${message}${colors.reset}`);
     if (details) {
       console.log(`  ${colors.red}${JSON.stringify(details, null, 2)}${colors.reset}`);
     }
@@ -171,9 +205,9 @@ export const Logger = {
     }
   ) {
     bidStats.increment('bidsPlaced');
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
-    const emoji = type === 'COUNTERBID' ? '⚡' : type === 'OUTBID' ? '🎯' : '📝';
-    console.log(`${colors.bright}${colors.green}${emoji} [${timestamp}] BID PLACED${colors.reset}`);
+    console.log(`${colors.bright}${colors.green}[${timestamp}] BID PLACED${colors.reset}`);
     console.log(`  Collection: ${colors.bright}${collectionSymbol}${colors.reset}`);
     console.log(`  Token:      ${colors.dim}${formatTokenId(tokenId)}${colors.reset}`);
     const floorPct = details?.floorPrice ? ` (${((price / details.floorPrice) * 100).toFixed(1)}% of floor)` : '';
@@ -189,11 +223,12 @@ export const Logger = {
   // Bid adjusted
   bidAdjusted(collectionSymbol: string, tokenId: string, oldPrice: number, newPrice: number) {
     bidStats.increment('bidsAdjusted');
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
     const diff = newPrice - oldPrice;
     const arrow = diff > 0 ? '↑' : '↓';
     const color = diff > 0 ? colors.red : colors.green;
-    console.log(`${colors.bright}${colors.blue}🔄 [${timestamp}] BID ADJUSTED${colors.reset}`);
+    console.log(`${colors.bright}${colors.blue}[${timestamp}] BID ADJUSTED${colors.reset}`);
     console.log(`  Collection: ${colors.bright}${collectionSymbol}${colors.reset}`);
     console.log(`  Token:      ${colors.dim}${formatTokenId(tokenId)}${colors.reset}`);
     console.log(`  Old Price:  ${colors.dim}${formatBTC(oldPrice)}${colors.reset}`);
@@ -203,8 +238,9 @@ export const Logger = {
   // Bid cancelled
   bidCancelled(collectionSymbol: string, tokenId: string, reason: string) {
     bidStats.increment('bidsCancelled');
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.yellow}❌ [${timestamp}] BID CANCELLED${colors.reset}`);
+    console.log(`${colors.bright}${colors.yellow}[${timestamp}] BID CANCELLED${colors.reset}`);
     console.log(`  Collection: ${colors.bright}${collectionSymbol}${colors.reset}`);
     console.log(`  Token:      ${colors.dim}${formatTokenId(tokenId)}${colors.reset}`);
     console.log(`  Reason:     ${colors.yellow}${reason}${colors.reset}\n`);
@@ -220,8 +256,9 @@ export const Logger = {
     maxBid?: number         // Our maximum allowed bid
   ) {
     bidStats.increment('bidsSkipped');
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.magenta}⊘ [${timestamp}] BID SKIPPED${colors.reset}`);
+    console.log(`${colors.bright}${colors.magenta}[${timestamp}] BID SKIPPED${colors.reset}`);
     console.log(`  Collection: ${colors.bright}${collectionSymbol}${colors.reset}`);
     console.log(`  Token:      ${colors.dim}${formatTokenId(tokenId)}${colors.reset}`);
     console.log(`  Reason:     ${colors.magenta}${reason}${colors.reset}`);
@@ -242,92 +279,108 @@ export const Logger = {
   // Collection offer placed
   collectionOfferPlaced(collectionSymbol: string, price: number) {
     bidStats.increment('bidsPlaced');
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.green}🏆 [${timestamp}] COLLECTION OFFER PLACED${colors.reset}`);
+    console.log(`${colors.bright}${colors.green}[${timestamp}] COLLECTION OFFER PLACED${colors.reset}`);
     console.log(`  Collection: ${colors.bright}${collectionSymbol}${colors.reset}`);
     console.log(`  Price:      ${colors.bright}${colors.green}${formatBTC(price)}${colors.reset}\n`);
   },
 
   // Schedule start
   scheduleStart(collectionSymbol: string) {
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
     console.log(`\n${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}🔄 [${timestamp}] SCHEDULE: ${collectionSymbol}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}[${timestamp}] SCHEDULE: ${collectionSymbol}${colors.reset}`);
     console.log(`${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
   },
 
   // Schedule complete
   scheduleComplete(collectionSymbol: string, duration: number) {
+    if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
-    console.log(`${colors.bright}${colors.cyan}✓ [${timestamp}] SCHEDULE COMPLETE: ${collectionSymbol}${colors.reset} ${colors.dim}(${duration.toFixed(2)}s)${colors.reset}\n`);
+    console.log(`${colors.bright}${colors.cyan}[OK] [${timestamp}] SCHEDULE COMPLETE: ${collectionSymbol}${colors.reset} ${colors.dim}(${duration.toFixed(2)}s)${colors.reset}\n`);
   },
 
   // WebSocket events
   websocket: {
     connected() {
+      if (!shouldLog(LogLevel.INFO)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.bright}${colors.green}🔌 [${timestamp}] WebSocket Connected${colors.reset}\n`);
+      console.log(`${colors.bright}${colors.green}[${timestamp}] WebSocket Connected${colors.reset}\n`);
     },
 
     disconnected() {
+      if (!shouldLog(LogLevel.INFO)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.bright}${colors.red}🔌 [${timestamp}] WebSocket Disconnected${colors.reset}\n`);
+      console.log(`${colors.bright}${colors.red}[${timestamp}] WebSocket Disconnected${colors.reset}\n`);
     },
 
     subscribed(collectionSymbol: string) {
+      if (!shouldLog(LogLevel.INFO)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.bright}${colors.cyan}👂 [${timestamp}] Subscribed to: ${collectionSymbol}${colors.reset}`);
+      console.log(`${colors.bright}${colors.cyan}[${timestamp}] Subscribed to: ${collectionSymbol}${colors.reset}`);
     },
 
     event(type: string, collectionSymbol: string, tokenId?: string) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
       const token = tokenId ? ` | Token: ${formatTokenId(tokenId)}` : '';
       console.log(`${colors.dim}[${timestamp}] Event: ${type} | ${collectionSymbol}${token}${colors.reset}`);
     },
 
     error(err: unknown) {
+      if (!shouldLog(LogLevel.ERROR)) return;
       const timestamp = getTimestamp();
       const errorMsg = err instanceof Error ? err.message : (typeof err === 'string' ? err : 'Unknown error');
-      console.log(`${colors.bright}${colors.red}🔌 [${timestamp}] WebSocket Error: ${errorMsg}${colors.reset}`);
+      console.log(`${colors.bright}${colors.red}[${timestamp}] WebSocket Error: ${errorMsg}${colors.reset}`);
       if (err instanceof Error && err.stack) {
         console.log(`  ${colors.dim}${err.stack}${colors.reset}`);
       }
     },
 
     maxRetriesExceeded() {
+      if (!shouldLog(LogLevel.ERROR)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.bgRed}${colors.white}${colors.bright} ⚠ [${timestamp}] WEBSOCKET MAX RETRIES EXCEEDED ${colors.reset}`);
+      console.log(`${colors.bgRed}${colors.white}${colors.bright} [${timestamp}] WEBSOCKET MAX RETRIES EXCEEDED ${colors.reset}`);
       console.log(`${colors.red}${colors.bright}  WebSocket connection failed after maximum retry attempts.${colors.reset}`);
     }
   },
 
   // Memory monitoring
   memory: {
-    status(heapUsedMB: number, heapTotalMB: number, queueSize: number, totalBids: number) {
+    status(heapUsedMB: number, heapTotalMB: number, queueSize: number, totalBids: number, pQueuePending?: number, pQueueActive?: number) {
+      if (!shouldLog(LogLevel.INFO)) return;
       const timestamp = getTimestamp();
       const percentage = ((heapUsedMB / heapTotalMB) * 100).toFixed(1);
       console.log(`\n${colors.bright}${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-      console.log(`${colors.bright}${colors.blue}💾 [${timestamp}] MEMORY STATUS${colors.reset}`);
+      console.log(`${colors.bright}${colors.blue}[${timestamp}] MEMORY STATUS${colors.reset}`);
       console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
       console.log(`  Heap:       ${colors.bright}${heapUsedMB.toFixed(2)} MB${colors.reset} / ${heapTotalMB.toFixed(2)} MB (${percentage}%)`);
       console.log(`  Queue:      ${colors.bright}${queueSize}${colors.reset} events`);
       console.log(`  Bids:       ${colors.bright}${totalBids}${colors.reset} tracked`);
+      if (pQueuePending !== undefined && pQueueActive !== undefined) {
+        console.log(`  Bid queue:  ${colors.bright}${pQueuePending}${colors.reset} pending, ${colors.bright}${pQueueActive}${colors.reset} active`);
+      }
       console.log(`${colors.bright}${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
     },
 
     warning(message: string) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.bgYellow}${colors.black}${colors.bright} ⚠ MEMORY WARNING [${timestamp}] ${colors.reset} ${colors.yellow}${message}${colors.reset}\n`);
+      console.log(`${colors.bgYellow}${colors.black}${colors.bright} MEMORY WARNING [${timestamp}] ${colors.reset} ${colors.yellow}${message}${colors.reset}\n`);
     },
 
     critical(message: string) {
+      if (!shouldLog(LogLevel.ERROR)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.bgRed}${colors.white}${colors.bright} ⚠ MEMORY CRITICAL [${timestamp}] ${colors.reset} ${colors.red}${colors.bright}${message}${colors.reset}\n`);
+      console.log(`${colors.bgRed}${colors.white}${colors.bright} MEMORY CRITICAL [${timestamp}] ${colors.reset} ${colors.red}${colors.bright}${message}${colors.reset}\n`);
     },
 
     cleanup(itemsCleaned: number) {
+      if (!shouldLog(LogLevel.INFO)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.bright}${colors.green}🧹 [${timestamp}] Cleanup: ${itemsCleaned} items removed${colors.reset}\n`);
+      console.log(`${colors.bright}${colors.green}[${timestamp}] Cleanup: ${itemsCleaned} items removed${colors.reset}\n`);
     }
   },
 
@@ -338,11 +391,13 @@ export const Logger = {
 
   // Separator
   separator() {
+    if (!shouldLog(LogLevel.INFO)) return;
     console.log(`${colors.dim}${'─'.repeat(60)}${colors.reset}`);
   },
 
   // Header
   header(text: string) {
+    if (!shouldLog(LogLevel.INFO)) return;
     console.log(`\n${colors.bright}${colors.cyan}╔${'═'.repeat(text.length + 2)}╗${colors.reset}`);
     console.log(`${colors.bright}${colors.cyan}║ ${text} ║${colors.reset}`);
     console.log(`${colors.bright}${colors.cyan}╚${'═'.repeat(text.length + 2)}╝${colors.reset}\n`);
@@ -351,133 +406,154 @@ export const Logger = {
   // Pacer logging
   pacer: {
     init(bidsPerMin: number, windowSec: number) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}⏱️ [${timestamp}] [PACER] Initialized: ${bidsPerMin} bids per ${windowSec}s window${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [PACER] Initialized: ${bidsPerMin} bids per ${windowSec}s window${colors.reset}`);
     },
 
     bid(current: number, max: number, remaining: number, resetIn: number) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}⏱️ [${timestamp}] [PACER] Bid ${current}/${max} in window (${remaining} remaining, reset in ${resetIn}s)${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [PACER] Bid ${current}/${max} in window (${remaining} remaining, reset in ${resetIn}s)${colors.reset}`);
     },
 
     waiting(current: number, max: number, waitSec: number) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}⏱️ [${timestamp}] [PACER] Rate limit reached (${current}/${max}). Waiting ${waitSec}s for window reset...${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [PACER] Rate limit reached (${current}/${max}). Waiting ${waitSec}s for window reset...${colors.reset}`);
     },
 
     windowReset() {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}⏱️ [${timestamp}] [PACER] Window reset. Resuming bid placement.${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [PACER] Window reset. Resuming bid placement.${colors.reset}`);
     },
 
     error(tokenId?: string) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
       const tokenSuffix = tokenId ? ` for token ${tokenId.slice(-8)}` : '';
-      console.log(`${colors.yellow}⏱️ [${timestamp}] [PACER] Rate limit error${tokenSuffix}${colors.reset}`);
+      console.log(`${colors.yellow}[${timestamp}] [PACER] Rate limit error${tokenSuffix}${colors.reset}`);
     },
 
     status(used: number, max: number, remaining: number, resetIn: number) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}⏱️ [${timestamp}] [PACER] Status: ${used}/${max} bids used, ${remaining} remaining, reset in ${resetIn}s${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [PACER] Status: ${used}/${max} bids used, ${remaining} remaining, reset in ${resetIn}s${colors.reset}`);
     },
 
     manualReset() {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}⏱️ [${timestamp}] [PACER] Manual reset performed${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [PACER] Manual reset performed${colors.reset}`);
     },
 
     cycleStart(remaining: number, max: number, resetIn: number) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}⏱️ [${timestamp}] [PACER] Cycle start: ${remaining}/${max} bids available, window resets in ${resetIn}s${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [PACER] Cycle start: ${remaining}/${max} bids available, window resets in ${resetIn}s${colors.reset}`);
     },
   },
 
   // Rate limit logging
   rateLimit: {
     pause(durationSec: number) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.yellow}🚫 [${timestamp}] [RATE LIMIT] Global pause for ${durationSec}s${colors.reset}`);
+      console.log(`${colors.yellow}[${timestamp}] [RATE LIMIT] Global pause for ${durationSec}s${colors.reset}`);
     },
 
     lifted() {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.yellow}🚫 [${timestamp}] [RATE LIMIT] Global pause lifted${colors.reset}`);
+      console.log(`${colors.yellow}[${timestamp}] [RATE LIMIT] Global pause lifted${colors.reset}`);
     },
   },
 
   // Queue logging
   queue: {
     skip(tokenId: string, reason: string) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}📤 [${timestamp}] [QUEUE] Skipping ${tokenId.slice(-8)} - ${reason}${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [QUEUE] Skipping ${tokenId.slice(-8)} - ${reason}${colors.reset}`);
     },
 
     waiting(tokenId: string, waitSec: number) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.yellow}⏸️ [${timestamp}] [QUEUE] Waiting ${waitSec}s for rate limit (token: ...${tokenId.slice(-8)})${colors.reset}`);
+      console.log(`${colors.yellow}[${timestamp}] [QUEUE] Waiting ${waitSec}s for rate limit (token: ...${tokenId.slice(-8)})${colors.reset}`);
     },
 
     progress(pending: number, active: number, pacerUsed: number, pacerMax: number, resetIn: number, totalBids: number) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}📤 [${timestamp}] [QUEUE] Pending: ${pending}, Active: ${active} | Pacer: ${pacerUsed}/${pacerMax} used, reset in ${resetIn}s | Total bids: ${totalBids}${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [QUEUE] Pending: ${pending}, Active: ${active} | Pacer: ${pacerUsed}/${pacerMax} used, reset in ${resetIn}s | Total bids: ${totalBids}${colors.reset}`);
     },
   },
 
   // Tokens logging
   tokens: {
     retrieved(count: number, target: number) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}📋 [${timestamp}] [TOKENS] Retrieved ${count} tokens from API (target: ${target})${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [TOKENS] Retrieved ${count} tokens from API (target: ${target})${colors.reset}`);
     },
 
     firstListings(listings: string) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.dim}📋 [${timestamp}] [TOKENS] First 5 listings: ${listings}${colors.reset}`);
+      console.log(`${colors.dim}[${timestamp}] [TOKENS] First 5 listings: ${listings}${colors.reset}`);
     },
   },
 
   // Wallet logging
   wallet: {
     using(label: string, tokenId: string) {
+      if (!shouldLog(LogLevel.DEBUG)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.blue}💳 [${timestamp}] [WALLET] Using wallet "${label}" for bid on ${tokenId.slice(-8)}${colors.reset}`);
+      console.log(`${colors.blue}[${timestamp}] [WALLET] Using wallet "${label}" for bid on ${tokenId.slice(-8)}${colors.reset}`);
     },
 
     allRateLimited(tokenId?: string) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
       const tokenSuffix = tokenId ? ` for ${tokenId.slice(-8)}` : '';
-      console.log(`${colors.blue}💳 [${timestamp}] [WALLET] All wallets rate-limited, skipping bid${tokenSuffix}${colors.reset}`);
+      console.log(`${colors.blue}[${timestamp}] [WALLET] All wallets rate-limited, timed out waiting${tokenSuffix}${colors.reset}`);
     },
   },
 
   // Schedule logging
   schedule: {
     rateLimited(collectionSymbol: string, waitSec: number) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.cyan}🔄 [${timestamp}] [SCHEDULE] ${collectionSymbol} - Rate limited, waiting ${waitSec}s before queueing${colors.reset}`);
+      console.log(`${colors.cyan}[${timestamp}] [SCHEDULE] ${collectionSymbol} - Rate limited, waiting ${waitSec}s before queueing${colors.reset}`);
     },
 
     skipping(collectionSymbol: string, remainingSec: number) {
+      if (!shouldLog(LogLevel.WARN)) return;
       const timestamp = getTimestamp();
-      console.log(`${colors.cyan}🔄 [${timestamp}] [SCHEDULE] ${collectionSymbol} - Globally rate limited, skipping cycle (${remainingSec}s remaining)${colors.reset}`);
+      console.log(`${colors.cyan}[${timestamp}] [SCHEDULE] ${collectionSymbol} - Globally rate limited, skipping cycle (${remainingSec}s remaining)${colors.reset}`);
     },
   },
 
   // Offer error logging
   offer: {
     error(operation: string, tokenId: string, message: string, httpStatus?: number, response?: unknown) {
+      if (!shouldLog(LogLevel.ERROR)) return;
       const timestamp = getTimestamp();
       const statusStr = httpStatus ? ` (HTTP ${httpStatus})` : '';
-      console.log(`${colors.red}✗ [${timestamp}] [OFFER] ${operation} error for ${tokenId.slice(-8)}${statusStr}: ${message}${colors.reset}`);
+      console.log(`${colors.red}[ERR] [${timestamp}] [OFFER] ${operation} error for ${tokenId.slice(-8)}${statusStr}: ${message}${colors.reset}`);
       if (response) {
         console.log(`  ${colors.dim}${JSON.stringify(response, null, 2)}${colors.reset}`);
       }
     },
 
     insufficientFunds(tokenId: string, bidAmount: number, required: number, available: number) {
+      if (!shouldLog(LogLevel.ERROR)) return;
       const timestamp = getTimestamp();
       const estFees = required - bidAmount;
-      console.log(`${colors.bright}${colors.yellow}💰 [${timestamp}] INSUFFICIENT FUNDS${colors.reset} for ${colors.dim}${formatTokenId(tokenId)}${colors.reset}`);
+      console.log(`${colors.bright}${colors.yellow}[${timestamp}] INSUFFICIENT FUNDS${colors.reset} for ${colors.dim}${formatTokenId(tokenId)}${colors.reset}`);
       console.log(`  Bid Amount:   ${colors.bright}${bidAmount.toLocaleString()} sats${colors.reset} (${formatBTC(bidAmount)})`);
       console.log(`  Est. Fees:    ${colors.dim}~${estFees.toLocaleString()} sats${colors.reset}`);
       console.log(`  Total Req:    ${colors.bright}${required.toLocaleString()} sats${colors.reset}`);
@@ -497,15 +573,16 @@ export const Logger = {
       skippedOfferTooHigh: number;
       skippedBidTooHigh: number;
       skippedAlreadyOurs: number;
-      unhandledPath: number;
+      bidsFailed: number;
       currentActiveBids: number;
       bidCount: number;
       successfulBidsPlaced?: number;
     }) {
+      if (!shouldLog(LogLevel.INFO)) return;
       const timestamp = getTimestamp();
       console.log('');
       console.log(`${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-      console.log(`${colors.bright}📊 [${timestamp}] BID PLACEMENT SUMMARY${colors.reset}`);
+      console.log(`${colors.bright}[${timestamp}] BID PLACEMENT SUMMARY${colors.reset}`);
       console.log(`${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
       console.log(`  Tokens processed:          ${data.tokensProcessed}`);
       if (data.successfulBidsPlaced !== undefined) {
@@ -518,7 +595,7 @@ export const Logger = {
       console.log(`  Skipped (offer > max):     ${colors.yellow}${data.skippedOfferTooHigh}${colors.reset}`);
       console.log(`  Skipped (bid > max):       ${colors.yellow}${data.skippedBidTooHigh}${colors.reset}`);
       console.log(`  Skipped (already ours):    ${data.skippedAlreadyOurs}`);
-      console.log(`  Unhandled path:            ${data.unhandledPath > 0 ? colors.red + data.unhandledPath + colors.reset : data.unhandledPath}`);
+      console.log(`  Bids failed:               ${data.bidsFailed > 0 ? colors.red + data.bidsFailed + colors.reset : data.bidsFailed}`);
       console.log(`  Total active bids:         ${colors.bright}${data.currentActiveBids}${colors.reset} / ${data.bidCount} target`);
       console.log(`${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
       console.log('');

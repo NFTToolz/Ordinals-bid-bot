@@ -5,6 +5,7 @@ import {
   showError,
   showWarning,
 } from '../../utils/display';
+import { followLogsUntilExit } from './logs';
 
 export async function startBot(): Promise<void> {
   showSectionHeader('START BOT');
@@ -31,9 +32,7 @@ export async function startBot(): Promise<void> {
     console.log('');
     console.log(`  PID: ${result.pid}`);
     console.log(`  Log file: bot.log`);
-    console.log('');
-    console.log('Use "View logs" to see bot output.');
-    console.log('Use "View status" to check bot state.');
+    await followLogsUntilExit();
   } else {
     showError(`Failed to start bot: ${result.error}`);
   }

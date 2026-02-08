@@ -17,6 +17,7 @@ import {
 } from './utils/display';
 
 import { promptContinue, promptConfirm } from './utils/prompts';
+import Logger from '../utils/logger';
 
 // Services
 import { getEnhancedStatus, getQuickStatus, refreshAllStatusAsync } from './services/StatusService';
@@ -68,6 +69,10 @@ import {
 } from './commands/settings';
 
 import { checkForUpdates, getUpdateStatus } from '../utils/version';
+import { getErrorMessage } from '../utils/errorUtils';
+import { ensureWalletPasswordIfNeeded } from './utils/walletPassword';
+import { loadFundingWalletFromConfig } from './services/WalletGenerator';
+import { hasFundingWIF, setFundingWIF } from '../utils/fundingWallet';
 
 type ActionHandler = () => Promise<void>;
 
@@ -239,10 +244,8 @@ async function handleAction(action: string): Promise<void> {
   if (handler) {
     try {
       await handler();
-    } catch (error: any) {
-      console.error('');
-      console.error(`Error: ${error.message}`);
-      console.error('');
+    } catch (error: unknown) {
+      Logger.error(`Error: ${getErrorMessage(error)}`);
     }
   }
 }
@@ -254,31 +257,38 @@ async function main(): Promise<void> {
 
   const state = createInitialState();
 
-  // Start background refresh of all status caches
-  refreshAllStatusAsync().catch(() => {});
+  // Decrypt wallets (if encrypted) so status bar can see all wallets + funding WIF
+  await ensureWalletPasswordIfNeeded();
 
-  // Check for updates at startup (15s timeout so offline users aren't stuck)
-  try {
-    const updateInfo = await Promise.race([
+  // For non-encrypted files, load funding wallet from wallets.json
+  if (!hasFundingWIF()) {
+    const fundingConfig = loadFundingWalletFromConfig();
+    if (fundingConfig?.wif) {
+      setFundingWIF(fundingConfig.wif);
+    }
+  }
+
+  // Refresh status caches + check for updates in parallel (both complete before first menu render)
+  const [, updateInfo] = await Promise.all([
+    refreshAllStatusAsync().catch(() => {}),
+    Promise.race([
       checkForUpdates(),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
-    ]);
+    ]).catch(() => null),
+  ]);
 
-    if (updateInfo && updateInfo.updateAvailable) {
-      const countLabel = updateInfo.commitsBehind > 0
-        ? `${updateInfo.commitsBehind} commits behind`
-        : 'new version available';
-      console.log('');
-      showWarning(`Update available! (${countLabel})`);
-      console.log('');
-      const shouldUpdate = await promptConfirm('Update now?', true);
-      if (shouldUpdate) {
-        await checkForUpdatesCommand();
-        // checkForUpdatesCommand handles restart; if we reach here, continue to menu
-      }
+  if (updateInfo && updateInfo.updateAvailable) {
+    const countLabel = updateInfo.commitsBehind > 0
+      ? `${updateInfo.commitsBehind} commits behind`
+      : 'new version available';
+    console.log('');
+    showWarning(`Update available! (${countLabel})`);
+    console.log('');
+    const shouldUpdate = await promptConfirm('Update now?', true);
+    if (shouldUpdate) {
+      await checkForUpdatesCommand();
+      // checkForUpdatesCommand handles restart; if we reach here, continue to menu
     }
-  } catch {
-    // Update check failed — continue to menu
   }
 
   // Periodic refresh to keep status bar current (matches 30s cache TTL)
@@ -333,18 +343,16 @@ async function main(): Promise<void> {
       // Wait for user before returning to menu
       await promptContinue('Press Enter to return to menu...');
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Handle Ctrl+C gracefully
-      if (error.message === 'User force closed the prompt with 0 null') {
+      if (getErrorMessage(error) === 'User force closed the prompt with 0 null') {
         console.log('');
         console.log('Goodbye!');
         console.log('');
         break;
       }
 
-      console.error('');
-      console.error(`Unexpected error: ${error.message}`);
-      console.error('');
+      Logger.error(`Unexpected error: ${getErrorMessage(error)}`);
 
       await promptContinue('Press Enter to continue...');
     }
@@ -356,17 +364,17 @@ async function main(): Promise<void> {
 
 // Handle uncaught errors
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
+  Logger.error('Uncaught exception:', error);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection:', reason);
+  Logger.error('Unhandled rejection:', reason);
   process.exit(1);
 });
 
 // Run
 main().catch(error => {
-  console.error('Fatal error:', error);
+  Logger.error('Fatal error:', error);
   process.exit(1);
 });

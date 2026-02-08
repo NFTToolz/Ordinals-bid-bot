@@ -308,6 +308,58 @@ describe('WalletPool', () => {
     });
   });
 
+  describe('waitForAvailableWallet', () => {
+    it('should return immediately when a wallet is available', async () => {
+      const pool = new WalletPool(testWallets, 5);
+      const wallet = await pool.waitForAvailableWallet(5000);
+      expect(wallet).not.toBeNull();
+      expect(wallet?.bidTimestamps).toHaveLength(1);
+    });
+
+    it('should wait and return a wallet after rate limit expires', async () => {
+      const pool = new WalletPool(testWallets, 1); // 1 bid per minute per wallet
+
+      // Exhaust both wallets
+      const w1 = await pool.getAvailableWalletAsync();
+      const w2 = await pool.getAvailableWalletAsync();
+      expect(w1).not.toBeNull();
+      expect(w2).not.toBeNull();
+
+      // All wallets are now exhausted
+      const immediateResult = await pool.getAvailableWalletAsync();
+      expect(immediateResult).toBeNull();
+
+      // Start waiting for a wallet (max 65s which covers the 60s window)
+      const waitPromise = pool.waitForAvailableWallet(65_000);
+
+      // Advance time past the rate window so the first bid expires
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      const wallet = await waitPromise;
+      expect(wallet).not.toBeNull();
+    });
+
+    it('should return null when maxWaitMs is too short', async () => {
+      const pool = new WalletPool(testWallets, 1);
+
+      // Exhaust both wallets
+      await pool.getAvailableWalletAsync();
+      await pool.getAvailableWalletAsync();
+
+      // Wait with a very short max (1ms — not enough for 60s rate window)
+      const wallet = await pool.waitForAvailableWallet(1);
+      expect(wallet).toBeNull();
+    });
+
+    it('should pre-record bid timestamp like getAvailableWalletAsync', async () => {
+      const pool = new WalletPool(testWallets, 5);
+      const wallet = await pool.waitForAvailableWallet(5000);
+      expect(wallet).not.toBeNull();
+      expect(wallet?.bidTimestamps).toHaveLength(1);
+      expect(wallet?.lastBidTime).toBeGreaterThan(0);
+    });
+  });
+
   describe('resetAllWindows', () => {
     it('should reset all rate limit windows', async () => {
       const pool = new WalletPool(testWallets, 2);

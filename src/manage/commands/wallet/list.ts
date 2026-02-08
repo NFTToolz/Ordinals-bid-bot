@@ -15,6 +15,7 @@ import {
 import { TableColumn, TableData } from '../../utils/table';
 import { showInteractiveTable } from '../../utils/interactiveTable';
 import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
+import { hasReceiveAddress, getReceiveAddress } from '../../../utils/fundingWallet';
 
 config();
 
@@ -43,9 +44,9 @@ export async function listWallets(): Promise<void> {
     receiveAddress?: string;
   }> = [];
 
-  // Add main wallet from .env
+  // Add main wallet
   const FUNDING_WIF = process.env.FUNDING_WIF;
-  const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS;
+  const TOKEN_RECEIVE_ADDRESS = hasReceiveAddress() ? getReceiveAddress() : undefined;
   let mainWalletPaymentAddress: string | undefined;
 
   if (FUNDING_WIF) {
@@ -181,7 +182,7 @@ export async function getWalletsWithBalances(): Promise<WalletWithBalance[]> {
 
   // Main wallet
   const FUNDING_WIF = process.env.FUNDING_WIF;
-  const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS;
+  const TOKEN_RECEIVE_ADDRESS = hasReceiveAddress() ? getReceiveAddress() : undefined;
   let mainWalletPaymentAddress: string | undefined;
 
   if (FUNDING_WIF) {

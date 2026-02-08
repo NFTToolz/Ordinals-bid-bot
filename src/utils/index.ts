@@ -1,6 +1,8 @@
 import { config } from "dotenv"
 import axiosInstance from "../axios/axiosInstance";
 import limiter from "../bottleneck";
+import { getErrorMessage } from "./errorUtils";
+import Logger from "./logger";
 
 config()
 
@@ -17,13 +19,11 @@ export async function getBitcoinBalance(address: string): Promise<number | undef
       }));
 
     const balance = response.data;
-    console.log('--------------------------------------------------------------------------------');
-    console.log("BALANCE: ", balance);
-    console.log('--------------------------------------------------------------------------------');
+    Logger.debug(`[BALANCE] ${balance?.toLocaleString()} sats`);
 
     return balance;
-  } catch (error: any) {
-    console.error('getBitcoinBalance:', error?.response?.data || error?.message);
+  } catch (error: unknown) {
+    Logger.error(`[BALANCE] ${getErrorMessage(error)}`);
     return undefined;  // Return undefined to distinguish API error from zero balance
   }
 }

@@ -9,6 +9,7 @@ import {
 import { showError } from './display';
 import { promptPassword } from './prompts';
 import { setFundingWIF } from '../../utils/fundingWallet';
+import { setReceiveAddress } from '../../utils/fundingWallet';
 
 /**
  * Check if the wallets file is encrypted
@@ -47,10 +48,13 @@ export async function ensureWalletPasswordIfNeeded(): Promise<boolean> {
   // Set the session password — all subsequent load/save calls will use it
   setSessionPassword(password);
 
-  // Set funding WIF from decrypted wallet data if present
+  // Set funding WIF and receive address from decrypted wallet data if present
   const fundingWallet = (data as any).fundingWallet;
   if (fundingWallet?.wif) {
     setFundingWIF(fundingWallet.wif);
+  }
+  if (fundingWallet?.receiveAddress) {
+    setReceiveAddress(fundingWallet.receiveAddress);
   }
 
   return true;

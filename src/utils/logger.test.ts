@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { formatBTC, formatSats, formatTokenId, BidStats, getBidStatsData, bidStats, Logger } from './logger';
+import { formatBTC, formatSats, formatTokenId, BidStats, getBidStatsData, bidStats, Logger, LogLevel, setLogLevel, getLogLevel } from './logger';
 
 describe('Logger Utilities', () => {
   describe('formatBTC', () => {
@@ -233,10 +233,12 @@ describe('Logger Utilities', () => {
     beforeEach(() => {
       consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       bidStats.reset();
+      setLogLevel(LogLevel.DEBUG);
     });
 
     afterEach(() => {
       consoleSpy.mockRestore();
+      setLogLevel(LogLevel.INFO);
     });
 
     describe('success', () => {
@@ -244,7 +246,7 @@ describe('Logger Utilities', () => {
         Logger.success('Operation completed');
         expect(consoleSpy).toHaveBeenCalled();
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('✓');
+        expect(output).toContain('[OK]');
         expect(output).toContain('Operation completed');
       });
 
@@ -259,7 +261,7 @@ describe('Logger Utilities', () => {
         Logger.info('Information message');
         expect(consoleSpy).toHaveBeenCalled();
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('ℹ');
+        expect(output).toContain('[INFO]');
       });
 
       it('should log info with details', () => {
@@ -273,7 +275,7 @@ describe('Logger Utilities', () => {
         Logger.warning('Warning message');
         expect(consoleSpy).toHaveBeenCalled();
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('⚠');
+        expect(output).toContain('[WARN]');
         expect(output).toContain('Warning message');
       });
 
@@ -288,7 +290,7 @@ describe('Logger Utilities', () => {
         Logger.error('Error occurred');
         expect(consoleSpy).toHaveBeenCalled();
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('✗');
+        expect(output).toContain('[ERR]');
         expect(output).toContain('Error occurred');
       });
 
@@ -330,22 +332,22 @@ describe('Logger Utilities', () => {
         expect(newStats.bidsPlaced).toBe(initialBids + 1);
       });
 
-      it('should use different emoji for COUNTERBID', () => {
+      it('should log BID PLACED for COUNTERBID', () => {
         Logger.bidPlaced('test-collection', 'token123i0', 50000, 'COUNTERBID');
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('⚡');
+        expect(output).toContain('BID PLACED');
       });
 
-      it('should use different emoji for OUTBID', () => {
+      it('should log BID PLACED for OUTBID', () => {
         Logger.bidPlaced('test-collection', 'token123i0', 50000, 'OUTBID');
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('🎯');
+        expect(output).toContain('BID PLACED');
       });
 
-      it('should use default emoji for NEW', () => {
+      it('should log BID PLACED for NEW', () => {
         Logger.bidPlaced('test-collection', 'token123i0', 50000, 'NEW');
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('📝');
+        expect(output).toContain('BID PLACED');
       });
     });
 
@@ -453,7 +455,7 @@ describe('Logger Utilities', () => {
         Logger.websocket.connected();
         expect(consoleSpy).toHaveBeenCalled();
         const output = consoleSpy.mock.calls[0][0];
-        expect(output).toContain('🔌');
+        expect(output).toContain('WebSocket');
         expect(output).toContain('Connected');
       });
 
@@ -772,7 +774,7 @@ describe('Logger Utilities', () => {
           skippedOfferTooHigh: 5,
           skippedBidTooHigh: 5,
           skippedAlreadyOurs: 5,
-          unhandledPath: 0,
+          bidsFailed: 0,
           currentActiveBids: 35,
           bidCount: 50,
         });
@@ -792,7 +794,7 @@ describe('Logger Utilities', () => {
           skippedOfferTooHigh: 5,
           skippedBidTooHigh: 5,
           skippedAlreadyOurs: 5,
-          unhandledPath: 0,
+          bidsFailed: 0,
           currentActiveBids: 35,
           bidCount: 50,
           successfulBidsPlaced: 25,
@@ -800,6 +802,162 @@ describe('Logger Utilities', () => {
         const output = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
         expect(output).toContain('Successful bids placed');
       });
+    });
+  });
+
+  describe('Log Levels', () => {
+    let consoleSpy: any;
+
+    beforeEach(() => {
+      consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      bidStats.reset();
+    });
+
+    afterEach(() => {
+      consoleSpy.mockRestore();
+      setLogLevel(LogLevel.INFO);
+    });
+
+    it('Logger.debug() outputs at DEBUG level', () => {
+      setLogLevel(LogLevel.DEBUG);
+      Logger.debug('test debug');
+      expect(consoleSpy).toHaveBeenCalled();
+      const output = consoleSpy.mock.calls[0][0];
+      expect(output).toContain('test debug');
+    });
+
+    it('Logger.debug() is silent at INFO level', () => {
+      setLogLevel(LogLevel.INFO);
+      Logger.debug('test debug');
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('Logger.info() outputs at INFO level', () => {
+      setLogLevel(LogLevel.INFO);
+      Logger.info('test info');
+      expect(consoleSpy).toHaveBeenCalled();
+    });
+
+    it('Logger.info() is silent at WARN level', () => {
+      setLogLevel(LogLevel.WARN);
+      Logger.info('test info');
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('Logger.warning() outputs at WARN level', () => {
+      setLogLevel(LogLevel.WARN);
+      Logger.warning('test warn');
+      expect(consoleSpy).toHaveBeenCalled();
+    });
+
+    it('Logger.warning() is silent at ERROR level', () => {
+      setLogLevel(LogLevel.ERROR);
+      Logger.warning('test warn');
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('Logger.error() always outputs at ERROR level', () => {
+      setLogLevel(LogLevel.ERROR);
+      Logger.error('test error');
+      expect(consoleSpy).toHaveBeenCalled();
+    });
+
+    it('bidPlaced() increments stats even when level is ERROR', () => {
+      setLogLevel(LogLevel.ERROR);
+      const before = getBidStatsData().bidsPlaced;
+      Logger.bidPlaced('col', 'token123i0', 50000, 'NEW');
+      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(getBidStatsData().bidsPlaced).toBe(before + 1);
+    });
+
+    it('bidSkipped() increments stats even when level is ERROR', () => {
+      setLogLevel(LogLevel.ERROR);
+      const before = getBidStatsData().bidsSkipped;
+      Logger.bidSkipped('col', 'token123i0', 'reason');
+      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(getBidStatsData().bidsSkipped).toBe(before + 1);
+    });
+
+    it('bidAdjusted() increments stats even when level is ERROR', () => {
+      setLogLevel(LogLevel.ERROR);
+      const before = getBidStatsData().bidsAdjusted;
+      Logger.bidAdjusted('col', 'token123i0', 40000, 50000);
+      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(getBidStatsData().bidsAdjusted).toBe(before + 1);
+    });
+
+    it('bidCancelled() increments stats even when level is ERROR', () => {
+      setLogLevel(LogLevel.ERROR);
+      const before = getBidStatsData().bidsCancelled;
+      Logger.bidCancelled('col', 'token123i0', 'reason');
+      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(getBidStatsData().bidsCancelled).toBe(before + 1);
+    });
+
+    it('collectionOfferPlaced() increments stats even when level is ERROR', () => {
+      setLogLevel(LogLevel.ERROR);
+      const before = getBidStatsData().bidsPlaced;
+      Logger.collectionOfferPlaced('col', 50000);
+      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(getBidStatsData().bidsPlaced).toBe(before + 1);
+    });
+
+    it('setLogLevel/getLogLevel round-trip', () => {
+      setLogLevel(LogLevel.DEBUG);
+      expect(getLogLevel()).toBe(LogLevel.DEBUG);
+      setLogLevel(LogLevel.WARN);
+      expect(getLogLevel()).toBe(LogLevel.WARN);
+      setLogLevel(LogLevel.ERROR);
+      expect(getLogLevel()).toBe(LogLevel.ERROR);
+      setLogLevel(LogLevel.INFO);
+      expect(getLogLevel()).toBe(LogLevel.INFO);
+    });
+
+    it('LogLevel enum has correct ordering', () => {
+      expect(LogLevel.DEBUG).toBeLessThan(LogLevel.INFO);
+      expect(LogLevel.INFO).toBeLessThan(LogLevel.WARN);
+      expect(LogLevel.WARN).toBeLessThan(LogLevel.ERROR);
+    });
+
+    it('debug details are output at DEBUG level', () => {
+      setLogLevel(LogLevel.DEBUG);
+      Logger.debug('msg', { key: 'val' });
+      expect(consoleSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('websocket.event is silent at INFO level', () => {
+      setLogLevel(LogLevel.INFO);
+      Logger.websocket.event('offer', 'col', 'tok');
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('websocket.event outputs at DEBUG level', () => {
+      setLogLevel(LogLevel.DEBUG);
+      Logger.websocket.event('offer', 'col', 'tok');
+      expect(consoleSpy).toHaveBeenCalled();
+    });
+
+    it('pacer.init is silent at INFO level', () => {
+      setLogLevel(LogLevel.INFO);
+      Logger.pacer.init(10, 60);
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('separator is silent at WARN level', () => {
+      setLogLevel(LogLevel.WARN);
+      Logger.separator();
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('summary.bidPlacement is silent at WARN level', () => {
+      setLogLevel(LogLevel.WARN);
+      Logger.summary.bidPlacement({
+        tokensProcessed: 10, newBidsPlaced: 5, bidsAdjusted: 1,
+        alreadyHaveBids: 2, noActionNeeded: 1, skippedOfferTooHigh: 0,
+        skippedBidTooHigh: 0, skippedAlreadyOurs: 1, bidsFailed: 0,
+        currentActiveBids: 8, bidCount: 10,
+      });
+      expect(consoleSpy).not.toHaveBeenCalled();
     });
   });
 });

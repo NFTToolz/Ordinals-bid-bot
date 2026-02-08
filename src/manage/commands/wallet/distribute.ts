@@ -25,6 +25,7 @@ import {
 } from '../../utils/prompts';
 import { getWalletsWithBalances, WalletWithBalance } from './list';
 import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
+import { getErrorMessage } from '../../../utils/errorUtils';
 
 config();
 
@@ -241,8 +242,8 @@ export async function distributeFunds(): Promise<void> {
     console.log(`  View on mempool.space: https://mempool.space/tx/${result.txid}`);
     console.log('');
 
-  } catch (error: any) {
-    const errorMsg = error.message || '';
+  } catch (error: unknown) {
+    const errorMsg = getErrorMessage(error);
 
     // Parse common Bitcoin errors into user-friendly messages
     if (errorMsg.includes('dust')) {

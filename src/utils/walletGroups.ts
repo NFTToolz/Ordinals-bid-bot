@@ -1,6 +1,7 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
 import WalletPool, { WalletConfig, WalletState, WalletPoolStats } from './walletPool';
+import Logger from './logger';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -64,7 +65,7 @@ export class WalletGroupManager {
 
     for (const [groupName, groupConfig] of Object.entries(config.groups)) {
       if (!groupConfig.wallets || groupConfig.wallets.length === 0) {
-        console.warn(`[WALLET GROUPS] Group "${groupName}" has no wallets, skipping`);
+        Logger.warning(`[WALLET GROUPS] Group "${groupName}" has no wallets, skipping`);
         continue;
       }
 
@@ -74,7 +75,7 @@ export class WalletGroupManager {
         this.network
       );
       this.groups.set(groupName, pool);
-      console.log(`[WALLET GROUPS] Initialized group "${groupName}" with ${groupConfig.wallets.length} wallets`);
+      Logger.debug(`[WALLET GROUPS] Initialized group "${groupName}" with ${groupConfig.wallets.length} wallets`);
     }
 
     if (config.defaultGroup && this.groups.has(config.defaultGroup)) {
@@ -84,7 +85,7 @@ export class WalletGroupManager {
       this.defaultGroupName = this.groups.keys().next().value || null;
     }
 
-    console.log(`[WALLET GROUPS] Initialized ${this.groups.size} group(s), default: ${this.defaultGroupName || 'none'}`);
+    Logger.debug(`[WALLET GROUPS] Initialized ${this.groups.size} group(s), default: ${this.defaultGroupName || 'none'}`);
   }
 
   /**
@@ -95,7 +96,7 @@ export class WalletGroupManager {
     this.groups.clear();
 
     if (!config.wallets || config.wallets.length === 0) {
-      console.warn('[WALLET GROUPS] Legacy config has no wallets');
+      Logger.warning('[WALLET GROUPS] Legacy config has no wallets');
       return;
     }
 
@@ -107,7 +108,7 @@ export class WalletGroupManager {
     this.groups.set('default', pool);
     this.defaultGroupName = 'default';
 
-    console.log(`[WALLET GROUPS] Initialized legacy format as "default" group with ${config.wallets.length} wallets`);
+    Logger.debug(`[WALLET GROUPS] Initialized legacy format as "default" group with ${config.wallets.length} wallets`);
   }
 
   /**
@@ -167,10 +168,23 @@ export class WalletGroupManager {
   async getAvailableWalletAsync(groupName: string): Promise<WalletState | null> {
     const pool = this.groups.get(groupName);
     if (!pool) {
-      console.warn(`[WALLET GROUPS] Group "${groupName}" not found`);
+      Logger.warning(`[WALLET GROUPS] Group "${groupName}" not found`);
       return null;
     }
     return pool.getAvailableWalletAsync();
+  }
+
+  /**
+   * Wait for an available wallet from a specific group, retrying with sleeps.
+   * Returns null if the group doesn't exist or the wait exceeds maxWaitMs.
+   */
+  async waitForAvailableWallet(groupName: string, maxWaitMs: number): Promise<WalletState | null> {
+    const pool = this.groups.get(groupName);
+    if (!pool) {
+      Logger.warning(`[WALLET GROUPS] Group "${groupName}" not found`);
+      return null;
+    }
+    return pool.waitForAvailableWallet(maxWaitMs);
   }
 
   /**
@@ -318,7 +332,7 @@ export function initializeWalletGroupManager(
   network: bitcoin.Network = bitcoin.networks.bitcoin
 ): WalletGroupManager {
   if (managerInstance) {
-    console.warn('[WALLET GROUPS] Manager already initialized, reinitializing...');
+    Logger.warning('[WALLET GROUPS] Manager already initialized, reinitializing...');
   }
 
   managerInstance = new WalletGroupManager(network);
