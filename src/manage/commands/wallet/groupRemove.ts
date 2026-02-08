@@ -16,12 +16,18 @@ import {
   promptSelect,
   promptConfirm,
 } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 /**
  * Remove a wallet from a group
  */
 export async function removeWalletFromGroupCommand(): Promise<void> {
   showSectionHeader('REMOVE WALLET FROM GROUP');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   const groupsData = loadWalletGroups();
   const groupNames = getWalletGroupNames();
@@ -95,6 +101,11 @@ export async function removeWalletFromGroupCommand(): Promise<void> {
  */
 export async function deleteWalletGroupCommand(): Promise<void> {
   showSectionHeader('DELETE WALLET GROUP');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   const groupsData = loadWalletGroups();
   const groupNames = getWalletGroupNames();

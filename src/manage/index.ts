@@ -30,6 +30,7 @@ import {
   viewOrdinals,
   exportWalletsCommand,
   importWalletsCommand,
+  encryptWalletsFile,
   listWalletGroups,
   createWalletGroupCommand,
   addWalletsToGroupCommand,
@@ -79,6 +80,7 @@ const actions: Record<string, ActionHandler> = {
   'wallet:consolidate': consolidateFunds,
   'wallet:export': exportWalletsCommand,
   'wallet:import': importWalletsCommand,
+  'wallet:encrypt': encryptWalletsFile,
 
   // Wallet group actions
   'wallet:groups': listWalletGroups,
@@ -147,6 +149,7 @@ const MENU_CONFIG: Record<MenuLevel, MenuConfig> = {
       { name: 'Consolidate funds', value: 'wallet:consolidate' },
       { name: 'Export/backup wallets', value: 'wallet:export' },
       { name: 'Import wallets', value: 'wallet:import' },
+      { name: 'Encrypt wallets file', value: 'wallet:encrypt' },
       { name: '← Back', value: 'back' },
     ],
   },

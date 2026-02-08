@@ -16,6 +16,7 @@ import {
   isWalletGroupManagerInitialized,
   getWalletGroupManager,
 } from './walletGroups';
+import { getFundingWIF, hasFundingWIF } from './fundingWallet';
 
 config();
 
@@ -23,7 +24,6 @@ const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
 
 const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string;
-const FUNDING_WIF = process.env.FUNDING_WIF as string;
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
 const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 const network = bitcoin.networks.bitcoin;
@@ -40,12 +40,13 @@ function getPrimaryPaymentAddress(): string | null {
     return cachedPrimaryPaymentAddress;
   }
 
-  if (!FUNDING_WIF || typeof FUNDING_WIF !== 'string') {
+  if (!hasFundingWIF()) {
     return null;
   }
 
   try {
-    const keyPair = ECPair.fromWIF(FUNDING_WIF, network);
+    const wif = getFundingWIF();
+    const keyPair = ECPair.fromWIF(wif, network);
     cachedPrimaryPaymentAddress = bitcoin.payments.p2wpkh({
       pubkey: keyPair.publicKey,
       network: network,
@@ -234,9 +235,10 @@ export function getAllWalletCredentialsForCancellation(): Array<{
   const seenPaymentAddresses = new Set<string>();
 
   // Add primary wallet
-  if (FUNDING_WIF && TOKEN_RECEIVE_ADDRESS) {
+  if (hasFundingWIF() && TOKEN_RECEIVE_ADDRESS) {
     try {
-      const keyPair = ECPair.fromWIF(FUNDING_WIF, network);
+      const fundingWif = getFundingWIF();
+      const keyPair = ECPair.fromWIF(fundingWif, network);
       const paymentAddress = bitcoin.payments.p2wpkh({
         pubkey: keyPair.publicKey,
         network: network,
@@ -246,7 +248,7 @@ export function getAllWalletCredentialsForCancellation(): Array<{
         wallets.push({
           paymentAddress,
           receiveAddress: TOKEN_RECEIVE_ADDRESS,
-          privateKey: FUNDING_WIF,
+          privateKey: fundingWif,
           publicKey: keyPair.publicKey.toString('hex'),
           label: 'primary',
         });
@@ -322,10 +324,14 @@ export function getAllWalletCredentialsForCancellation(): Array<{
   return wallets;
 }
 
+// Module-level cache — built once on first call, reused for lifetime of process.
+// Wallets don't change at runtime, so this is safe and avoids repeated disk I/O + EC key derivation.
+let credentialsByAddress: Map<string, { privateKey: string; publicKey: string; receiveAddress: string }> | null = null;
+
 /**
  * Look up wallet credentials by payment address for cross-wallet cancellation.
- * Uses getAllWalletCredentialsForCancellation() internally with a Map cache
- * for efficient repeated lookups within the same call.
+ * Uses a module-level Map cache built lazily from getAllWalletCredentialsForCancellation()
+ * to avoid repeated disk I/O and EC key derivation on every call.
  *
  * @param paymentAddress - The payment address to look up
  * @returns Wallet credentials (privateKey, publicKey, receiveAddress) or undefined if not found
@@ -334,17 +340,26 @@ export function getWalletCredentialsByPaymentAddress(
   paymentAddress: string
 ): { privateKey: string; publicKey: string; receiveAddress: string } | undefined {
   if (!paymentAddress) return undefined;
-  const normalized = paymentAddress.toLowerCase();
 
-  const allCreds = getAllWalletCredentialsForCancellation();
-  for (const cred of allCreds) {
-    if (cred.paymentAddress.toLowerCase() === normalized) {
-      return {
+  // Build cache on first call
+  if (!credentialsByAddress) {
+    credentialsByAddress = new Map();
+    for (const cred of getAllWalletCredentialsForCancellation()) {
+      credentialsByAddress.set(cred.paymentAddress.toLowerCase(), {
         privateKey: cred.privateKey,
         publicKey: cred.publicKey,
         receiveAddress: cred.receiveAddress,
-      };
+      });
     }
   }
-  return undefined;
+
+  return credentialsByAddress.get(paymentAddress.toLowerCase());
+}
+
+/**
+ * Clear the wallet credentials cache. Intended for testing only —
+ * in production, wallets don't change at runtime.
+ */
+export function clearWalletCredentialsCache(): void {
+  credentialsByAddress = null;
 }

@@ -5,6 +5,7 @@ export { consolidateFunds } from './consolidate';
 export { viewOrdinals } from './ordinals';
 export { exportWalletsCommand } from './export';
 export { importWalletsCommand } from './import';
+export { encryptWalletsFile } from './encrypt';
 
 // Wallet group commands
 export { listWalletGroups } from './groups';

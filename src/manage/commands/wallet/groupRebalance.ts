@@ -27,6 +27,7 @@ import {
   promptSelect,
   promptConfirm,
 } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -215,6 +216,11 @@ async function buildTransferTransaction(
  */
 export async function rebalanceWalletGroup(): Promise<void> {
   showSectionHeader('REBALANCE WALLET GROUP');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   const groupNames = getWalletGroupNames();
   const groupsData = loadWalletGroups();
@@ -530,6 +536,11 @@ interface GroupRebalanceInfo {
  */
 export async function rebalanceAllWalletGroups(): Promise<void> {
   showSectionHeader('REBALANCE ALL WALLET GROUPS');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   const groupNames = getWalletGroupNames();
   const groupsData = loadWalletGroups();

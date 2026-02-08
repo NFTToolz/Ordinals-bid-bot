@@ -30,7 +30,13 @@ export interface WalletConfig {
   receiveAddress: string;
 }
 
+export interface FundingWalletConfig {
+  wif: string;
+  label?: string;
+}
+
 export interface WalletsFile {
+  fundingWallet?: FundingWalletConfig;
   mnemonic?: string;
   encryptedMnemonic?: string;
   wallets: WalletConfig[];
@@ -51,6 +57,7 @@ export interface WalletGroupConfig {
  * New wallet groups file format
  */
 export interface WalletGroupsFile {
+  fundingWallet?: FundingWalletConfig;
   groups: Record<string, WalletGroupConfig>;
   defaultGroup?: string;
   mnemonic?: string;
@@ -60,6 +67,35 @@ export interface WalletGroupsFile {
 }
 
 const WALLETS_FILE_PATH = path.join(process.cwd(), 'config/wallets.json');
+
+/**
+ * Module-level encryption session state.
+ * When set, loadWallets/loadWalletGroups will decrypt transparently,
+ * and saveWallets/saveWalletGroups will re-encrypt automatically.
+ */
+let sessionPassword: string | null = null;
+
+/**
+ * Set the session encryption password. All subsequent load/save operations
+ * will decrypt/re-encrypt transparently using this password.
+ */
+export function setSessionPassword(password: string): void {
+  sessionPassword = password;
+}
+
+/**
+ * Clear the session password (e.g., on shutdown)
+ */
+export function clearSessionPassword(): void {
+  sessionPassword = null;
+}
+
+/**
+ * Get the current session password (for external use like bid.ts)
+ */
+export function getSessionPassword(): string | null {
+  return sessionPassword;
+}
 
 /**
  * Generate a new 12-word mnemonic
@@ -183,16 +219,16 @@ export function getWalletFromWIF(
 }
 
 /**
- * Encrypt mnemonic with password
+ * Encrypt arbitrary data with password (AES-256-GCM + PBKDF2 100k iterations)
  */
-export function encryptMnemonic(mnemonic: string, password: string): string {
+export function encryptData(data: string, password: string): string {
   const algorithm = 'aes-256-gcm';
   const salt = crypto.randomBytes(32);
   const key = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256');
   const iv = crypto.randomBytes(16);
 
   const cipher = crypto.createCipheriv(algorithm, key, iv);
-  let encrypted = cipher.update(mnemonic, 'utf8', 'hex');
+  let encrypted = cipher.update(data, 'utf8', 'hex');
   encrypted += cipher.final('hex');
 
   const authTag = cipher.getAuthTag();
@@ -205,10 +241,13 @@ export function encryptMnemonic(mnemonic: string, password: string): string {
   });
 }
 
+/** @deprecated Use encryptData instead */
+export const encryptMnemonic = encryptData;
+
 /**
- * Decrypt mnemonic with password
+ * Decrypt data with password (AES-256-GCM + PBKDF2 100k iterations)
  */
-export function decryptMnemonic(encryptedData: string, password: string): string {
+export function decryptData(encryptedData: string, password: string): string {
   const { salt, iv, authTag, encrypted } = JSON.parse(encryptedData);
 
   const algorithm = 'aes-256-gcm';
@@ -223,8 +262,113 @@ export function decryptMnemonic(encryptedData: string, password: string): string
   return decrypted;
 }
 
+/** @deprecated Use decryptData instead */
+export const decryptMnemonic = decryptData;
+
 /**
- * Load wallets from config file
+ * Check if file content is in encrypted format
+ */
+export function isEncryptedFormat(content: string): boolean {
+  try {
+    const parsed = JSON.parse(content);
+    return !!(parsed.salt && parsed.iv && parsed.authTag && parsed.encrypted);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Encrypt and save wallet data to wallets.json
+ */
+export function saveWalletsEncrypted(data: WalletsFile | WalletGroupsFile, password: string): void {
+  const dir = path.dirname(WALLETS_FILE_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  if ('wallets' in data && !('groups' in data)) {
+    (data as WalletsFile).lastModified = new Date().toISOString();
+    if (!(data as WalletsFile).createdAt) {
+      (data as WalletsFile).createdAt = (data as WalletsFile).lastModified;
+    }
+  } else {
+    (data as WalletGroupsFile).lastModified = new Date().toISOString();
+    if (!(data as WalletGroupsFile).createdAt) {
+      (data as WalletGroupsFile).createdAt = (data as WalletGroupsFile).lastModified;
+    }
+  }
+
+  const plaintext = JSON.stringify(data, null, 2);
+  const encrypted = encryptData(plaintext, password);
+  fs.writeFileSync(WALLETS_FILE_PATH, encrypted, { mode: 0o600 });
+}
+
+/**
+ * Load and decrypt wallets.json. Returns parsed object or null on failure.
+ * If file is not encrypted, returns parsed JSON directly.
+ */
+export function loadWalletsDecrypted(password: string): WalletsFile | WalletGroupsFile | null {
+  try {
+    if (!fs.existsSync(WALLETS_FILE_PATH)) {
+      return null;
+    }
+    const content = fs.readFileSync(WALLETS_FILE_PATH, 'utf-8');
+    if (isEncryptedFormat(content)) {
+      const decrypted = decryptData(content, password);
+      return JSON.parse(decrypted);
+    }
+    // Not encrypted — return parsed directly
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read raw wallets.json content (for encryption detection)
+ */
+export function readWalletsFileRaw(): string | null {
+  try {
+    if (!fs.existsSync(WALLETS_FILE_PATH)) {
+      return null;
+    }
+    return fs.readFileSync(WALLETS_FILE_PATH, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the fundingWallet config from wallets.json (decrypting if needed).
+ * Returns null if file doesn't exist, has no fundingWallet, or decryption fails.
+ */
+export function loadFundingWalletFromConfig(): FundingWalletConfig | null {
+  try {
+    if (!fs.existsSync(WALLETS_FILE_PATH)) {
+      return null;
+    }
+    const content = fs.readFileSync(WALLETS_FILE_PATH, 'utf-8');
+    let data: any;
+    if (isEncryptedFormat(content)) {
+      if (sessionPassword) {
+        const decrypted = decryptData(content, sessionPassword);
+        data = JSON.parse(decrypted);
+      } else {
+        return null;
+      }
+    } else {
+      data = JSON.parse(content);
+    }
+    return data?.fundingWallet || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load wallets from config file.
+ * If file is encrypted and sessionPassword is set, decrypts transparently.
+ * Returns null if file is encrypted with no session password.
  */
 export function loadWallets(): WalletsFile | null {
   try {
@@ -232,6 +376,13 @@ export function loadWallets(): WalletsFile | null {
       return null;
     }
     const content = fs.readFileSync(WALLETS_FILE_PATH, 'utf-8');
+    if (isEncryptedFormat(content)) {
+      if (sessionPassword) {
+        const decrypted = decryptData(content, sessionPassword);
+        return JSON.parse(decrypted);
+      }
+      return null;
+    }
     return JSON.parse(content);
   } catch (error) {
     return null;
@@ -239,9 +390,16 @@ export function loadWallets(): WalletsFile | null {
 }
 
 /**
- * Save wallets to config file
+ * Save wallets to config file.
+ * If password is provided or sessionPassword is set, encrypts the entire file.
  */
-export function saveWallets(data: WalletsFile): void {
+export function saveWallets(data: WalletsFile, password?: string): void {
+  const effectivePassword = password || sessionPassword;
+  if (effectivePassword) {
+    saveWalletsEncrypted(data, effectivePassword);
+    return;
+  }
+
   const dir = path.dirname(WALLETS_FILE_PATH);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -281,7 +439,7 @@ export function addWalletsToConfig(
   // Store mnemonic if provided
   if (mnemonic) {
     if (encrypt && password) {
-      existing.encryptedMnemonic = encryptMnemonic(mnemonic, password);
+      existing.encryptedMnemonic = encryptData(mnemonic, password);
       delete existing.mnemonic;
     } else {
       existing.mnemonic = mnemonic;
@@ -344,7 +502,7 @@ export function exportWallets(
   const existing = loadWallets();
   if (!existing) return false;
 
-  const encrypted = encryptMnemonic(JSON.stringify(existing), password);
+  const encrypted = encryptData(JSON.stringify(existing), password);
   fs.writeFileSync(filePath, encrypted, { mode: 0o600 });
   return true;
 }
@@ -358,7 +516,7 @@ export function importWalletsFromBackup(
 ): WalletsFile | null {
   try {
     const encrypted = fs.readFileSync(filePath, 'utf-8');
-    const decrypted = decryptMnemonic(encrypted, password);
+    const decrypted = decryptData(encrypted, password);
     return JSON.parse(decrypted);
   } catch (error) {
     return null;
@@ -377,8 +535,9 @@ export function isGroupsFormat(data: any): data is WalletGroupsFile {
 }
 
 /**
- * Load wallet groups from config file
- * Returns null if file doesn't exist, or legacy format data if it's the old format
+ * Load wallet groups from config file.
+ * If file is encrypted and sessionPassword is set, decrypts transparently.
+ * Returns null if file doesn't exist, encrypted without password, or legacy format.
  */
 export function loadWalletGroups(): WalletGroupsFile | null {
   try {
@@ -386,7 +545,18 @@ export function loadWalletGroups(): WalletGroupsFile | null {
       return null;
     }
     const content = fs.readFileSync(WALLETS_FILE_PATH, 'utf-8');
-    const data = JSON.parse(content);
+    let data: any;
+
+    if (isEncryptedFormat(content)) {
+      if (sessionPassword) {
+        const decrypted = decryptData(content, sessionPassword);
+        data = JSON.parse(decrypted);
+      } else {
+        return null;
+      }
+    } else {
+      data = JSON.parse(content);
+    }
 
     // Check if it's already in groups format
     if (isGroupsFormat(data)) {
@@ -401,9 +571,16 @@ export function loadWalletGroups(): WalletGroupsFile | null {
 }
 
 /**
- * Save wallet groups to config file
+ * Save wallet groups to config file.
+ * If password is provided or sessionPassword is set, encrypts the entire file.
  */
-export function saveWalletGroups(data: WalletGroupsFile): void {
+export function saveWalletGroups(data: WalletGroupsFile, password?: string): void {
+  const effectivePassword = password || sessionPassword;
+  if (effectivePassword) {
+    saveWalletsEncrypted(data, effectivePassword);
+    return;
+  }
+
   const dir = path.dirname(WALLETS_FILE_PATH);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -529,7 +706,8 @@ export function deleteWalletGroup(groupName: string): { success: boolean; error?
  */
 export function addWalletToGroup(
   groupName: string,
-  wallet: WalletConfig
+  wallet: WalletConfig,
+  fundingWif?: string
 ): { success: boolean; error?: string } {
   const data = loadWalletGroups();
   if (!data) {
@@ -538,6 +716,14 @@ export function addWalletToGroup(
 
   if (!data.groups[groupName]) {
     return { success: false, error: `Group "${groupName}" not found` };
+  }
+
+  // Reject wallets that duplicate the main FUNDING_WIF
+  if (fundingWif && wallet.wif === fundingWif) {
+    return {
+      success: false,
+      error: `Wallet "${wallet.label}" has the same private key as FUNDING_WIF and cannot be added to a group`,
+    };
   }
 
   // Check if wallet already exists in any group

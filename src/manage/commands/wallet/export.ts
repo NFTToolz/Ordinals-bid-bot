@@ -12,9 +12,15 @@ import {
   promptPassword,
   promptConfirm,
 } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 export async function exportWalletsCommand(): Promise<void> {
   showSectionHeader('EXPORT/BACKUP WALLETS');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   const walletsData = loadWallets();
   let walletCount = 0;

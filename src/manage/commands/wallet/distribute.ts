@@ -24,6 +24,7 @@ import {
   promptNumber,
 } from '../../utils/prompts';
 import { getWalletsWithBalances, WalletWithBalance } from './list';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 config();
 
@@ -33,6 +34,11 @@ const network = bitcoin.networks.bitcoin;
 
 export async function distributeFunds(): Promise<void> {
   showSectionHeader('DISTRIBUTE FUNDS');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   // Get main wallet (source)
   const FUNDING_WIF = process.env.FUNDING_WIF;

@@ -1,6 +1,7 @@
 import fs from "fs"
 import * as bitcoin from "bitcoinjs-lib"
 import { config } from "dotenv"
+import path from "path"
 
 import { ICollectionOffer, IOffer, cancelCollectionOffer, getBestCollectionOffer, getUserOffers, retrieveCancelOfferFormat, signData, submitCancelOfferData } from "./functions/Offer";
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
@@ -22,10 +23,12 @@ import {
   getAllOurPaymentAddresses,
   getAllOurReceiveAddresses,
 } from "./utils/walletHelpers";
+import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerator";
+import { promptPasswordStdin } from "./utils/promptPassword";
+import { getFundingWIF, setFundingWIF } from "./utils/fundingWallet";
 
 config()
 
-const FUNDING_WIF = process.env.FUNDING_WIF as string;
 const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string
 const network = bitcoin.networks.bitcoin;
 
@@ -33,39 +36,11 @@ const network = bitcoin.networks.bitcoin;
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
 const WALLET_CONFIG_PATH = process.env.WALLET_CONFIG_PATH || './config/wallets.json';
 
-// Initialize wallet pool for cancellation lookup
-if (ENABLE_WALLET_ROTATION) {
-  try {
-    if (fs.existsSync(WALLET_CONFIG_PATH)) {
-      const walletConfig = JSON.parse(fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8'));
-      if (walletConfig.groups) {
-        const allWallets: WalletConfig[] = [];
-        for (const groupName of Object.keys(walletConfig.groups)) {
-          const group = walletConfig.groups[groupName];
-          if (group.wallets && group.wallets.length > 0) {
-            allWallets.push(...group.wallets);
-          }
-        }
-        if (allWallets.length > 0) {
-          initializeWalletPool(allWallets, 5, network);
-          console.log(`[WALLET ROTATION] Initialized wallet pool with ${allWallets.length} wallets for cancellation`);
-        }
-      }
-    }
-  } catch (error: any) {
-    console.error(`[WALLET ROTATION] Failed to initialize wallet pool: ${error.message}`);
-  }
-}
-
-
-import path from "path"
-
 const filePath = path.join(process.cwd(), 'config/collections.json')
 const collections: CollectionData[] = JSON.parse(fs.readFileSync(filePath, "utf-8"))
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
-
 
 
 // Get all unique receive addresses to check for offers
@@ -101,7 +76,7 @@ function getReceiveAddressesToCheck(): { address: string; privateKey: string; pu
   // Add addresses from collection configs (for non-rotation mode or mixed setups)
   for (const collection of collections) {
     const receiveAddress = collection.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
-    const privateKey = collection.fundingWalletWIF ?? FUNDING_WIF;
+    const privateKey = collection.fundingWalletWIF ?? getFundingWIF();
 
     if (!seenAddresses.has(receiveAddress.toLowerCase())) {
       const keyPair = ECPair.fromWIF(privateKey, network);
@@ -166,7 +141,7 @@ async function cancelCollectionOffers() {
 
   for (const item of uniqueCollections) {
     if (item.offerType === "COLLECTION") {
-      const privateKey = item.fundingWalletWIF ?? FUNDING_WIF;
+      const privateKey = item.fundingWalletWIF ?? getFundingWIF();
       const buyerTokenReceiveAddress = item.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
       const keyPair = ECPair.fromWIF(privateKey, network);
       const publicKey = keyPair.publicKey.toString('hex');
@@ -214,6 +189,51 @@ function resetBotData(): { historyReset: boolean; statsReset: boolean } {
 
 // Main execution
 async function main() {
+  // Load funding WIF from wallets.json if available
+  if (fs.existsSync(WALLET_CONFIG_PATH)) {
+    let walletConfigContent = fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8');
+    if (isEncryptedFormat(walletConfigContent)) {
+      console.log('[STARTUP] Wallets file is encrypted — password required');
+      const password = await promptPasswordStdin('[STARTUP] Enter wallets encryption password: ');
+      try {
+        walletConfigContent = decryptData(walletConfigContent, password);
+      } catch {
+        console.error('[STARTUP] Wrong password — could not decrypt wallets.json');
+        process.exit(1);
+      }
+      console.log('[STARTUP] Wallets file decrypted successfully');
+    }
+
+    const walletConfig = JSON.parse(walletConfigContent);
+
+    // Extract funding WIF from wallets.json if present
+    if (walletConfig.fundingWallet?.wif) {
+      setFundingWIF(walletConfig.fundingWallet.wif);
+      console.log('[STARTUP] Funding WIF loaded from wallets.json');
+    }
+
+    // Initialize wallet pool for cancellation lookup
+    if (ENABLE_WALLET_ROTATION) {
+      try {
+        if (walletConfig.groups) {
+          const allWallets: WalletConfig[] = [];
+          for (const groupName of Object.keys(walletConfig.groups)) {
+            const group = walletConfig.groups[groupName];
+            if (group.wallets && group.wallets.length > 0) {
+              allWallets.push(...group.wallets);
+            }
+          }
+          if (allWallets.length > 0) {
+            initializeWalletPool(allWallets, 5, network);
+            console.log(`[WALLET ROTATION] Initialized wallet pool with ${allWallets.length} wallets for cancellation`);
+          }
+        }
+      } catch (error: any) {
+        console.error(`[WALLET ROTATION] Failed to initialize wallet pool: ${error.message}`);
+      }
+    }
+  }
+
   console.log('================================================================================');
   console.log('CANCELLING ALL OFFERS');
   if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {

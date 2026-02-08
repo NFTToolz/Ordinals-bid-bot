@@ -23,6 +23,7 @@ import {
   promptSelect,
 } from '../../utils/prompts';
 import { getWalletsWithBalances } from './list';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 config();
 
@@ -32,6 +33,11 @@ const network = bitcoin.networks.bitcoin;
 
 export async function consolidateFunds(): Promise<void> {
   showSectionHeader('CONSOLIDATE FUNDS');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   // Get all wallets with balances
   const wallets = await withSpinner(

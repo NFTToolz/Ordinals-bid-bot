@@ -14,6 +14,7 @@ import {
 } from '../../utils/display';
 import { TableColumn, TableData } from '../../utils/table';
 import { showInteractiveTable } from '../../utils/interactiveTable';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 config();
 
@@ -31,6 +32,11 @@ export interface WalletWithBalance {
 export async function listWallets(): Promise<void> {
   showSectionHeader('WALLET BALANCES');
 
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
+
   const allWallets: Array<{
     label: string;
     paymentAddress: string;
@@ -40,10 +46,12 @@ export async function listWallets(): Promise<void> {
   // Add main wallet from .env
   const FUNDING_WIF = process.env.FUNDING_WIF;
   const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS;
+  let mainWalletPaymentAddress: string | undefined;
 
   if (FUNDING_WIF) {
     try {
       const mainWallet = getWalletFromWIF(FUNDING_WIF, network);
+      mainWalletPaymentAddress = mainWallet.paymentAddress;
       allWallets.push({
         label: 'Main Wallet (FUNDING_WIF)',
         paymentAddress: mainWallet.paymentAddress,
@@ -65,6 +73,10 @@ export async function listWallets(): Promise<void> {
       groupWallets.forEach(w => {
         try {
           const walletInfo = getWalletFromWIF(w.wif, network);
+          // Skip wallets that duplicate the main wallet
+          if (mainWalletPaymentAddress && walletInfo.paymentAddress === mainWalletPaymentAddress) {
+            return;
+          }
           allWallets.push({
             label: w.label,
             paymentAddress: walletInfo.paymentAddress,
@@ -79,6 +91,10 @@ export async function listWallets(): Promise<void> {
       walletsData.wallets.forEach(w => {
         try {
           const walletInfo = getWalletFromWIF(w.wif, network);
+          // Skip wallets that duplicate the main wallet
+          if (mainWalletPaymentAddress && walletInfo.paymentAddress === mainWalletPaymentAddress) {
+            return;
+          }
           allWallets.push({
             label: w.label,
             paymentAddress: walletInfo.paymentAddress,
@@ -166,10 +182,12 @@ export async function getWalletsWithBalances(): Promise<WalletWithBalance[]> {
   // Main wallet
   const FUNDING_WIF = process.env.FUNDING_WIF;
   const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS;
+  let mainWalletPaymentAddress: string | undefined;
 
   if (FUNDING_WIF) {
     try {
       const mainWallet = getWalletFromWIF(FUNDING_WIF, network);
+      mainWalletPaymentAddress = mainWallet.paymentAddress;
       const [balance] = await getAllBalances([mainWallet.paymentAddress]);
       result.push({
         label: 'Main Wallet',
@@ -199,6 +217,10 @@ export async function getWalletsWithBalances(): Promise<WalletWithBalance[]> {
     configWallets.forEach(w => {
       try {
         const walletInfo = getWalletFromWIF(w.wif, network);
+        // Skip wallets that duplicate the main wallet
+        if (mainWalletPaymentAddress && walletInfo.paymentAddress === mainWalletPaymentAddress) {
+          return;
+        }
         addresses.push(walletInfo.paymentAddress);
         walletData.push({
           label: w.label,

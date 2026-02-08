@@ -20,12 +20,18 @@ import {
   promptText,
   promptConfirm,
 } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 /**
  * Add wallets to a group
  */
 export async function addWalletsToGroupCommand(): Promise<void> {
   showSectionHeader('ADD WALLETS TO GROUP');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   const groupsData = loadWalletGroups();
   const groupNames = getWalletGroupNames();
@@ -121,7 +127,7 @@ export async function addWalletsToGroupCommand(): Promise<void> {
     for (const label of selectedLabels) {
       const wallet = unassignedWallets.find(w => w.label === label);
       if (wallet) {
-        const result = addWalletToGroup(targetGroup, wallet);
+        const result = addWalletToGroup(targetGroup, wallet, process.env.FUNDING_WIF);
         if (result.success) {
           showSuccess(`Added "${label}" to group "${targetGroup}"`);
           addedCount++;
@@ -203,7 +209,31 @@ export async function addWalletsToGroupCommand(): Promise<void> {
     console.log('');
     console.log(`Generating ${count} wallets starting from index ${startIndex}...`);
 
-    const newWallets = deriveWallets(mnemonic!, count, labelPrefix, startIndex);
+    let newWallets = deriveWallets(mnemonic!, count, labelPrefix, startIndex);
+
+    // Filter out any wallet that duplicates the main FUNDING_WIF
+    const fundingWif = process.env.FUNDING_WIF;
+    if (fundingWif) {
+      const duplicateCount = newWallets.filter(w => w.wif === fundingWif).length;
+      if (duplicateCount > 0) {
+        newWallets = newWallets.filter(w => w.wif !== fundingWif);
+        showWarning(
+          `Skipped ${duplicateCount} wallet(s) that duplicate FUNDING_WIF. Deriving replacement(s)...`
+        );
+        // Derive replacements at the next indices to maintain requested count
+        let nextIndex = startIndex + count;
+        const maxAttempts = count + 100;
+        let attempts = 0;
+        while (newWallets.length < count && attempts < maxAttempts) {
+          const replacements = deriveWallets(mnemonic!, 1, labelPrefix, nextIndex);
+          if (replacements[0].wif !== fundingWif) {
+            newWallets.push(replacements[0]);
+          }
+          nextIndex++;
+          attempts++;
+        }
+      }
+    }
 
     let addedCount = 0;
     for (const wallet of newWallets) {
@@ -213,7 +243,7 @@ export async function addWalletsToGroupCommand(): Promise<void> {
         receiveAddress: wallet.receiveAddress,
       };
 
-      const result = addWalletToGroup(targetGroup, walletConfig);
+      const result = addWalletToGroup(targetGroup, walletConfig, fundingWif);
       if (result.success) {
         showSuccess(`Added "${wallet.label}" to group "${targetGroup}"`);
         addedCount++;
@@ -263,7 +293,7 @@ export async function addWalletsToGroupCommand(): Promise<void> {
       receiveAddress,
     };
 
-    const result = addWalletToGroup(targetGroup, walletConfig);
+    const result = addWalletToGroup(targetGroup, walletConfig, process.env.FUNDING_WIF);
     if (result.success) {
       showSuccess(`Added "${label}" to group "${targetGroup}"`);
     } else {

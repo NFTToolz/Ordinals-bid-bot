@@ -83,6 +83,14 @@ vi.mock('../../services/WalletGenerator', () => ({
     receiveAddress: 'bc1preceive',
     publicKey: '02abc',
   })),
+  // Encryption-related exports
+  readWalletsFileRaw: vi.fn().mockReturnValue(null),
+  isEncryptedFormat: vi.fn().mockReturnValue(false),
+  loadWalletsDecrypted: vi.fn().mockReturnValue(null),
+  loadFundingWalletFromConfig: vi.fn().mockReturnValue(null),
+  setSessionPassword: vi.fn(),
+  clearSessionPassword: vi.fn(),
+  getSessionPassword: vi.fn().mockReturnValue(null),
 }));
 
 // Mock BalanceService
@@ -211,6 +219,30 @@ describe('Wallet Commands', () => {
 
       // Restore
       process.env.FUNDING_WIF = originalWIF;
+    });
+
+    it('should deduplicate wallets that match main wallet payment address', async () => {
+      const { listWallets } = await import('./list');
+      const { loadWallets, isGroupsFormat, getWalletFromWIF } = await import('../../services/WalletGenerator');
+      const { showInteractiveTable } = await import('../../utils/interactiveTable');
+
+      // getWalletFromWIF returns same paymentAddress for both the main wallet and the config wallet
+      vi.mocked(getWalletFromWIF)
+        .mockReturnValueOnce({ paymentAddress: 'bc1qsame', publicKey: '02abc' })  // main wallet
+        .mockReturnValueOnce({ paymentAddress: 'bc1qsame', publicKey: '02abc' }); // dup config wallet
+      vi.mocked(loadWallets).mockReturnValueOnce({
+        wallets: [{ label: 'dup-wallet', wif: TEST_WIF, receiveAddress: 'bc1preceive0' }],
+      });
+      vi.mocked(isGroupsFormat).mockReturnValueOnce(false);
+
+      await listWallets();
+
+      // The interactive table should be called with only the main wallet (dup filtered out)
+      expect(showInteractiveTable).toHaveBeenCalled();
+      const tableData = vi.mocked(showInteractiveTable).mock.calls[0][0];
+      const labels = tableData.rows.map((r: any) => r.label);
+      expect(labels).toContain('Main Wallet (FUNDING_WIF)');
+      expect(labels).not.toContain('dup-wallet');
     });
   });
 

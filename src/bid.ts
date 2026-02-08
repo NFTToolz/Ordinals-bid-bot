@@ -103,12 +103,14 @@ import {
 } from "./utils/bidLogic";
 import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerator";
 import { promptPasswordStdin } from "./utils/promptPassword";
+import { getFundingWIF, setFundingWIF, hasFundingWIF } from "./utils/fundingWallet";
 
 
 config()
 
 // Validate required environment variables at startup
-const requiredEnvVars = ['TOKEN_RECEIVE_ADDRESS', 'FUNDING_WIF', 'API_KEY'] as const;
+// Note: FUNDING_WIF is no longer required here — it can come from encrypted wallets.json
+const requiredEnvVars = ['TOKEN_RECEIVE_ADDRESS', 'API_KEY'] as const;
 const missingVars = requiredEnvVars.filter(v => !process.env[v]);
 if (missingVars.length > 0) {
   console.error(`[STARTUP] Missing required environment variables: ${missingVars.join(', ')}`);
@@ -117,7 +119,6 @@ if (missingVars.length > 0) {
 }
 
 const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string
-const FUNDING_WIF = process.env.FUNDING_WIF as string;
 const DEFAULT_OUTBID_MARGIN = Number(process.env.DEFAULT_OUTBID_MARGIN) || 0.00001
 const API_KEY = process.env.API_KEY as string;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 32
@@ -152,14 +153,7 @@ function safeECPairFromWIF(wif: string, networkParam: typeof network, context: s
   }
 }
 
-// S3: Validate FUNDING_WIF at startup - fail fast instead of crashing on first bid attempt
-try {
-  safeECPairFromWIF(FUNDING_WIF, network, 'startup');
-} catch (error: any) {
-  console.error(`[STARTUP] Invalid FUNDING_WIF: ${error.message}`);
-  console.error('[STARTUP] Check your .env file - FUNDING_WIF must be a valid Bitcoin WIF private key');
-  process.exit(1);
-}
+// S3: FUNDING_WIF validation moved into async IIFE (loaded from wallets.json or .env)
 
 const DEFAULT_LOOP = Number(process.env.DEFAULT_LOOP) || 30
 const restartState = new Map<string, boolean>();
@@ -567,7 +561,7 @@ function loadCollections(): CollectionData[] {
 
 const collections: CollectionData[] = loadCollections();
 Logger.info(`[STARTUP] Loaded ${collections.length} collection(s): ${collections.map(c => c.collectionSymbol).join(', ')}`);
-Logger.info(`[STARTUP] Environment: API_KEY=${API_KEY ? 'set' : 'MISSING'}, FUNDING_WIF=${FUNDING_WIF ? 'set' : 'MISSING'}, RATE_LIMIT=${RATE_LIMIT}`);
+Logger.info(`[STARTUP] Environment: API_KEY=${API_KEY ? 'set' : 'MISSING'}, FUNDING_WIF=${hasFundingWIF() ? 'set' : 'pending (wallets.json)'}, RATE_LIMIT=${RATE_LIMIT}`);
 // M3: balance moved to local scope in processScheduledLoop() and placeCollectionBid()
 
 interface BidHistory {
@@ -951,7 +945,7 @@ class EventManager {
       const buyerTokenReceiveAddress = collection?.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
       const bidCount = collection.bidCount
       const bottomListings = getBottomListings(collectionSymbol).sort((a, b) => a.price - b.price).map((item) => item.id).slice(0, bidCount)
-      const privateKey = collection?.fundingWalletWIF ?? FUNDING_WIF;
+      const privateKey = collection?.fundingWalletWIF ?? getFundingWIF();
       const currentTime = new Date().getTime();
       const expiration = currentTime + (duration * 60 * 1000);
       const keyPair = safeECPairFromWIF(privateKey, network, `handleIncomingBid:${collectionSymbol}`);
@@ -1216,6 +1210,8 @@ class EventManager {
                   if (creds) {
                     cancelPublicKey = creds.publicKey;
                     cancelPrivateKey = creds.privateKey;
+                  } else {
+                    Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
                   }
                 }
                 const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -1319,7 +1315,7 @@ class EventManager {
     const duration = item.duration ?? DEFAULT_OFFER_EXPIRATION
     const outBidMargin = item.outBidMargin ?? DEFAULT_OUTBID_MARGIN
     const buyerTokenReceiveAddress = item.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
-    const privateKey = item.fundingWalletWIF ?? FUNDING_WIF;
+    const privateKey = item.fundingWalletWIF ?? getFundingWIF();
     const keyPair = safeECPairFromWIF(privateKey, network, `processScheduledLoop:${collectionSymbol}`);
     const publicKey = keyPair.publicKey.toString('hex');
     const maxBuy = item.quantity ?? 1
@@ -1934,6 +1930,8 @@ class EventManager {
                   if (creds) {
                     cancelPublicKey = creds.publicKey;
                     cancelPrivateKey = creds.privateKey;
+                  } else {
+                    Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
                   }
                 }
                 const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -1988,6 +1986,8 @@ class EventManager {
                       if (creds) {
                         cancelPublicKey = creds.publicKey;
                         cancelPrivateKey = creds.privateKey;
+                      } else {
+                        Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
                       }
                     }
                     const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -2033,6 +2033,8 @@ class EventManager {
                       if (creds) {
                         cancelPublicKey = creds.publicKey;
                         cancelPrivateKey = creds.privateKey;
+                      } else {
+                        Logger.warning(`[CANCEL] Cannot find credentials for wallet ${makerAddr}, cancel may fail`);
                       }
                     }
                     const cancelled = await cancelCollectionOffer(offerIds, cancelPublicKey, cancelPrivateKey)
@@ -2370,27 +2372,60 @@ Logger.info(`[BID PACER] Initialized with ${BIDS_PER_MINUTE} bids/minute limit`)
 // Initialize wallet groups/pool if multi-wallet rotation is enabled
 // Wrapped in async IIFE because encrypted wallets.json requires async password prompt
 (async () => {
+// Load funding WIF from wallets.json (always, regardless of ENABLE_WALLET_ROTATION)
+let walletConfigContent: string | null = null;
+let walletConfig: any = null;
+
+if (fs.existsSync(WALLET_CONFIG_PATH)) {
+  walletConfigContent = fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8');
+  if (isEncryptedFormat(walletConfigContent)) {
+    Logger.info('[STARTUP] Wallets file is encrypted — password required');
+    const password = await promptPasswordStdin('[STARTUP] Enter wallets encryption password: ');
+    try {
+      walletConfigContent = decryptData(walletConfigContent, password);
+    } catch {
+      Logger.error('[STARTUP] Wrong password — could not decrypt wallets.json');
+      process.exit(1);
+    }
+    Logger.success('[STARTUP] Wallets file decrypted successfully');
+  }
+  walletConfig = JSON.parse(walletConfigContent);
+
+  // Extract funding WIF from wallets.json if present
+  if (walletConfig.fundingWallet?.wif) {
+    setFundingWIF(walletConfig.fundingWallet.wif);
+    Logger.info('[STARTUP] Funding WIF loaded from encrypted wallets.json');
+  }
+}
+
+// Resolve funding WIF: wallets.json > .env > error
+if (!hasFundingWIF()) {
+  if (process.env.FUNDING_WIF) {
+    Logger.warning('[STARTUP] FUNDING_WIF loaded from .env (deprecated)');
+    Logger.warning('[STARTUP] Run: yarn manage → "Encrypt wallets file" to migrate FUNDING_WIF into encrypted wallets.json');
+  } else {
+    Logger.error('[STARTUP] No FUNDING_WIF found in wallets.json or .env');
+    Logger.error('[STARTUP] Run: yarn manage → "Encrypt wallets file" to configure');
+    process.exit(1);
+  }
+}
+
+// S3: Validate funding WIF at startup - fail fast
+try {
+  safeECPairFromWIF(getFundingWIF(), network, 'startup');
+} catch (error: unknown) {
+  Logger.error(`[STARTUP] Invalid FUNDING_WIF: ${getErrorMessage(error)}`);
+  Logger.error('[STARTUP] Check your wallets.json or .env — FUNDING_WIF must be a valid Bitcoin WIF private key');
+  process.exit(1);
+}
+
 if (ENABLE_WALLET_ROTATION) {
   try {
-    if (!fs.existsSync(WALLET_CONFIG_PATH)) {
+    if (!walletConfig) {
       Logger.warning(`[WALLET GROUPS] Config file not found at ${WALLET_CONFIG_PATH}`);
       Logger.warning('[WALLET GROUPS] Copy config/wallets.example.json to config/wallets.json and configure your wallets');
       Logger.warning('[WALLET GROUPS] Continuing with single wallet mode...');
     } else {
-      // Read raw file content and decrypt if needed
-      let walletConfigContent = fs.readFileSync(WALLET_CONFIG_PATH, 'utf-8');
-      if (isEncryptedFormat(walletConfigContent)) {
-        Logger.info('[STARTUP] Wallets file is encrypted — password required');
-        const password = await promptPasswordStdin('[STARTUP] Enter wallets encryption password: ');
-        try {
-          walletConfigContent = decryptData(walletConfigContent, password);
-        } catch {
-          Logger.error('[STARTUP] Wrong password — could not decrypt wallets.json');
-          process.exit(1);
-        }
-        Logger.success('[STARTUP] Wallets file decrypted successfully');
-      }
-      const walletConfig = JSON.parse(walletConfigContent);
 
       // Check if using new groups format
       if (walletConfig.groups && typeof walletConfig.groups === 'object') {
@@ -3268,7 +3303,11 @@ async function placeBid(
         let cancelKey = privateKey;
         if (ENABLE_WALLET_ROTATION && item.buyerPaymentAddress) {
           const creds = getWalletCredentialsByPaymentAddress(item.buyerPaymentAddress);
-          if (creds) cancelKey = creds.privateKey;
+          if (creds) {
+            cancelKey = creds.privateKey;
+          } else {
+            Logger.warning(`[CANCEL] Cannot find credentials for wallet ${item.buyerPaymentAddress}, cancel may fail`);
+          }
         }
         await cancelBid(item, cancelKey)
       }));

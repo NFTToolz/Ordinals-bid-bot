@@ -12,6 +12,7 @@ import {
   showSectionHeader,
   showSuccess,
   showError,
+  showWarning,
   showImportantBox,
   showTable,
 } from '../../utils/display';
@@ -23,12 +24,18 @@ import {
   promptConfirm,
   promptContinue,
 } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 import * as bitcoin from 'bitcoinjs-lib';
 
 const network = bitcoin.networks.bitcoin;
 
 export async function createWallets(): Promise<void> {
   showSectionHeader('CREATE WALLETS');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   // Check existing wallets
   const existing = loadWallets();
@@ -112,7 +119,30 @@ export async function createWallets(): Promise<void> {
   console.log('');
   console.log('Generating wallets...');
 
-  const wallets = deriveWallets(mnemonic, count, labelPrefix, startIndex, network);
+  let wallets = deriveWallets(mnemonic, count, labelPrefix, startIndex, network);
+
+  // Filter out any wallet that duplicates the main FUNDING_WIF
+  const fundingWif = process.env.FUNDING_WIF;
+  if (fundingWif) {
+    const duplicateCount = wallets.filter(w => w.wif === fundingWif).length;
+    if (duplicateCount > 0) {
+      wallets = wallets.filter(w => w.wif !== fundingWif);
+      showWarning(
+        `Skipped ${duplicateCount} wallet(s) that duplicate FUNDING_WIF. Deriving replacement(s)...`
+      );
+      let nextIndex = startIndex + count;
+      const maxAttempts = count + 100;
+      let attempts = 0;
+      while (wallets.length < count && attempts < maxAttempts) {
+        const replacements = deriveWallets(mnemonic, 1, labelPrefix, nextIndex, network);
+        if (replacements[0].wif !== fundingWif) {
+          wallets.push(replacements[0]);
+        }
+        nextIndex++;
+        attempts++;
+      }
+    }
+  }
 
   // Display wallets
   console.log('');
@@ -152,6 +182,7 @@ export async function createWallets(): Promise<void> {
     }
 
     // Save to config (always includes mnemonic)
+    // Session password handles re-encryption transparently
     addWalletsToConfig(wallets, mnemonic, encrypt, password);
     showSuccess('Wallets saved to config/wallets.json');
     showSuccess('Mnemonic saved to wallets.json' + (encrypt ? ' (encrypted)' : ''));

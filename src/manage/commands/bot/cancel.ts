@@ -36,9 +36,10 @@ import {
 } from '../../../utils/walletHelpers';
 import { loadCollections, CollectionConfig } from '../../services/CollectionService';
 
+import { getFundingWIF } from '../../../utils/fundingWallet';
+
 config();
 
-const FUNDING_WIF = process.env.FUNDING_WIF as string;
 const TOKEN_RECEIVE_ADDRESS = process.env.TOKEN_RECEIVE_ADDRESS as string;
 const network = bitcoin.networks.bitcoin;
 
@@ -141,7 +142,7 @@ function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInf
   // Add addresses from collection configs
   for (const collection of collections) {
     const receiveAddress = collection.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
-    const privateKey = collection.fundingWalletWIF ?? FUNDING_WIF;
+    const privateKey = collection.fundingWalletWIF ?? getFundingWIF();
 
     if (!seenAddresses.has(receiveAddress.toLowerCase())) {
       const keyPair = ECPair.fromWIF(privateKey, network);
@@ -239,7 +240,7 @@ async function cancelAllCollectionOffers(
 
   for (const item of uniqueCollections) {
     if (item.offerType === 'COLLECTION') {
-      const privateKey = item.fundingWalletWIF ?? FUNDING_WIF;
+      const privateKey = item.fundingWalletWIF ?? getFundingWIF();
       const buyerTokenReceiveAddress = item.tokenReceiveAddress ?? TOKEN_RECEIVE_ADDRESS;
       const keyPair = ECPair.fromWIF(privateKey, network);
       const publicKey = keyPair.publicKey.toString('hex');
@@ -415,7 +416,7 @@ export async function cancelOffersForCollection(
       if (ourOffer) {
         // Determine the correct private key for cancellation
         const collection = collections.find(c => c.collectionSymbol === collectionSymbol);
-        const privateKey = collection?.fundingWalletWIF ?? FUNDING_WIF;
+        const privateKey = collection?.fundingWalletWIF ?? getFundingWIF();
         const keyPair = ECPair.fromWIF(privateKey, network);
         const publicKey = keyPair.publicKey.toString('hex');
 

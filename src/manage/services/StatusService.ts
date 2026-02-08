@@ -5,6 +5,7 @@ import { loadWallets, isGroupsFormat, getAllWalletsFromGroups, getWalletFromWIF 
 import { loadCollections } from './CollectionService';
 import { isRunning } from './BotProcessManager';
 import { getUserOffers } from '../../functions/Offer';
+import { getFundingWIF, hasFundingWIF } from '../../utils/fundingWallet';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -49,13 +50,12 @@ function isCacheValid<T>(entry: CacheEntry<T> | undefined): entry is CacheEntry<
 function getAllWalletAddresses(): string[] {
   const addresses: string[] = [];
 
-  // Add main wallet from .env
-  const FUNDING_WIF = process.env.FUNDING_WIF;
-  if (FUNDING_WIF) {
+  // Add main wallet (from wallets.json or .env)
+  if (hasFundingWIF()) {
     try {
-      const mainWallet = getWalletFromWIF(FUNDING_WIF, network);
+      const mainWallet = getWalletFromWIF(getFundingWIF(), network);
       addresses.push(mainWallet.paymentAddress);
-    } catch (error) {
+    } catch {
       // Skip if invalid
     }
   }

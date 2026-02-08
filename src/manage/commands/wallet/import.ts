@@ -20,9 +20,15 @@ import {
   promptConfirm,
   promptSelect,
 } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 export async function importWalletsCommand(): Promise<void> {
   showSectionHeader('IMPORT WALLETS');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   // Get import path
   const importPath = await promptText('Path to backup file (empty to cancel):');

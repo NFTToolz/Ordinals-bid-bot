@@ -8,6 +8,7 @@ import {
   showTable,
   getSeparatorWidth,
 } from '../../utils/display';
+import { hasFundingWIF } from '../../../utils/fundingWallet';
 import chalk = require('chalk');
 
 export async function viewStatus(): Promise<void> {
@@ -155,7 +156,7 @@ export async function viewStatus(): Promise<void> {
   console.log('━'.repeat(getSeparatorWidth()));
 
   const envChecks = [
-    { name: 'FUNDING_WIF', set: !!process.env.FUNDING_WIF },
+    { name: 'FUNDING_WIF', set: hasFundingWIF() },
     { name: 'TOKEN_RECEIVE_ADDRESS', set: !!process.env.TOKEN_RECEIVE_ADDRESS },
     { name: 'API_KEY', set: !!process.env.API_KEY },
     { name: 'ENABLE_WALLET_ROTATION', set: process.env.ENABLE_WALLET_ROTATION === 'true' },

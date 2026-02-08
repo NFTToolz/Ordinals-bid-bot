@@ -7,6 +7,14 @@ import {
   getWalletFromWIF,
   encryptMnemonic,
   decryptMnemonic,
+  encryptData,
+  decryptData,
+  isEncryptedFormat,
+  saveWalletsEncrypted,
+  loadWalletsDecrypted,
+  readWalletsFileRaw,
+  setSessionPassword,
+  clearSessionPassword,
   importFromWIF,
   loadWallets,
   saveWallets,
@@ -31,6 +39,8 @@ import {
   findWalletGroup,
   getAllWalletsFromGroups,
   getUnassignedWallets,
+  loadFundingWalletFromConfig,
+  FundingWalletConfig,
   WalletsFile,
   WalletGroupsFile,
 } from './WalletGenerator';
@@ -42,6 +52,7 @@ vi.mock('fs', () => ({
   writeFileSync: vi.fn(),
   mkdirSync: vi.fn(),
   copyFileSync: vi.fn(),
+  chmodSync: vi.fn(),
 }));
 
 import * as fs from 'fs';
@@ -768,6 +779,55 @@ describe('WalletGenerator', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('not found');
     });
+
+    it('should reject wallet matching fundingWif parameter', () => {
+      const groupsData: WalletGroupsFile = {
+        groups: { group1: { wallets: [], bidsPerMinute: 5 } },
+      };
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(groupsData));
+
+      const result = addWalletToGroup(
+        'group1',
+        { label: 'dup-wallet', wif: 'funding-wif-123', receiveAddress: 'bc1pnew' },
+        'funding-wif-123'
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('FUNDING_WIF');
+    });
+
+    it('should allow wallet when fundingWif is omitted', () => {
+      const groupsData: WalletGroupsFile = {
+        groups: { group1: { wallets: [], bidsPerMinute: 5 } },
+      };
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(groupsData));
+
+      const result = addWalletToGroup('group1', {
+        label: 'new-wallet',
+        wif: 'funding-wif-123',
+        receiveAddress: 'bc1pnew',
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should allow wallet when fundingWif does not match', () => {
+      const groupsData: WalletGroupsFile = {
+        groups: { group1: { wallets: [], bidsPerMinute: 5 } },
+      };
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(groupsData));
+
+      const result = addWalletToGroup(
+        'group1',
+        { label: 'new-wallet', wif: 'different-wif', receiveAddress: 'bc1pnew' },
+        'funding-wif-123'
+      );
+
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('removeWalletFromGroup', () => {
@@ -1036,6 +1096,237 @@ describe('WalletGenerator', () => {
 
       const result = getUnassignedWallets();
       expect(result).toEqual([]);
+    });
+  });
+
+  describe('encryptData / decryptData', () => {
+    const testData = '{"wallets":[{"label":"w1","wif":"wif1"}]}';
+    const password = 'secure_password_123';
+
+    it('should encrypt and decrypt data correctly', () => {
+      const encrypted = encryptData(testData, password);
+      const decrypted = decryptData(encrypted, password);
+      expect(decrypted).toBe(testData);
+    });
+
+    it('should be aliased as encryptMnemonic/decryptMnemonic', () => {
+      const encrypted = encryptMnemonic(testData, password);
+      const decrypted = decryptMnemonic(encrypted, password);
+      expect(decrypted).toBe(testData);
+    });
+
+    it('should produce different ciphertext each time', () => {
+      const enc1 = encryptData(testData, password);
+      const enc2 = encryptData(testData, password);
+      expect(enc1).not.toBe(enc2);
+    });
+
+    it('should fail with wrong password', () => {
+      const encrypted = encryptData(testData, password);
+      expect(() => decryptData(encrypted, 'wrong')).toThrow();
+    });
+
+    it('should handle large JSON data (wallets file)', () => {
+      const largeData = JSON.stringify({
+        groups: {
+          default: {
+            wallets: Array.from({ length: 50 }, (_, i) => ({
+              label: `wallet-${i}`,
+              wif: `wif-${i}`,
+              receiveAddress: `bc1p${'a'.repeat(58)}`,
+            })),
+            bidsPerMinute: 5,
+          },
+        },
+      });
+      const encrypted = encryptData(largeData, password);
+      const decrypted = decryptData(encrypted, password);
+      expect(decrypted).toBe(largeData);
+    });
+  });
+
+  describe('isEncryptedFormat', () => {
+    it('should return true for encrypted content', () => {
+      const encrypted = encryptData('test data', 'password');
+      expect(isEncryptedFormat(encrypted)).toBe(true);
+    });
+
+    it('should return false for plaintext JSON', () => {
+      const plaintext = JSON.stringify({ wallets: [] });
+      expect(isEncryptedFormat(plaintext)).toBe(false);
+    });
+
+    it('should return false for invalid JSON', () => {
+      expect(isEncryptedFormat('not json')).toBe(false);
+    });
+
+    it('should return false for JSON with partial encrypted fields', () => {
+      const partial = JSON.stringify({ salt: 'abc', iv: 'def' });
+      expect(isEncryptedFormat(partial)).toBe(false);
+    });
+
+    it('should return true when all encrypted fields present', () => {
+      const fullEncrypted = JSON.stringify({
+        salt: 'abc',
+        iv: 'def',
+        authTag: 'ghi',
+        encrypted: 'jkl',
+      });
+      expect(isEncryptedFormat(fullEncrypted)).toBe(true);
+    });
+  });
+
+  describe('readWalletsFileRaw', () => {
+    it('should return null when file does not exist', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      expect(readWalletsFileRaw()).toBeNull();
+    });
+
+    it('should return raw file content', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('raw content');
+      expect(readWalletsFileRaw()).toBe('raw content');
+    });
+
+    it('should return null on read error', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation(() => { throw new Error('fail'); });
+      expect(readWalletsFileRaw()).toBeNull();
+    });
+  });
+
+  describe('loadWalletsDecrypted', () => {
+    it('should return null when file does not exist', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      expect(loadWalletsDecrypted('password')).toBeNull();
+    });
+
+    it('should decrypt and return wallet data', () => {
+      const data: WalletsFile = { wallets: [{ label: 'w1', wif: 'wif1', receiveAddress: 'addr1' }] };
+      const encrypted = encryptData(JSON.stringify(data), 'password');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(encrypted);
+
+      const result = loadWalletsDecrypted('password');
+      expect(result).toEqual(data);
+    });
+
+    it('should return null for wrong password', () => {
+      const encrypted = encryptData('{"wallets":[]}', 'right');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(encrypted);
+
+      expect(loadWalletsDecrypted('wrong')).toBeNull();
+    });
+
+    it('should return plaintext data if file is not encrypted', () => {
+      const data: WalletsFile = { wallets: [] };
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(data));
+
+      const result = loadWalletsDecrypted('anypassword');
+      expect(result).toEqual(data);
+    });
+  });
+
+  describe('saveWalletsEncrypted', () => {
+    it('should encrypt and write file with mode 0o600', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+
+      const data: WalletsFile = { wallets: [{ label: 'w1', wif: 'wif1', receiveAddress: 'addr1' }] };
+      saveWalletsEncrypted(data, 'password');
+
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      const [, content, options] = vi.mocked(fs.writeFileSync).mock.calls[0];
+      expect((options as any).mode).toBe(0o600);
+
+      // Verify written content is encrypted
+      expect(isEncryptedFormat(content as string)).toBe(true);
+
+      // Verify it can be decrypted back
+      const decrypted = JSON.parse(decryptData(content as string, 'password'));
+      expect(decrypted.wallets[0].label).toBe('w1');
+    });
+  });
+
+  describe('session password (transparent encryption)', () => {
+    afterEach(() => {
+      clearSessionPassword();
+    });
+
+    it('loadWallets should return null for encrypted file without session password', () => {
+      const encrypted = encryptData(JSON.stringify({ wallets: [] }), 'password');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(encrypted);
+
+      expect(loadWallets()).toBeNull();
+    });
+
+    it('loadWallets should decrypt transparently with session password', () => {
+      const data: WalletsFile = { wallets: [{ label: 'w1', wif: 'wif1', receiveAddress: 'addr1' }] };
+      const encrypted = encryptData(JSON.stringify(data), 'password');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(encrypted);
+
+      setSessionPassword('password');
+      const result = loadWallets();
+      expect(result).toEqual(data);
+    });
+
+    it('loadWalletGroups should decrypt transparently with session password', () => {
+      const data: WalletGroupsFile = {
+        groups: { default: { wallets: [], bidsPerMinute: 5 } },
+      };
+      const encrypted = encryptData(JSON.stringify(data), 'password');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(encrypted);
+
+      setSessionPassword('password');
+      const result = loadWalletGroups();
+      expect(result).toEqual(data);
+    });
+
+    it('saveWallets should auto-encrypt with session password', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      setSessionPassword('password');
+
+      const data: WalletsFile = { wallets: [{ label: 'w1', wif: 'wif1', receiveAddress: 'addr1' }] };
+      saveWallets(data);
+
+      const [, content] = vi.mocked(fs.writeFileSync).mock.calls[0];
+      expect(isEncryptedFormat(content as string)).toBe(true);
+    });
+
+    it('saveWalletGroups should auto-encrypt with session password', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      setSessionPassword('password');
+
+      const data: WalletGroupsFile = {
+        groups: { default: { wallets: [], bidsPerMinute: 5 } },
+      };
+      saveWalletGroups(data);
+
+      const [, content] = vi.mocked(fs.writeFileSync).mock.calls[0];
+      expect(isEncryptedFormat(content as string)).toBe(true);
+    });
+
+    it('round-trip: save encrypted then load with session password', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      setSessionPassword('mypassword');
+
+      const data: WalletsFile = {
+        wallets: [{ label: 'w1', wif: 'wif1', receiveAddress: 'addr1' }],
+        mnemonic: 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+      };
+      saveWallets(data);
+
+      // Get what was written and return it for load
+      const writtenContent = vi.mocked(fs.writeFileSync).mock.calls[0][1] as string;
+      vi.mocked(fs.readFileSync).mockReturnValue(writtenContent);
+
+      const loaded = loadWallets();
+      expect(loaded?.wallets[0].label).toBe('w1');
+      expect(loaded?.mnemonic).toBe(data.mnemonic);
     });
   });
 });

@@ -16,12 +16,18 @@ import {
   promptInteger,
   promptConfirm,
 } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 /**
  * Create a new wallet group
  */
 export async function createWalletGroupCommand(): Promise<void> {
   showSectionHeader('CREATE WALLET GROUP');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   // Check if using legacy format and offer migration
   const groupsData = loadWalletGroups();

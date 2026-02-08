@@ -20,6 +20,7 @@ import {
   getSeparatorWidth,
 } from '../../utils/display';
 import { promptSelect, promptMultiWalletSelect } from '../../utils/prompts';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 import * as bitcoin from 'bitcoinjs-lib';
 import chalk = require('chalk');
 
@@ -36,6 +37,11 @@ interface WalletTokenResult {
 
 export async function viewOrdinals(): Promise<void> {
   showSectionHeader('VIEW ORDINALS/NFTs');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   // Collect all wallet addresses
   const allWallets: Array<{

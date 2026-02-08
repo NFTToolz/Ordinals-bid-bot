@@ -14,12 +14,18 @@ import {
 import { getCollectionsByGroup } from '../../services/CollectionService';
 import { TableColumn, TableData } from '../../utils/table';
 import { showInteractiveTable } from '../../utils/interactiveTable';
+import { ensureWalletPasswordIfNeeded } from '../../utils/walletPassword';
 
 /**
  * List all wallet groups with wallet counts and total BTC
  */
 export async function listWalletGroups(): Promise<void> {
   showSectionHeader('WALLET GROUPS');
+
+  // Ensure encryption password is available if wallets.json is encrypted
+  if (!(await ensureWalletPasswordIfNeeded())) {
+    return;
+  }
 
   const groupsData = loadWalletGroups();
 
