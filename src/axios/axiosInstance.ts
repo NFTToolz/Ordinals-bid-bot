@@ -93,19 +93,43 @@ export function isDuplicateOfferError(error: unknown): boolean {
   return /You already have an offer for this token|already have an offer/i.test(errorText);
 }
 
+/** Base delay for 429 rate-limit retries (ms). Exponential: 3s, 6s, 12s, 24s */
+const RATE_LIMIT_BASE_DELAY_MS = 3_000;
+/** Maximum Retry-After value we honour (seconds) */
+const MAX_RETRY_AFTER_S = 60;
+
+/**
+ * Parse the Retry-After response header.
+ * Returns delay in milliseconds, or 0 if absent/unparseable.
+ */
+export function parseRetryAfterMs(error: AxiosError): number {
+  const header = error.response?.headers?.['retry-after'];
+  if (!header) return 0;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(seconds, MAX_RETRY_AFTER_S) * 1000;
+  }
+  return 0;
+}
+
 const retryConfig: IAxiosRetryConfig = {
-  retries: 3,
-  retryDelay: (retryCount, _error: AxiosError) => {
-    // Note: Rate limiting is handled by limiter.schedule() wrapping each API call,
-    // not here. retryDelay must return a number synchronously, so we can't await.
-    // Use exponential delay for network errors only
-    // Rate limits are handled by bid pacer, not axios retry
+  retries: 4,
+  retryDelay: (retryCount, error: AxiosError) => {
+    // For 429 rate-limit errors use a longer exponential backoff
+    if (isRateLimitError(error)) {
+      // Honour Retry-After header if present
+      const retryAfterMs = parseRetryAfterMs(error);
+      if (retryAfterMs > 0) return retryAfterMs;
+      // Exponential: 3s, 6s, 12s, 24s (retryCount is 1-based)
+      return RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, retryCount - 1);
+    }
+    // Standard network/server errors keep default ~200ms exponential backoff
     return axiosRetry.exponentialDelay(retryCount);
   },
   retryCondition: async (error: AxiosError) => {
-    // DON'T retry on rate limits - let bid pacer handle it
+    // Retry rate-limit errors with longer backoff (handled in retryDelay)
     if (isRateLimitError(error)) {
-      return false;
+      return true;
     }
 
     // Non-retryable business logic errors

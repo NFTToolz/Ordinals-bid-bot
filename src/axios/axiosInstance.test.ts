@@ -4,7 +4,9 @@ import {
   isRateLimitError,
   isNonRetryableError,
   isDuplicateOfferError,
+  parseRetryAfterMs,
 } from './axiosInstance';
+import { AxiosError } from 'axios';
 
 describe('Axios Instance Helpers', () => {
   describe('getErrorMessage', () => {
@@ -220,6 +222,56 @@ describe('Axios Instance Helpers', () => {
     it('should return false for null/undefined', () => {
       expect(isDuplicateOfferError(null)).toBe(false);
       expect(isDuplicateOfferError(undefined)).toBe(false);
+    });
+  });
+
+  describe('parseRetryAfterMs', () => {
+    function makeAxiosError(headers?: Record<string, string>): AxiosError {
+      return {
+        response: { headers: headers ?? {}, status: 429, data: '', statusText: '', config: {} as never },
+        isAxiosError: true,
+        name: 'AxiosError',
+        message: 'Too Many Requests',
+        config: {} as never,
+        toJSON: () => ({}),
+      } as AxiosError;
+    }
+
+    it('should return 0 when no Retry-After header', () => {
+      expect(parseRetryAfterMs(makeAxiosError())).toBe(0);
+    });
+
+    it('should return 0 when Retry-After is non-numeric', () => {
+      expect(parseRetryAfterMs(makeAxiosError({ 'retry-after': 'abc' }))).toBe(0);
+    });
+
+    it('should return 0 when Retry-After is 0', () => {
+      expect(parseRetryAfterMs(makeAxiosError({ 'retry-after': '0' }))).toBe(0);
+    });
+
+    it('should return 0 when Retry-After is negative', () => {
+      expect(parseRetryAfterMs(makeAxiosError({ 'retry-after': '-5' }))).toBe(0);
+    });
+
+    it('should parse valid Retry-After in seconds and return ms', () => {
+      expect(parseRetryAfterMs(makeAxiosError({ 'retry-after': '5' }))).toBe(5000);
+      expect(parseRetryAfterMs(makeAxiosError({ 'retry-after': '30' }))).toBe(30000);
+    });
+
+    it('should cap Retry-After at 60 seconds', () => {
+      expect(parseRetryAfterMs(makeAxiosError({ 'retry-after': '120' }))).toBe(60000);
+      expect(parseRetryAfterMs(makeAxiosError({ 'retry-after': '9999' }))).toBe(60000);
+    });
+
+    it('should return 0 when response is undefined', () => {
+      const error = {
+        isAxiosError: true,
+        name: 'AxiosError',
+        message: 'err',
+        config: {} as never,
+        toJSON: () => ({}),
+      } as AxiosError;
+      expect(parseRetryAfterMs(error)).toBe(0);
     });
   });
 });

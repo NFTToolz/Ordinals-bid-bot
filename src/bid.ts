@@ -155,6 +155,8 @@ const BOT_CONSTANTS = {
   WALLET_WAIT_MAX_MS: 15_000,
   /** Maximum time WS events wait for scheduled task to finish (ms) — shorter than LOCK_WAIT_TIMEOUT_MS */
   WS_SCHEDULED_WAIT_MS: 5_000,
+  /** Delay between sequential getUserOffers calls during rehydration (ms) */
+  REHYDRATION_INTER_WALLET_DELAY_MS: 2_000,
 } as const;
 
 config()
@@ -1426,7 +1428,8 @@ class EventManager {
             const addressesToQuery = getReceiveAddressesToQuery();
             Logger.info(`[REHYDRATE] ${isCollectionRestart ? 'Startup' : 'Periodic'} rehydration - querying ${addressesToQuery.length} wallet address(es)`);
 
-            for (const receiveAddr of addressesToQuery) {
+            for (let addrIdx = 0; addrIdx < addressesToQuery.length; addrIdx++) {
+              const receiveAddr = addressesToQuery[addrIdx];
               try {
                 const offerData = await getUserOffers(receiveAddr);
                 if (offerData && Array.isArray(offerData.offers) && offerData.offers.length > 0) {
@@ -1445,6 +1448,10 @@ class EventManager {
                 }
               } catch (error: unknown) {
                 Logger.warning(`[REHYDRATE] Failed to fetch offers for ${receiveAddr.slice(0, 10)}...: ${getErrorMessage(error)}`);
+              }
+              // Space out sequential API calls to avoid rate-limit bursts
+              if (addrIdx < addressesToQuery.length - 1) {
+                await delay(BOT_CONSTANTS.REHYDRATION_INTER_WALLET_DELAY_MS);
               }
             }
             lastRehydrationTime = Date.now();
