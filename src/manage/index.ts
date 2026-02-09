@@ -32,6 +32,7 @@ import {
   exportWalletsCommand,
   importWalletsCommand,
   encryptWalletsFile,
+  deleteWalletsCommand,
   listWalletGroups,
   createWalletGroupCommand,
   addWalletsToGroupCommand,
@@ -88,6 +89,7 @@ const actions: Record<string, ActionHandler> = {
   'wallet:export': exportWalletsCommand,
   'wallet:import': importWalletsCommand,
   'wallet:encrypt': encryptWalletsFile,
+  'wallet:delete': deleteWalletsCommand,
 
   // Wallet group actions
   'wallet:groups': listWalletGroups,
@@ -159,6 +161,7 @@ const MENU_CONFIG: Record<MenuLevel, MenuConfig> = {
       { name: 'Export/backup wallets', value: 'wallet:export' },
       { name: 'Import wallets', value: 'wallet:import' },
       { name: 'Encrypt wallets file', value: 'wallet:encrypt' },
+      { name: 'Delete wallets', value: 'wallet:delete' },
       { name: '← Back', value: 'back' },
     ],
   },

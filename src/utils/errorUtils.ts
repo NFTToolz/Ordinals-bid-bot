@@ -30,6 +30,22 @@ export function getErrorResponseData(error: unknown): unknown {
 }
 
 /**
+ * Typed error for Magic Eden "Insufficient funds" rejections.
+ * Carries parsed sats amounts so callers can verify against on-chain balance.
+ */
+export class InsufficientFundsError extends Error {
+  public readonly requiredSats: number;
+  public readonly meReportedSats: number;
+
+  constructor(requiredSats: number, meReportedSats: number) {
+    super(`Insufficient funds. Required ${requiredSats} sats, found ${meReportedSats} sats.`);
+    this.name = 'InsufficientFundsError';
+    this.requiredSats = requiredSats;
+    this.meReportedSats = meReportedSats;
+  }
+}
+
+/**
  * Extract HTTP status code from axios-like errors.
  * Returns undefined if no status is available.
  */

@@ -6,6 +6,7 @@ export { viewOrdinals } from './ordinals';
 export { exportWalletsCommand } from './export';
 export { importWalletsCommand } from './import';
 export { encryptWalletsFile } from './encrypt';
+export { deleteWalletsCommand } from './delete';
 
 // Wallet group commands
 export { listWalletGroups } from './groups';

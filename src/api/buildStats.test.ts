@@ -120,6 +120,12 @@ describe('buildRuntimeStats', () => {
         topBids: { 'token1': true },
         bottomListings: [],
         quantity: 0,
+        marketData: {
+          floorPrice: 50000,
+          supply: '10000',
+          totalListed: '500',
+          updatedAt: Date.now(),
+        },
       },
     };
     const collections = [

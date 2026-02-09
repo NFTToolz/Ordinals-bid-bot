@@ -73,6 +73,12 @@ export interface StatsDependencies {
     quantity: number;
     lastSeenActivity?: number | null;
     highestCollectionOffer?: { price: number; buyerPaymentAddress: string };
+    marketData?: {
+      floorPrice: number;    // sats
+      supply: string;
+      totalListed: string;
+      updatedAt: number;     // epoch ms
+    };
   }>;
   /** Collection configs loaded at startup */
   collections: Array<{

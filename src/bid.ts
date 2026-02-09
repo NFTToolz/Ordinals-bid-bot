@@ -13,7 +13,8 @@ import limiter from "./bottleneck";
 import WebSocket from 'ws';
 import Logger, { getBidStatsData, formatBTC } from "./utils/logger";
 import { printVersionBanner } from "./utils/version";
-import { getErrorMessage, getErrorResponseData, getErrorStatus } from "./utils/errorUtils";
+import { getErrorMessage, getErrorResponseData, getErrorStatus, InsufficientFundsError } from "./utils/errorUtils";
+import { verifyBalanceForRetry } from "./utils/balanceVerification";
 import {
   initializeBidPacer,
   getBidPacer,
@@ -637,6 +638,12 @@ interface BidHistory {
       buyerPaymentAddress: string;
     };
     quantity: number;
+    marketData?: {
+      floorPrice: number;    // sats
+      supply: string;
+      totalListed: string;
+      updatedAt: number;     // epoch ms
+    };
   };
 }
 
@@ -1034,6 +1041,17 @@ class EventManager {
         Logger.warning(`[WS] Invalid floor price "${collectionData.floorPrice}" for ${collectionSymbol}, skipping event`);
         return;
       }
+
+      // Cache market data for stats API
+      if (bidHistory[collectionSymbol]) {
+        bidHistory[collectionSymbol].marketData = {
+          floorPrice,
+          supply: collectionData.supply,
+          totalListed: collectionData.totalListed,
+          updatedAt: Date.now(),
+        };
+      }
+
       const maxPrice = Math.round(collection.maxBid * CONVERSION_RATE)
       const maxOffer = Math.min(maxPrice, Math.round(maxFloorBid * floorPrice / 100))
       const offerType = collection.offerType
@@ -1281,7 +1299,7 @@ class EventManager {
                 } else if (bidPrice >= floorPrice) {
                   Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed floor price', +(incomingBidAmount), bidPrice, floorPrice);
                 } else {
-                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, undefined)
+                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, undefined, buyerPaymentAddress)
                   bidHistory[collectionSymbol].highestCollectionOffer = {
                     price: bidPrice,
                     buyerPaymentAddress: buyerPaymentAddress
@@ -1515,6 +1533,15 @@ class EventManager {
         Logger.warning(`[SCHEDULE] Invalid floor price "${collectionData.floorPrice}" for ${collectionSymbol}, skipping cycle`);
         return;
       }
+
+      // Cache market data for stats API
+      bidHistory[collectionSymbol].marketData = {
+        floorPrice,
+        supply: collectionData.supply,
+        totalListed: collectionData.totalListed,
+        updatedAt: Date.now(),
+      };
+
       // H3: Cap maxFloorBid at 100% for non-trait offers (matching WS handler at line 951-953)
       const maxFloorBid = item.offerType === "ITEM" && item.traits && item.traits.length > 0
         ? item.maxFloorBid
@@ -2029,7 +2056,7 @@ class EventManager {
             if (bidPrice <= maxOffer) {
               try {
                 if (bidPrice < floorPrice) {
-                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
                   bidHistory[collectionSymbol].offerType = "COLLECTION"
 
                   bidHistory[collectionSymbol].highestCollectionOffer = {
@@ -2083,7 +2110,7 @@ class EventManager {
                 if (bidPrice <= maxOffer) {
                   try {
                     if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -2131,7 +2158,7 @@ class EventManager {
                 if (bidPrice <= maxOffer) {
                   try {
                     if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -2153,7 +2180,7 @@ class EventManager {
           if (bidPrice <= maxOffer) {
             if (bidPrice < floorPrice) {
               try {
-                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
                 bidHistory[collectionSymbol].offerType = "COLLECTION"
                 bidHistory[collectionSymbol].highestCollectionOffer = {
                   price: bidPrice,
@@ -3414,8 +3441,27 @@ async function placeBid(
     if (getErrorMessage(error).includes('maximum number of offers')) {
       Logger.error(`[PLACEBID] Hit maximum offer limit!`);
     }
-    if (getErrorMessage(error).includes('Insufficient funds')) {
-      Logger.error(`[PLACEBID] Insufficient funds error`);
+
+    // Stale ME balance cache detection + bounded retry
+    if (error instanceof InsufficientFundsError) {
+      const verification = await verifyBalanceForRetry(buyerPaymentAddress, error.requiredSats, error.meReportedSats);
+      if (verification.verdict === 'stale_cache') {
+        Logger.warning(
+          `[PLACEBID] Token ${tokenId.slice(-8)}: ME cache stale ` +
+          `(on-chain ${verification.onChainBalance} sats vs ME ${error.meReportedSats} sats). ` +
+          `Retrying in 30s...`
+        );
+        await delay(30_000);
+        try {
+          const unsignedOffer = await createOffer(tokenId, Math.round(offerPrice), expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, FEE_RATE_TIER, sellerReceiveAddress, maxAllowedPrice);
+          const signedOffer = signData(unsignedOffer, privateKey);
+          await submitSignedOfferOrder(signedOffer, tokenId, Math.round(offerPrice), expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey, sellerReceiveAddress);
+          Logger.info(`[PLACEBID] Token ${tokenId.slice(-8)}: Retry succeeded after stale cache delay`);
+          return true;
+        } catch (retryError: unknown) {
+          Logger.error(`[PLACEBID] Token ${tokenId.slice(-8)}: Retry after stale cache delay failed: ${getErrorMessage(retryError)}`);
+        }
+      }
     }
 
     return false
@@ -3431,7 +3477,8 @@ async function placeCollectionBid(
   privateKey: string,
   feeSatsPerVbyte: number = 28,
   maxAllowedPrice?: number,  // Safety cap - last line of defense against overbidding
-  balance?: number  // M3: Pass balance explicitly instead of using global
+  balance?: number,  // M3: Pass balance explicitly instead of using global
+  buyerPaymentAddress?: string  // For stale cache verification
 ): Promise<boolean> {
   try {
     const priceSats = Math.round(offerPrice)
@@ -3459,6 +3506,35 @@ async function placeCollectionBid(
     return false;
   } catch (error: unknown) {
     Logger.error(`[COLLECTION BID] Failed to place collection bid for ${collectionSymbol}`, getErrorMessage(error));
+
+    // Stale ME balance cache detection + bounded retry
+    if (error instanceof InsufficientFundsError && buyerPaymentAddress) {
+      const verification = await verifyBalanceForRetry(buyerPaymentAddress, error.requiredSats, error.meReportedSats);
+      if (verification.verdict === 'stale_cache') {
+        Logger.warning(
+          `[COLLECTION BID] ${collectionSymbol}: ME cache stale ` +
+          `(on-chain ${verification.onChainBalance} sats vs ME ${error.meReportedSats} sats). ` +
+          `Retrying in 30s...`
+        );
+        const priceSats = Math.round(offerPrice);
+        const expirationAt = new Date(expiration).toISOString();
+        await delay(30_000);
+        try {
+          const unsignedCollectionOffer = await createCollectionOffer(collectionSymbol, priceSats, expirationAt, feeSatsPerVbyte, publicKey, buyerTokenReceiveAddress, privateKey, maxAllowedPrice);
+          if (unsignedCollectionOffer) {
+            const { signedOfferPSBTBase64, signedCancelledPSBTBase64 } = signCollectionOffer(unsignedCollectionOffer, privateKey);
+            if (signedOfferPSBTBase64) {
+              await submitCollectionOffer(signedOfferPSBTBase64, collectionSymbol, priceSats, expirationAt, publicKey, buyerTokenReceiveAddress, privateKey, signedCancelledPSBTBase64);
+              Logger.info(`[COLLECTION BID] ${collectionSymbol}: Retry succeeded after stale cache delay`);
+              return true;
+            }
+          }
+        } catch (retryError: unknown) {
+          Logger.error(`[COLLECTION BID] ${collectionSymbol}: Retry after stale cache delay failed: ${getErrorMessage(retryError)}`);
+        }
+      }
+    }
+
     return false;
   }
 }

@@ -1,5 +1,4 @@
 import { fetchBotRuntimeStatsFromApi, BotRuntimeStats, BidHistoryEntry } from '../../services/BotProcessManager';
-import { collectionDetails } from '../../../functions/Collection';
 import { satsToBTC } from '../../../utils/bidLogic';
 import {
   showSectionHeader,
@@ -280,21 +279,6 @@ export async function viewCollectionDetails(): Promise<void> {
   const config = collections.find(c => c.collectionSymbol === selected);
   if (!config) return;
 
-  // Fetch market data once (external API, slow) — cache for live view
-  let marketData: { floorBTC: string; supply: string; totalListed: string } | null = null;
-  try {
-    const details = await withSpinner('Fetching market data...', () => collectionDetails(selected));
-    if (details) {
-      marketData = {
-        floorBTC: (parseInt(details.floorPrice, 10) / 100000000).toFixed(8),
-        supply: details.supply,
-        totalListed: details.totalListed,
-      };
-    }
-  } catch {
-    // leave marketData null
-  }
-
   await withLiveRefresh({
     render: async () => {
       const fresh = await fetchBotRuntimeStatsFromApi();
@@ -305,6 +289,18 @@ export async function viewCollectionDetails(): Promise<void> {
       // Re-find config from fresh stats (in case collections changed)
       const freshConfig = (fresh.collections || []).find(c => c.collectionSymbol === selected);
       const freshHistory = (fresh.bidHistory || {})[selected];
+
+      // Read market data from bot's cached stats (populated each bidding cycle)
+      let marketData: { floorBTC: string; supply: string; totalListed: string } | null = null;
+      const cached = freshHistory?.marketData;
+      if (cached) {
+        marketData = {
+          floorBTC: (cached.floorPrice / 100000000).toFixed(8),
+          supply: cached.supply,
+          totalListed: cached.totalListed,
+        };
+      }
+
       renderDetail(freshConfig || config, freshHistory, marketData);
     },
   });

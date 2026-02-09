@@ -4,7 +4,7 @@ import { ECPairInterface, ECPairFactory, ECPairAPI, TinySecp256k1Interface } fro
 import { config } from "dotenv"
 import limiter from "../bottleneck";
 import Logger from "../utils/logger";
-import { getErrorMessage, getErrorResponseData, getErrorStatus } from "../utils/errorUtils";
+import { getErrorMessage, getErrorResponseData, getErrorStatus, InsufficientFundsError } from "../utils/errorUtils";
 import { getAllOurReceiveAddresses } from "../utils/walletHelpers";
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
@@ -187,6 +187,13 @@ export async function createCollectionOffer(
         errorOccurred = true;
       } else {
         Logger.offer.error('createCollectionOffer', collectionSymbol, getErrorMessage(error), getErrorStatus(error), getErrorResponseData(error));
+        // Parse "Insufficient funds" and throw typed error for retry logic
+        if (errorStr.includes('Insufficient funds')) {
+          const match = errorStr.match(/Required (\d+) sats, found (\d+) sats/);
+          if (match) {
+            throw new InsufficientFundsError(parseInt(match[1], 10), parseInt(match[2], 10));
+          }
+        }
         errorOccurred = false;
         throw error;
       }
@@ -382,6 +389,7 @@ export async function createOffer(
           const required = parseInt(match[1], 10);
           const available = parseInt(match[2], 10);
           Logger.offer.insufficientFunds(tokenId, price, required, available);
+          throw new InsufficientFundsError(required, available);
         } else {
           // Fallback if parsing fails
           Logger.error(`[CREATE_OFFER] API Response:`, responseData);
