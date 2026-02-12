@@ -90,6 +90,7 @@ import {
   isValidJSON as bidLogicIsValidJSON,
   isValidWebSocketMessage as validateWSMessage,
   isWatchedEvent,
+  isPurchaseEvent,
   WATCHED_EVENTS,
 
   // Collection Config
@@ -611,6 +612,7 @@ function loadCollections(): CollectionData[] {
 }
 
 const collections: CollectionData[] = loadCollections();
+const collectionSymbolSet = new Set(collections.map(c => c.collectionSymbol));
 Logger.info(`[STARTUP] Loaded ${collections.length} collection(s): ${collections.map(c => c.collectionSymbol).join(', ')}`);
 Logger.info(`[STARTUP] Environment: API_KEY=${API_KEY ? 'set' : 'MISSING'}, FUNDING_WIF=${hasFundingWIF() ? 'set' : 'pending (wallets.json)'}, RATE_LIMIT=${RATE_LIMIT}`);
 // M3: balance moved to local scope in processScheduledLoop() and placeCollectionBid()
@@ -922,7 +924,16 @@ class EventManager {
   isProcessingQueue: boolean;
   private readonly MAX_QUEUE_SIZE = BOT_CONSTANTS.EVENT_QUEUE_CAP;
   private droppedEventsCount = 0;
-
+  private static readonly DROP_LOG_INTERVAL = 50;
+  private tokenEventDedup = new Map<string, number>();
+  private static readonly DEDUP_COOLDOWN_MS = 5_000;
+  private preFilterStats = {
+    notWatched: 0,
+    unknownCollection: 0,
+    ownWallet: 0,
+    deduplicated: 0,
+    total: 0,
+  };
 
   private queueMutex = new Mutex();
 
@@ -932,16 +943,97 @@ class EventManager {
     this.isProcessingQueue = false;
   }
 
-  async receiveWebSocketEvent(event: CollectOfferActivity): Promise<void> {
-    // Memory leak fix: Prevent unbounded queue growth
-    if (this.queue.length >= this.MAX_QUEUE_SIZE) {
-      // Drop oldest events (FIFO)
-      const dropped = this.queue.shift();
-      this.droppedEventsCount++;
+  /** Expose pre-filter stats for the stats API. */
+  getPreFilterStats() {
+    return { ...this.preFilterStats };
+  }
 
-      // Log each dropped event with details for debugging missed counter-bid opportunities
-      const droppedInfo = dropped ? `${dropped.collectionSymbol || 'unknown'}/${dropped.tokenId?.slice(-8) || 'unknown'} (${dropped.kind || 'unknown'})` : 'unknown';
-      Logger.warning(`[EVENT QUEUE] Dropped event #${this.droppedEventsCount}: ${droppedInfo} - queue full (${this.MAX_QUEUE_SIZE})`);
+  /** Expose dropped events count for the stats API. */
+  getDroppedEventsCount(): number {
+    return this.droppedEventsCount;
+  }
+
+  /** Purge expired entries from the per-token dedup map. */
+  cleanupDedupMap(): void {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [tokenId, timestamp] of this.tokenEventDedup.entries()) {
+      if (now - timestamp > EventManager.DEDUP_COOLDOWN_MS * 2) {
+        this.tokenEventDedup.delete(tokenId);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) {
+      Logger.debug(`[CLEANUP] Removed ${cleaned} entries from tokenEventDedup map (size: ${this.tokenEventDedup.size})`);
+    }
+  }
+
+  async receiveWebSocketEvent(event: CollectOfferActivity): Promise<void> {
+    // === Pre-queue filtering: cheap synchronous checks BEFORE queuing ===
+
+    // Filter 1: Not a watched event kind
+    if (!isWatchedEvent(event.kind)) {
+      this.preFilterStats.notWatched++;
+      this.preFilterStats.total++;
+      return;
+    }
+
+    // Filter 2: Unknown collection (not in our config)
+    if (!collectionSymbolSet.has(event.collectionSymbol)) {
+      this.preFilterStats.unknownCollection++;
+      this.preFilterStats.total++;
+      return;
+    }
+
+    // Filter 3: Own-wallet detection for offer_placed / coll_offer_created
+    if (event.kind === 'offer_placed' || event.kind === 'coll_offer_created') {
+      if (isOurPaymentAddress(event.buyerPaymentAddress)) {
+        this.preFilterStats.ownWallet++;
+        this.preFilterStats.total++;
+        return;
+      }
+    }
+
+    // Filter 4: Per-token dedup for offer_placed (only latest matters within cooldown)
+    if (event.kind === 'offer_placed' && event.tokenId) {
+      const lastSeen = this.tokenEventDedup.get(event.tokenId);
+      const now = Date.now();
+      if (lastSeen && now - lastSeen < EventManager.DEDUP_COOLDOWN_MS) {
+        this.preFilterStats.deduplicated++;
+        this.preFilterStats.total++;
+        return;
+      }
+      this.tokenEventDedup.set(event.tokenId, now);
+    }
+
+    // === Queue overflow handling ===
+    if (this.queue.length >= this.MAX_QUEUE_SIZE) {
+      if (isPurchaseEvent(event.kind)) {
+        // Purchase events are critical — drop oldest non-purchase event to make room
+        const dropIdx = this.queue.findIndex((e: CollectOfferActivity) => !isPurchaseEvent(e.kind));
+        if (dropIdx !== -1) {
+          this.queue.splice(dropIdx, 1);
+          this.droppedEventsCount++;
+        } else {
+          // Queue is entirely purchase events (unlikely) — drop oldest
+          this.queue.shift();
+          this.droppedEventsCount++;
+        }
+      } else {
+        // Drop oldest non-purchase event (FIFO for non-critical events)
+        const dropIdx = this.queue.findIndex((e: CollectOfferActivity) => !isPurchaseEvent(e.kind));
+        if (dropIdx !== -1) {
+          this.queue.splice(dropIdx, 1);
+        } else {
+          this.queue.shift();
+        }
+        this.droppedEventsCount++;
+      }
+
+      // Throttled drop logging: every DROP_LOG_INTERVAL drops instead of every drop
+      if (this.droppedEventsCount % EventManager.DROP_LOG_INTERVAL === 0) {
+        Logger.warning(`[EVENT QUEUE] Dropped ${EventManager.DROP_LOG_INTERVAL} events (total: ${this.droppedEventsCount}) - queue full (${this.MAX_QUEUE_SIZE})`);
+      }
     }
 
     this.queue.push(event);
@@ -994,9 +1086,9 @@ class EventManager {
       const { newOwner: incomingBuyerTokenReceiveAddress, collectionSymbol, tokenId, listedPrice: incomingBidAmount, createdAt: rawCreatedAt } = message
       const createdAt = typeof rawCreatedAt === 'number' && rawCreatedAt > 0 ? rawCreatedAt : Date.now();
 
-      if (!isWatchedEvent(message.kind)) return
+      if (!isWatchedEvent(message.kind)) return // also checked pre-queue
       const collection = collections.find((item) => item.collectionSymbol === collectionSymbol)
-      if (!collection) return
+      if (!collection) return // also checked pre-queue
 
       initBidHistory(collectionSymbol, collection.offerType);
 
@@ -2775,6 +2867,8 @@ function gatherStatsDeps(): StatsDependencies {
     walletPool: walletPoolData,
     walletGroups: walletGroupsData,
     eventQueueLength: eventManager.queue.length,
+    droppedEventsCount: eventManager.getDroppedEventsCount(),
+    preFilterStats: eventManager.getPreFilterStats(),
     queueSize: queue.size,
     queuePending: queue.pending,
     wsConnected: !!(ws && ws.readyState === WebSocket.OPEN),
@@ -2823,6 +2917,9 @@ function cleanupRecentBids() {
   if (recentBidsCleaned > 0) {
     Logger.debug(`[CLEANUP] Removed ${recentBidsCleaned} entries from recentBids map (size: ${recentBids.size})`);
   }
+
+  // Also clean up the EventManager's per-token dedup map
+  eventManager.cleanupDedupMap();
 }
 
 // Cleanup lock to prevent concurrent modifications during cleanup

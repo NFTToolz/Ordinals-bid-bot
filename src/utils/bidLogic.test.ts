@@ -47,6 +47,8 @@ import {
   isValidJSON,
   isValidWebSocketMessage,
   isWatchedEvent,
+  isPurchaseEvent,
+  PURCHASE_EVENT_KINDS,
 
   // Collection Config
   validateCollectionConfig,
@@ -93,7 +95,8 @@ describe('bidLogic', () => {
       expect(WATCHED_EVENTS).toContain('offer_placed');
       expect(WATCHED_EVENTS).toContain('coll_offer_created');
       expect(WATCHED_EVENTS).toContain('buying_broadcasted');
-      expect(WATCHED_EVENTS).toHaveLength(6);
+      expect(WATCHED_EVENTS).not.toContain('offer_cancelled');
+      expect(WATCHED_EVENTS).toHaveLength(5);
     });
   });
 
@@ -844,7 +847,6 @@ describe('bidLogic', () => {
       expect(isWatchedEvent('coll_offer_created')).toBe(true);
       expect(isWatchedEvent('buying_broadcasted')).toBe(true);
       expect(isWatchedEvent('offer_accepted_broadcasted')).toBe(true);
-      expect(isWatchedEvent('offer_cancelled')).toBe(true);
       expect(isWatchedEvent('coll_offer_fulfill_broadcasted')).toBe(true);
     });
 
@@ -852,6 +854,29 @@ describe('bidLogic', () => {
       expect(isWatchedEvent('listing_created')).toBe(false);
       expect(isWatchedEvent('unknown_event')).toBe(false);
       expect(isWatchedEvent('')).toBe(false);
+      expect(isWatchedEvent('offer_cancelled')).toBe(false);
+    });
+  });
+
+  describe('isPurchaseEvent', () => {
+    it('should return true for purchase event kinds', () => {
+      expect(isPurchaseEvent('buying_broadcasted')).toBe(true);
+      expect(isPurchaseEvent('offer_accepted_broadcasted')).toBe(true);
+      expect(isPurchaseEvent('coll_offer_fulfill_broadcasted')).toBe(true);
+    });
+
+    it('should return false for non-purchase events', () => {
+      expect(isPurchaseEvent('offer_placed')).toBe(false);
+      expect(isPurchaseEvent('coll_offer_created')).toBe(false);
+      expect(isPurchaseEvent('offer_cancelled')).toBe(false);
+      expect(isPurchaseEvent('')).toBe(false);
+    });
+
+    it('should have PURCHASE_EVENT_KINDS matching a subset of WATCHED_EVENTS', () => {
+      for (const kind of PURCHASE_EVENT_KINDS) {
+        expect(WATCHED_EVENTS).toContain(kind);
+      }
+      expect(PURCHASE_EVENT_KINDS).toHaveLength(3);
     });
   });
 

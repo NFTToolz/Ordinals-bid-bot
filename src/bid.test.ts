@@ -1114,7 +1114,6 @@ describe('Bid.ts Logic Tests', () => {
       const watchedEvents = [
         'offer_placed',
         'coll_offer_created',
-        'offer_cancelled',
         'buying_broadcasted',
         'offer_accepted_broadcasted',
         'coll_offer_fulfill_broadcasted',
@@ -1123,6 +1122,112 @@ describe('Bid.ts Logic Tests', () => {
       expect(watchedEvents.includes('offer_placed')).toBe(true);
       expect(watchedEvents.includes('listing_created')).toBe(false);
       expect(watchedEvents.includes('buying_broadcasted')).toBe(true);
+      expect(watchedEvents.includes('offer_cancelled')).toBe(false);
+    });
+  });
+
+  describe('Pre-Queue Filtering', () => {
+    it('should reject events with unwatched kinds before queuing', () => {
+      const queue: any[] = [];
+      const preFilterStats = { notWatched: 0, unknownCollection: 0, ownWallet: 0, deduplicated: 0, total: 0 };
+      const watchedEvents = ['offer_placed', 'coll_offer_created', 'buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
+      const collectionSymbols = new Set(['test-collection']);
+
+      function receiveEvent(event: { kind: string; collectionSymbol: string }) {
+        if (!watchedEvents.includes(event.kind)) {
+          preFilterStats.notWatched++;
+          preFilterStats.total++;
+          return;
+        }
+        if (!collectionSymbols.has(event.collectionSymbol)) {
+          preFilterStats.unknownCollection++;
+          preFilterStats.total++;
+          return;
+        }
+        queue.push(event);
+      }
+
+      receiveEvent({ kind: 'offer_cancelled', collectionSymbol: 'test-collection' });
+      receiveEvent({ kind: 'listing_created', collectionSymbol: 'test-collection' });
+      receiveEvent({ kind: 'offer_placed', collectionSymbol: 'unknown-collection' });
+      receiveEvent({ kind: 'offer_placed', collectionSymbol: 'test-collection' });
+
+      expect(queue).toHaveLength(1);
+      expect(preFilterStats.notWatched).toBe(2);
+      expect(preFilterStats.unknownCollection).toBe(1);
+      expect(preFilterStats.total).toBe(3);
+    });
+
+    it('should deduplicate rapid offer_placed events for the same token', () => {
+      const queue: any[] = [];
+      const dedupMap = new Map<string, number>();
+      const DEDUP_COOLDOWN = 5000;
+
+      function receiveEvent(event: { kind: string; tokenId: string }, now: number) {
+        if (event.kind === 'offer_placed' && event.tokenId) {
+          const lastSeen = dedupMap.get(event.tokenId);
+          if (lastSeen && now - lastSeen < DEDUP_COOLDOWN) return;
+          dedupMap.set(event.tokenId, now);
+        }
+        queue.push(event);
+      }
+
+      const now = Date.now();
+      receiveEvent({ kind: 'offer_placed', tokenId: 'token1' }, now);
+      receiveEvent({ kind: 'offer_placed', tokenId: 'token1' }, now + 1000);  // within cooldown
+      receiveEvent({ kind: 'offer_placed', tokenId: 'token1' }, now + 6000);  // after cooldown
+      receiveEvent({ kind: 'offer_placed', tokenId: 'token2' }, now + 1000);  // different token
+
+      expect(queue).toHaveLength(3);
+    });
+
+    it('should protect purchase events from being dropped on overflow', () => {
+      const MAX_QUEUE_SIZE = 5;
+      const queue: any[] = [];
+      const purchaseKinds = ['buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
+
+      function isPurchase(kind: string) { return purchaseKinds.includes(kind); }
+
+      function receiveEvent(event: { kind: string; id: number }) {
+        if (queue.length >= MAX_QUEUE_SIZE) {
+          if (isPurchase(event.kind)) {
+            const dropIdx = queue.findIndex((e: any) => !isPurchase(e.kind));
+            if (dropIdx !== -1) queue.splice(dropIdx, 1);
+            else queue.shift();
+          } else {
+            const dropIdx = queue.findIndex((e: any) => !isPurchase(e.kind));
+            if (dropIdx !== -1) queue.splice(dropIdx, 1);
+            else queue.shift();
+          }
+        }
+        queue.push(event);
+      }
+
+      // Fill queue with non-purchase events
+      for (let i = 0; i < 5; i++) {
+        receiveEvent({ kind: 'offer_placed', id: i });
+      }
+      expect(queue).toHaveLength(5);
+
+      // A purchase event should still get in
+      receiveEvent({ kind: 'buying_broadcasted', id: 100 });
+      expect(queue).toHaveLength(5);
+      expect(queue.some((e: any) => e.id === 100)).toBe(true);
+    });
+
+    it('should throttle drop logging', () => {
+      const DROP_LOG_INTERVAL = 50;
+      let logCount = 0;
+      let droppedCount = 0;
+
+      for (let i = 0; i < 150; i++) {
+        droppedCount++;
+        if (droppedCount % DROP_LOG_INTERVAL === 0) {
+          logCount++;
+        }
+      }
+
+      expect(logCount).toBe(3); // 50, 100, 150
     });
   });
 

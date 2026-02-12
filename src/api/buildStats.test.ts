@@ -21,6 +21,14 @@ function createMockDeps(overrides: Partial<StatsDependencies> = {}): StatsDepend
     walletPool: null,
     walletGroups: null,
     eventQueueLength: 3,
+    droppedEventsCount: 0,
+    preFilterStats: {
+      notWatched: 0,
+      unknownCollection: 0,
+      ownWallet: 0,
+      deduplicated: 0,
+      total: 0,
+    },
     queueSize: 1,
     queuePending: 0,
     wsConnected: true,
@@ -53,6 +61,14 @@ describe('buildRuntimeStats', () => {
     expect(stats.queue.size).toBe(3);
     expect(stats.queue.pending).toBe(1);
     expect(stats.queue.active).toBe(0);
+    expect(stats.queue.droppedEventsCount).toBe(0);
+    expect(stats.queue.preFilterStats).toEqual({
+      notWatched: 0,
+      unknownCollection: 0,
+      ownWallet: 0,
+      deduplicated: 0,
+      total: 0,
+    });
     expect(stats.websocket.connected).toBe(true);
     expect(stats.bidsTracked).toBe(15);
     expect(stats.memory.heapUsedMB).toBeGreaterThan(0);
@@ -162,5 +178,19 @@ describe('buildRuntimeStats', () => {
     const deps = createMockDeps({ walletPool });
     const stats = buildRuntimeStats(deps);
     expect(stats.walletPool).toEqual(walletPool);
+  });
+
+  it('should pass through pre-filter stats and dropped events count', () => {
+    const preFilterStats = {
+      notWatched: 120,
+      unknownCollection: 45,
+      ownWallet: 30,
+      deduplicated: 80,
+      total: 275,
+    };
+    const deps = createMockDeps({ droppedEventsCount: 42, preFilterStats });
+    const stats = buildRuntimeStats(deps);
+    expect(stats.queue.droppedEventsCount).toBe(42);
+    expect(stats.queue.preFilterStats).toEqual(preFilterStats);
   });
 });

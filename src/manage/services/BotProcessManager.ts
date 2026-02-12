@@ -74,6 +74,14 @@ export interface BotRuntimeStats {
     size: number;
     pending: number;
     active: number;
+    droppedEventsCount: number;
+    preFilterStats: {
+      notWatched: number;
+      unknownCollection: number;
+      ownWallet: number;
+      deduplicated: number;
+      total: number;
+    };
   };
   memory: {
     heapUsedMB: number;

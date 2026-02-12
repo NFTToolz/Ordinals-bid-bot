@@ -615,11 +615,26 @@ export function isValidWebSocketMessage(message: unknown): message is WebSocketM
 export const WATCHED_EVENTS = [
   'offer_placed',
   'coll_offer_created',
-  'offer_cancelled',
   'buying_broadcasted',
   'offer_accepted_broadcasted',
   'coll_offer_fulfill_broadcasted'
 ];
+
+/**
+ * Purchase event kinds that are critical for quantity tracking and must never be dropped.
+ */
+export const PURCHASE_EVENT_KINDS = [
+  'buying_broadcasted',
+  'offer_accepted_broadcasted',
+  'coll_offer_fulfill_broadcasted'
+] as const;
+
+/**
+ * Check if an event kind is a purchase event (critical for quantity tracking).
+ */
+export function isPurchaseEvent(kind: string): boolean {
+  return (PURCHASE_EVENT_KINDS as readonly string[]).includes(kind);
+}
 
 /**
  * Check if an event type is one we should process.

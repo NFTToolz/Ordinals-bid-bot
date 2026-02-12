@@ -54,6 +54,16 @@ export interface StatsDependencies {
   } | null;
   /** Event queue length from eventManager.queue */
   eventQueueLength: number;
+  /** Total events dropped due to queue overflow */
+  droppedEventsCount: number;
+  /** Pre-queue filter rejection counters */
+  preFilterStats: {
+    notWatched: number;
+    unknownCollection: number;
+    ownWallet: number;
+    deduplicated: number;
+    total: number;
+  };
   /** PQueue size (waiting) */
   queueSize: number;
   /** PQueue pending (active) */
@@ -143,6 +153,8 @@ export function buildRuntimeStats(deps: StatsDependencies): BotRuntimeStats {
       size: deps.eventQueueLength,
       pending: deps.queueSize,
       active: deps.queuePending,
+      droppedEventsCount: deps.droppedEventsCount,
+      preFilterStats: deps.preFilterStats,
     },
     memory: {
       heapUsedMB: Math.round(heapUsedMB * 100) / 100,
