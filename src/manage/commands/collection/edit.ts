@@ -13,6 +13,7 @@ import {
   showCollectionSummary,
   withSpinner,
 } from '../../utils/display';
+import { notifyBotOfConfigChange } from '../../utils/reloadNotify';
 import {
   promptSelect,
   promptBTC,
@@ -225,8 +226,7 @@ export async function editCollection(): Promise<void> {
   if (success) {
     showSuccess('Collection updated!');
     console.log('');
-    console.log('Changes will take effect on the next bidding cycle.');
-    console.log('Use "Restart bot" to apply changes immediately.');
+    await notifyBotOfConfigChange();
   } else {
     showError('Failed to update collection');
   }

@@ -7,6 +7,7 @@ import {
   showInfo,
   withSpinner,
 } from '../../utils/display';
+import { notifyBotOfConfigChange } from '../../utils/reloadNotify';
 import { promptSelect, promptConfirm, promptDangerousConfirm } from '../../utils/prompts';
 import { cancelOffersForCollection } from '../bot/cancel';
 
@@ -106,7 +107,7 @@ export async function removeCollectionCommand(): Promise<void> {
       console.log('Existing bids will expire naturally.');
     }
 
-    console.log('Use "Restart bot" to apply changes immediately.');
+    await notifyBotOfConfigChange();
   } else {
     showError('Failed to remove collection');
   }

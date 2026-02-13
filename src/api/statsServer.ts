@@ -3,9 +3,19 @@ import Logger from '../utils/logger';
 import { BotRuntimeStats } from '../manage/services/BotProcessManager';
 
 type StatsProvider = () => BotRuntimeStats;
+type ReloadHandler = () => ReloadResult;
+
+export interface ReloadResult {
+  success: boolean;
+  added?: string[];
+  removed?: string[];
+  modified?: string[];
+  errors?: string[];
+}
 
 let server: http.Server | null = null;
 let statsProvider: StatsProvider | null = null;
+let reloadHandler: ReloadHandler | null = null;
 let startTime: number = 0;
 
 /**
@@ -14,6 +24,14 @@ let startTime: number = 0;
  */
 export function setStatsProvider(provider: StatsProvider): void {
   statsProvider = provider;
+}
+
+/**
+ * Register a function that hot-reloads collections from disk.
+ * Called by the bot process after initializing the reload logic.
+ */
+export function setReloadHandler(handler: ReloadHandler): void {
+  reloadHandler = handler;
 }
 
 export interface StatsServerOptions {
@@ -39,20 +57,25 @@ export function startStatsServer(options: StatsServerOptions = {}): Promise<numb
     startTime = Date.now();
 
     server = http.createServer((req, res) => {
-      // Only allow GET
-      if (req.method !== 'GET') {
+      if (req.method === 'GET') {
+        if (req.url === '/api/stats') {
+          handleStats(res);
+        } else if (req.url === '/api/health') {
+          handleHealth(res);
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Not found' }));
+        }
+      } else if (req.method === 'POST') {
+        if (req.url === '/api/reload-collections') {
+          handleReloadCollections(res);
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Not found' }));
+        }
+      } else {
         res.writeHead(405, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Method not allowed' }));
-        return;
-      }
-
-      if (req.url === '/api/stats') {
-        handleStats(res);
-      } else if (req.url === '/api/health') {
-        handleHealth(res);
-      } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Not found' }));
       }
     });
 
@@ -86,6 +109,7 @@ export function stopStatsServer(): Promise<void> {
     server.close(() => {
       server = null;
       statsProvider = null;
+      reloadHandler = null;
       resolve();
     });
   });
@@ -122,4 +146,22 @@ function handleHealth(res: http.ServerResponse): void {
     pid: process.pid,
     uptime: Math.floor((Date.now() - startTime) / 1000),
   }));
+}
+
+function handleReloadCollections(res: http.ServerResponse): void {
+  if (!reloadHandler) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Reload handler not registered' }));
+    return;
+  }
+
+  try {
+    const result = reloadHandler();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+  } catch (err) {
+    Logger.error('[RELOAD] Reload handler threw an error', err);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: false, errors: ['Internal reload error'] }));
+  }
 }

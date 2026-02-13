@@ -469,6 +469,46 @@ export async function getBotRuntimeStats(): Promise<BotRuntimeStats | null> {
   return fetchBotRuntimeStatsFromApi();
 }
 
+export interface ReloadResult {
+  success: boolean;
+  added?: string[];
+  removed?: string[];
+  modified?: string[];
+  errors?: string[];
+}
+
+/**
+ * Notify the running bot to reload collections from disk.
+ * Returns null on any error (timeout, connection refused, etc).
+ */
+export function notifyBotReload(): Promise<ReloadResult | null> {
+  const baseUrl = getBotApiUrl();
+  if (!baseUrl) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    const url = new URL('/api/reload-collections', baseUrl);
+
+    const req = http.request(url, { method: 'POST', timeout: 5000 }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data) as ReloadResult);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.end();
+  });
+}
+
 /**
  * Clear log file
  */

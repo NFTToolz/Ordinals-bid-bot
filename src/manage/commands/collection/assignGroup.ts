@@ -14,6 +14,7 @@ import {
   showWarning,
   showInfo,
 } from '../../utils/display';
+import { notifyBotOfConfigChange } from '../../utils/reloadNotify';
 import {
   promptSelect,
   promptMultiSelect,
@@ -116,6 +117,7 @@ export async function assignCollectionGroup(): Promise<void> {
 
     if (success) {
       showSuccess(`Assigned "${selectedCollection}" to wallet group "${targetGroup}"`);
+      await notifyBotOfConfigChange();
     } else {
       showError('Failed to assign wallet group');
     }
@@ -177,6 +179,9 @@ export async function assignCollectionGroup(): Promise<void> {
 
     console.log('');
     showInfo(`Assigned ${successCount}/${selectedCollections.length} collections`);
+    if (successCount > 0) {
+      await notifyBotOfConfigChange();
+    }
 
   } else if (mode === 'all-unassigned') {
     if (unassigned.length === 0) {
@@ -224,5 +229,8 @@ export async function assignCollectionGroup(): Promise<void> {
 
     console.log('');
     showInfo(`Assigned ${successCount}/${unassigned.length} collections`);
+    if (successCount > 0) {
+      await notifyBotOfConfigChange();
+    }
   }
 }

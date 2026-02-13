@@ -15,6 +15,7 @@ import {
   formatBTC,
   withSpinner,
 } from '../../utils/display';
+import { notifyBotOfConfigChange } from '../../utils/reloadNotify';
 import {
   promptText,
   promptBTC,
@@ -210,7 +211,6 @@ export async function addCollectionCommand(): Promise<void> {
   addCollection(config);
   showSuccess(`Collection "${selectedSymbol}" added to config!`);
   console.log('');
-  console.log('The bot will start bidding on this collection on the next cycle.');
-  console.log('Use "Restart bot" to apply changes immediately.');
+  await notifyBotOfConfigChange();
   console.log('');
 }

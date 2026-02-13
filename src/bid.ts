@@ -110,7 +110,7 @@ import { isEncryptedFormat, decryptData } from "./manage/services/WalletGenerato
 import { promptPasswordStdin } from "./utils/promptPassword";
 import { getFundingWIF, setFundingWIF, hasFundingWIF } from "./utils/fundingWallet";
 import { setReceiveAddress, getReceiveAddress, hasReceiveAddress } from "./utils/fundingWallet";
-import { startStatsServer, setStatsProvider, stopStatsServer } from "./api/statsServer";
+import { startStatsServer, setStatsProvider, setReloadHandler, stopStatsServer, ReloadResult } from "./api/statsServer";
 import { buildRuntimeStats, StatsDependencies } from "./api/buildStats";
 
 /** Centralized bot timing and limit constants */
@@ -611,8 +611,11 @@ function loadCollections(): CollectionData[] {
   }
 }
 
-const collections: CollectionData[] = loadCollections();
-const collectionSymbolSet = new Set(collections.map(c => c.collectionSymbol));
+let collections: CollectionData[] = loadCollections();
+let collectionSymbolSet = new Set(collections.map(c => c.collectionSymbol));
+
+// AbortController map for collection monitoring loops (keyed by collectionSymbol)
+const monitoringControllers = new Map<string, AbortController>();
 Logger.info(`[STARTUP] Loaded ${collections.length} collection(s): ${collections.map(c => c.collectionSymbol).join(', ')}`);
 Logger.info(`[STARTUP] Environment: API_KEY=${API_KEY ? 'set' : 'MISSING'}, FUNDING_WIF=${hasFundingWIF() ? 'set' : 'pending (wallets.json)'}, RATE_LIMIT=${RATE_LIMIT}`);
 // M3: balance moved to local scope in processScheduledLoop() and placeCollectionBid()
@@ -2505,38 +2508,236 @@ function subscribeToCollections(collections: CollectionData[]) {
   });
 }
 
-// Memory leak fix: Properly await collection monitoring loops
-async function startCollectionMonitoring(item: CollectionData) {
+// Collection monitoring loops with AbortController support for hot-reload
+async function startCollectionMonitoring(item: CollectionData, signal: AbortSignal) {
   const loop = (item.scheduledLoop || DEFAULT_LOOP) * 1000
-  while (true) {
+  while (!signal.aborted) {
     try {
       // Check if globally rate limited before starting a cycle
       if (isGloballyRateLimited()) {
         const waitMs = getGlobalResetWaitTime();
         Logger.schedule.skipping(item.collectionSymbol, Math.ceil(waitMs / 1000));
-        await delay(Math.min(waitMs + 1000, loop)); // Wait for rate limit or next cycle, whichever is shorter
+        await delay(Math.min(waitMs + 1000, loop));
         continue;
       }
 
       await eventManager.runScheduledTask(item);
       await delay(loop)
     } catch (error) {
+      if (signal.aborted) break;
       Logger.error(`[SCHEDULE] Collection monitoring failed for ${item.collectionSymbol}`, error);
-      await delay(loop); // Continue loop even on error
+      await delay(loop);
     }
   }
 }
 
+function startMonitoringLoop(item: CollectionData): void {
+  const controller = new AbortController();
+  monitoringControllers.set(item.collectionSymbol, controller);
+  startCollectionMonitoring(item, controller.signal).catch(err => {
+    if (!controller.signal.aborted) {
+      Logger.error(`[SCHEDULE] Monitoring loop for ${item.collectionSymbol} exited unexpectedly`, err);
+    }
+  });
+}
+
+function stopMonitoringLoop(symbol: string): void {
+  const controller = monitoringControllers.get(symbol);
+  if (controller) {
+    controller.abort();
+    monitoringControllers.delete(symbol);
+  }
+}
+
+let isReloading = false;
+
+/**
+ * Hot-reload collections from disk without restarting the bot.
+ * Called via POST /api/reload-collections.
+ */
+function reloadCollections(): ReloadResult {
+  if (isReloading) {
+    return { success: false, errors: ['Reload already in progress'] };
+  }
+  isReloading = true;
+
+  try {
+    // 1. Read + parse collections.json from disk
+    const collectionsFilePath = path.join(process.cwd(), 'config/collections.json');
+    if (!fs.existsSync(collectionsFilePath)) {
+      return { success: false, errors: ['collections.json not found'] };
+    }
+
+    const fileContent = fs.readFileSync(collectionsFilePath, 'utf-8');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fileContent);
+    } catch (parseError: unknown) {
+      return { success: false, errors: [`Invalid JSON: ${getErrorMessage(parseError)}`] };
+    }
+
+    if (!Array.isArray(parsed)) {
+      return { success: false, errors: ['collections.json must be an array'] };
+    }
+
+    // 2. Validate each entry
+    const errors: string[] = [];
+    const newCollections: CollectionData[] = [];
+    for (let i = 0; i < parsed.length; i++) {
+      const item = parsed[i];
+      const itemErrors = validateCollectionConfig(item);
+      if (itemErrors.length > 0) {
+        errors.push(...itemErrors.map(e => `[${item?.collectionSymbol || `index ${i}`}] ${e}`));
+      } else {
+        newCollections.push(item as CollectionData);
+      }
+    }
+
+    if (errors.length > 0) {
+      return { success: false, errors };
+    }
+
+    // 3. Validate wallet group assignments if using wallet groups
+    if (ENABLE_WALLET_ROTATION && isWalletGroupManagerInitialized()) {
+      const manager = getWalletGroupManager();
+      const validGroups = new Set(manager.getGroupNames());
+
+      const collectionsWithoutGroup = newCollections.filter(c => !c.walletGroup);
+      if (collectionsWithoutGroup.length > 0) {
+        return {
+          success: false,
+          errors: collectionsWithoutGroup.map(c =>
+            `${c.collectionSymbol}: missing walletGroup assignment (required when using wallet groups)`
+          ),
+        };
+      }
+
+      const invalidAssignments = newCollections.filter(c => c.walletGroup && !validGroups.has(c.walletGroup));
+      if (invalidAssignments.length > 0) {
+        return {
+          success: false,
+          errors: invalidAssignments.map(c =>
+            `${c.collectionSymbol}: walletGroup "${c.walletGroup}" does not exist (available: ${[...validGroups].join(', ')})`
+          ),
+        };
+      }
+    }
+
+    // 4. Compute diff
+    const oldSymbols = new Set(collections.map(c => c.collectionSymbol));
+    const newSymbols = new Set(newCollections.map(c => c.collectionSymbol));
+
+    const added: string[] = [];
+    const removed: string[] = [];
+    const modified: string[] = [];
+
+    // Detect removed
+    for (const sym of oldSymbols) {
+      if (!newSymbols.has(sym)) {
+        removed.push(sym);
+      }
+    }
+
+    // Detect added and modified
+    const oldMap = new Map(collections.map(c => [c.collectionSymbol, c]));
+    for (const newItem of newCollections) {
+      const sym = newItem.collectionSymbol;
+      if (!oldSymbols.has(sym)) {
+        added.push(sym);
+      } else {
+        const oldItem = oldMap.get(sym)!;
+        if (JSON.stringify(oldItem) !== JSON.stringify(newItem)) {
+          modified.push(sym);
+        }
+      }
+    }
+
+    if (added.length === 0 && removed.length === 0 && modified.length === 0) {
+      Logger.info('[RELOAD] No changes detected in collections.json');
+      return { success: true, added: [], removed: [], modified: [] };
+    }
+
+    // 5. Apply changes
+    // Stop removed collections
+    for (const sym of removed) {
+      stopMonitoringLoop(sym);
+      Logger.info(`[RELOAD] Removed collection: ${sym}`);
+    }
+
+    // Update modified collections in-place
+    for (const sym of modified) {
+      const oldItem = oldMap.get(sym)!;
+      const newItem = newCollections.find(c => c.collectionSymbol === sym)!;
+      const scheduledLoopChanged = (oldItem.scheduledLoop || 60) !== (newItem.scheduledLoop || 60);
+
+      // Update the existing object in-place so running references pick up changes
+      Object.assign(oldItem, newItem);
+
+      // If scheduledLoop changed, restart the monitoring loop
+      if (scheduledLoopChanged) {
+        stopMonitoringLoop(sym);
+        startMonitoringLoop(oldItem);
+        Logger.info(`[RELOAD] Updated collection (loop restarted): ${sym}`);
+      } else {
+        Logger.info(`[RELOAD] Updated collection: ${sym}`);
+      }
+    }
+
+    // Replace collections array and rebuild symbol set
+    // Keep modified references (already updated in-place), add new ones
+    const updatedCollections: CollectionData[] = [];
+    for (const newItem of newCollections) {
+      const existing = oldMap.get(newItem.collectionSymbol);
+      if (existing && modified.includes(newItem.collectionSymbol)) {
+        updatedCollections.push(existing); // Keep the in-place updated reference
+      } else if (existing && !removed.includes(newItem.collectionSymbol)) {
+        updatedCollections.push(existing); // Unchanged — keep original reference
+      } else {
+        updatedCollections.push(newItem); // New collection
+      }
+    }
+
+    collections = updatedCollections;
+    collectionSymbolSet = new Set(collections.map(c => c.collectionSymbol));
+
+    // Start monitoring for added collections
+    for (const sym of added) {
+      const item = collections.find(c => c.collectionSymbol === sym)!;
+      initBidHistory(item.collectionSymbol, item.offerType);
+      startMonitoringLoop(item);
+      Logger.info(`[RELOAD] Added collection: ${sym}`);
+    }
+
+    // Subscribe new/modified counter-bidding collections on WebSocket
+    const toSubscribe = collections.filter(c =>
+      c.enableCounterBidding && (added.includes(c.collectionSymbol) || modified.includes(c.collectionSymbol))
+    );
+    if (toSubscribe.length > 0) {
+      subscribeToCollections(toSubscribe);
+    }
+
+    Logger.success(`[RELOAD] Collections reloaded: ${added.length} added, ${removed.length} removed, ${modified.length} modified`);
+    return { success: true, added, removed, modified };
+
+  } catch (err) {
+    Logger.error('[RELOAD] Unexpected error during reload', err);
+    return { success: false, errors: [`Unexpected error: ${getErrorMessage(err)}`] };
+  } finally {
+    isReloading = false;
+  }
+}
+
 async function startProcessing() {
-  // Memory leak fix: Properly await all collection monitoring promises
-  // Each startCollectionMonitoring runs an infinite loop, so Promise.all should never resolve.
-  // If it does, something critical has gone wrong.
-  await Promise.all(
-    collections.map(item => startCollectionMonitoring(item))
-  );
-  // If we reach here, all monitoring loops have unexpectedly exited
-  Logger.critical('[CRITICAL] All collection monitoring loops exited unexpectedly');
-  await gracefulShutdown('MONITORING_EXIT');
+  // Start all collection monitoring loops (non-blocking, fire-and-forget)
+  for (const item of collections) {
+    startMonitoringLoop(item);
+  }
+
+  // Keep the function alive — resolve only if all loops exit (shouldn't happen)
+  // Wait for abort signals — loops exit when aborted
+  await new Promise<void>(() => {
+    // This promise never resolves; the process exits via gracefulShutdown
+  });
 }
 
 // Display version banner on startup
@@ -2759,6 +2960,9 @@ const statsApiPort = await startStatsServer();
 if (statsApiPort > 0) {
   // Register stats provider that builds live stats on each request
   setStatsProvider(() => buildRuntimeStats(gatherStatsDeps()));
+
+  // Register hot-reload handler for collection config changes
+  setReloadHandler(() => reloadCollections());
 
   // Update PID file with API port so manage CLI can find it
   const pidFilePath = path.join(process.cwd(), '.bot.pid');
@@ -3184,6 +3388,12 @@ async function gracefulShutdown(signal: string): Promise<void> {
   }
   try { if (heartbeatIntervalId !== null) clearInterval(heartbeatIntervalId); } catch {}
   try { if (reconnectTimeoutId !== null) clearTimeout(reconnectTimeoutId); } catch {}
+
+  // Abort all collection monitoring loops
+  for (const [, controller] of monitoringControllers) {
+    try { controller.abort(); } catch {}
+  }
+  monitoringControllers.clear();
 
   // B5: Close WebSocket cleanly before exit
   if (ws) {
