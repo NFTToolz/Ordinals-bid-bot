@@ -9,7 +9,7 @@ import {
   withProgressSpinner,
 } from '../../utils/display';
 import { promptConfirm } from '../../utils/prompts';
-import { performCancellation, resetBotData } from './cancel';
+import { performCancellation, resetBotData, fetchOfferCounts } from './cancel';
 
 export async function stopBot(): Promise<void> {
   showSectionHeader('STOP BOT');
@@ -58,27 +58,34 @@ export async function stopBot(): Promise<void> {
 
   console.log('');
 
-  const cancelResult = await withProgressSpinner(
-    'Canceling offers [0 canceled]...',
-    (update) => performCancellation(undefined, (canceled) => {
-      update(`Canceling offers [${canceled} canceled]...`);
-    })
-  );
+  const { counts, fetchedOffers } = await withSpinner('Checking active offers...', fetchOfferCounts);
+  const total = counts.reduce((s, c) => s + c.itemOffers + c.collectionOffers, 0);
 
-  console.log('');
-
-  if (cancelResult.itemOffersCanceled > 0 || cancelResult.collectionOffersCanceled > 0) {
-    showSuccess(
-      `Canceled ${cancelResult.itemOffersCanceled} item offer(s) and ${cancelResult.collectionOffersCanceled} collection offer(s)`
-    );
-  } else {
+  if (total === 0) {
     showInfo('No active offers to cancel');
-  }
+  } else {
+    const cancelResult = await withProgressSpinner(
+      `Canceling offers [0/${total}]...`,
+      (update) => performCancellation(fetchedOffers, (canceled) => {
+        update(`Canceling offers [${canceled}/${total}]...`);
+      })
+    );
 
-  if (cancelResult.errors.length > 0) {
     console.log('');
-    showWarning(`${cancelResult.errors.length} error(s) occurred:`);
-    cancelResult.errors.forEach((err) => showError(`  ${err}`));
+
+    if (cancelResult.itemOffersCanceled > 0 || cancelResult.collectionOffersCanceled > 0) {
+      showSuccess(
+        `Canceled ${cancelResult.itemOffersCanceled} item offer(s) and ${cancelResult.collectionOffersCanceled} collection offer(s)`
+      );
+    } else {
+      showInfo('No active offers to cancel');
+    }
+
+    if (cancelResult.errors.length > 0) {
+      console.log('');
+      showWarning(`${cancelResult.errors.length} error(s) occurred:`);
+      cancelResult.errors.forEach((err) => showError(`  ${err}`));
+    }
   }
 
   // Reset bid history

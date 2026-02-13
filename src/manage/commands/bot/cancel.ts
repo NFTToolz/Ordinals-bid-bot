@@ -276,6 +276,7 @@ async function cancelAllCollectionOffers(
 
 function ensureWalletPoolInitialized(): void {
   if (!ENABLE_WALLET_ROTATION) return;
+  if (isWalletPoolInitialized()) return;
 
   try {
     const walletsData = loadWallets();
@@ -300,7 +301,7 @@ function ensureWalletPoolInitialized(): void {
   }
 }
 
-async function fetchOfferCounts(): Promise<FetchOfferCountsResult> {
+export async function fetchOfferCounts(): Promise<FetchOfferCountsResult> {
   const collections = loadCollections();
   ensureWalletPoolInitialized();
   const addresses = getReceiveAddressesToCheck(collections);
