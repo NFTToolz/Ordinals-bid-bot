@@ -75,6 +75,7 @@ export interface BotRuntimeStats {
     pending: number;
     active: number;
     droppedEventsCount: number;
+    startupEventsDiscarded: number;
     preFilterStats: {
       notWatched: number;
       unknownCollection: number;

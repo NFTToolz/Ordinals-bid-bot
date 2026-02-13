@@ -56,6 +56,8 @@ export interface StatsDependencies {
   eventQueueLength: number;
   /** Total events dropped due to queue overflow */
   droppedEventsCount: number;
+  /** Events discarded during startup before monitoring loops were ready */
+  startupEventsDiscarded: number;
   /** Pre-queue filter rejection counters */
   preFilterStats: {
     notWatched: number;
@@ -154,6 +156,7 @@ export function buildRuntimeStats(deps: StatsDependencies): BotRuntimeStats {
       pending: deps.queueSize,
       active: deps.queuePending,
       droppedEventsCount: deps.droppedEventsCount,
+      startupEventsDiscarded: deps.startupEventsDiscarded,
       preFilterStats: deps.preFilterStats,
     },
     memory: {

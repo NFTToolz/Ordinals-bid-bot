@@ -1109,6 +1109,120 @@ describe('Bid.ts Logic Tests', () => {
     });
   });
 
+  describe('EventManager Ready Gate', () => {
+    it('should discard events when not ready', () => {
+      let queue: any[] = [];
+      let ready = false;
+      let startupEventsDiscarded = 0;
+
+      function receiveEvent(event: any) {
+        if (!ready) {
+          startupEventsDiscarded++;
+          return;
+        }
+        queue.push(event);
+      }
+
+      receiveEvent({ id: 1 });
+      receiveEvent({ id: 2 });
+      receiveEvent({ id: 3 });
+
+      expect(queue.length).toBe(0);
+      expect(startupEventsDiscarded).toBe(3);
+    });
+
+    it('should accept events after setReady', () => {
+      let queue: any[] = [];
+      let ready = false;
+      let startupEventsDiscarded = 0;
+
+      function receiveEvent(event: any) {
+        if (!ready) {
+          startupEventsDiscarded++;
+          return;
+        }
+        queue.push(event);
+      }
+
+      function setReady() {
+        const discardedFromQueue = queue.length;
+        queue = [];
+        ready = true;
+        startupEventsDiscarded += discardedFromQueue;
+      }
+
+      receiveEvent({ id: 1 });
+      expect(queue.length).toBe(0);
+      expect(startupEventsDiscarded).toBe(1);
+
+      setReady();
+
+      receiveEvent({ id: 2 });
+      receiveEvent({ id: 3 });
+      expect(queue.length).toBe(2);
+      expect(startupEventsDiscarded).toBe(1);
+    });
+
+    it('should clear accumulated queue on setReady', () => {
+      let queue: any[] = [{ id: 'stale1' }, { id: 'stale2' }, { id: 'stale3' }];
+      let ready = false;
+      let startupEventsDiscarded = 5; // 5 discarded before queue
+
+      function setReady() {
+        const discardedFromQueue = queue.length;
+        queue = [];
+        ready = true;
+        startupEventsDiscarded += discardedFromQueue;
+      }
+
+      setReady();
+
+      expect(queue.length).toBe(0);
+      expect(startupEventsDiscarded).toBe(8); // 5 + 3 from queue
+      expect(ready).toBe(true);
+    });
+
+    it('should not count startup discards in preFilterStats', () => {
+      let ready = false;
+      let startupEventsDiscarded = 0;
+      const preFilterStats = { notWatched: 0, unknownCollection: 0, ownWallet: 0, deduplicated: 0, total: 0 };
+
+      function receiveEvent(event: any) {
+        if (!ready) {
+          startupEventsDiscarded++;
+          return;
+        }
+        // Pre-filter would run here
+        preFilterStats.total++;
+      }
+
+      receiveEvent({ kind: 'offer_placed' });
+      receiveEvent({ kind: 'offer_placed' });
+
+      expect(startupEventsDiscarded).toBe(2);
+      expect(preFilterStats.total).toBe(0);
+    });
+
+    it('should handle setReady with empty queue', () => {
+      let queue: any[] = [];
+      let ready = false;
+      let startupEventsDiscarded = 0;
+
+      function setReady() {
+        const discardedFromQueue = queue.length;
+        queue = [];
+        ready = true;
+        startupEventsDiscarded += discardedFromQueue;
+      }
+
+      setReady();
+
+      expect(queue.length).toBe(0);
+      expect(startupEventsDiscarded).toBe(0);
+      expect(ready).toBe(true);
+    });
+  });
+
   describe('Watched Events Filter', () => {
     it('should filter for watched event kinds', () => {
       const watchedEvents = [

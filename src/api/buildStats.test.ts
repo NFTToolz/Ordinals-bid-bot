@@ -22,6 +22,7 @@ function createMockDeps(overrides: Partial<StatsDependencies> = {}): StatsDepend
     walletGroups: null,
     eventQueueLength: 3,
     droppedEventsCount: 0,
+    startupEventsDiscarded: 0,
     preFilterStats: {
       notWatched: 0,
       unknownCollection: 0,
@@ -192,5 +193,11 @@ describe('buildRuntimeStats', () => {
     const stats = buildRuntimeStats(deps);
     expect(stats.queue.droppedEventsCount).toBe(42);
     expect(stats.queue.preFilterStats).toEqual(preFilterStats);
+  });
+
+  it('should pass through startupEventsDiscarded', () => {
+    const deps = createMockDeps({ startupEventsDiscarded: 137 });
+    const stats = buildRuntimeStats(deps);
+    expect(stats.queue.startupEventsDiscarded).toBe(137);
   });
 });

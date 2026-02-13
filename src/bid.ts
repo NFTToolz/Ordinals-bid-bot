@@ -927,6 +927,8 @@ class EventManager {
   isProcessingQueue: boolean;
   private readonly MAX_QUEUE_SIZE = BOT_CONSTANTS.EVENT_QUEUE_CAP;
   private droppedEventsCount = 0;
+  private ready = false;
+  private startupEventsDiscarded = 0;
   private static readonly DROP_LOG_INTERVAL = 50;
   private tokenEventDedup = new Map<string, number>();
   private static readonly DEDUP_COOLDOWN_MS = 5_000;
@@ -956,6 +958,20 @@ class EventManager {
     return this.droppedEventsCount;
   }
 
+  /** Mark the event manager as ready to accept events (after monitoring loops start). */
+  setReady(): void {
+    const discardedFromQueue = this.queue.length;
+    this.queue = [];
+    this.ready = true;
+    this.startupEventsDiscarded += discardedFromQueue;
+    Logger.info(`[EVENT QUEUE] Ready — discarded ${this.startupEventsDiscarded} startup events (${discardedFromQueue} from queue)`);
+  }
+
+  /** Expose startup events discarded count for the stats API. */
+  getStartupEventsDiscarded(): number {
+    return this.startupEventsDiscarded;
+  }
+
   /** Purge expired entries from the per-token dedup map. */
   cleanupDedupMap(): void {
     const now = Date.now();
@@ -972,6 +988,12 @@ class EventManager {
   }
 
   async receiveWebSocketEvent(event: CollectOfferActivity): Promise<void> {
+    // Gate: discard events arriving before monitoring loops are ready
+    if (!this.ready) {
+      this.startupEventsDiscarded++;
+      return;
+    }
+
     // === Pre-queue filtering: cheap synchronous checks BEFORE queuing ===
 
     // Filter 1: Not a watched event kind
@@ -2733,6 +2755,9 @@ async function startProcessing() {
     startMonitoringLoop(item);
   }
 
+  // Open the event gate — monitoring loops are running and can drain the queue
+  eventManager.setReady();
+
   // Keep the function alive — resolve only if all loops exit (shouldn't happen)
   // Wait for abort signals — loops exit when aborted
   await new Promise<void>(() => {
@@ -3072,6 +3097,7 @@ function gatherStatsDeps(): StatsDependencies {
     walletGroups: walletGroupsData,
     eventQueueLength: eventManager.queue.length,
     droppedEventsCount: eventManager.getDroppedEventsCount(),
+    startupEventsDiscarded: eventManager.getStartupEventsDiscarded(),
     preFilterStats: eventManager.getPreFilterStats(),
     queueSize: queue.size,
     queuePending: queue.pending,
