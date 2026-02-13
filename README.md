@@ -109,6 +109,8 @@ Wallet groups enable isolated wallet pools for different collections, each with 
 | Assign to wallet group | Assign collections to specific wallet groups |
 | Scan for opportunities | Find profitable collections based on floor/volume |
 
+Collection changes are **hot-reloaded** into the running bot automatically -- no restart required. The manage console sends a reload signal to the bot's HTTP API after each change.
+
 #### Bot Control Commands
 
 | Command | Description |
@@ -144,7 +146,7 @@ Wallet groups enable isolated wallet pools for different collections, each with 
 **Troubleshooting:**
 1. View logs to identify issues
 2. Cancel all offers if needed
-3. Restart bot to apply changes
+3. Collection config changes are hot-reloaded automatically; restart only needed for `.env` or wallet changes
 
 #### Bot Status Display
 
@@ -439,6 +441,30 @@ Wallet groups let you create isolated wallet pools for different collections. Ea
 
 **Funding:** Use "Rebalance group" from the Wallet Groups menu to automatically distribute BTC across wallets based on the assigned collection's `maxBid` setting. This ensures each wallet has sufficient funds for bidding.
 
+#### Hot-Reload Collections
+
+Collection config changes made through `yarn manage` (add, edit, remove, assign wallet group) are automatically applied to the running bot without a restart. The manage console sends a `POST /api/reload-collections` request to the bot's local HTTP API.
+
+**How it works:**
+1. You make a change via the management console (e.g., add a new collection)
+2. The console saves to `config/collections.json` and sends a reload signal
+3. The bot reads the updated config, validates it, and computes the diff
+4. New collections start monitoring immediately, removed collections stop, and modified collections update in-place
+5. Counter-bidding WebSocket subscriptions are updated automatically
+
+**What gets hot-reloaded:**
+- Adding new collections (starts monitoring + WebSocket subscription)
+- Removing collections (stops monitoring loop)
+- Editing any collection parameter (bid range, floor %, bid count, duration, counter-bidding, offer type, etc.)
+- Changing `scheduledLoop` interval (restarts the monitoring loop with the new interval)
+- Wallet group assignments
+
+**What still requires a restart:**
+- `.env` changes (API key, wallet rotation toggle, rate limits)
+- Wallet configuration changes (`config/wallets.json`)
+
+You can also trigger a reload manually: `curl -X POST http://127.0.0.1:3847/api/reload-collections`
+
 #### Bulk cancel offers
 
 `yarn cancel`
@@ -471,6 +497,7 @@ Wallet groups let you create isolated wallet pools for different collections. Ea
 | `BIDS_PER_MINUTE` | Per-wallet bid rate limit | 5 |
 | `SKIP_OVERLAPPING_CYCLES` | Skip cycles when previous still running | true |
 | `CENTRALIZE_RECEIVE_ADDRESS` | Route all ordinals to TOKEN_RECEIVE_ADDRESS | false |
+| `BOT_API_PORT` | HTTP API port for stats and hot-reload | 3847 |
 
 ---
 
@@ -509,7 +536,9 @@ Entry (bid.ts) → EventManager → Bid Placement → Blockchain
 #### Memory Management
 
 - Bid history cleanup runs hourly (24-hour TTL)
-- Event queue capped at 1000 events (FIFO drop when full)
+- Event queue capped at 1000 events with 4-stage pre-queue filtering (unwatched kind, unknown collection, own-wallet detection, per-token dedup with 5s cooldown)
+- Purchase events (`buying_broadcasted`, `offer_accepted_broadcasted`, `coll_offer_fulfill_broadcasted`) are protected from being dropped on queue overflow
+- Drop logging throttled to every 50 events to prevent log spam
 - Max 100 bids tracked per collection
 - Memory monitoring every 5 minutes with alerts
 
@@ -522,6 +551,7 @@ Entry (bid.ts) → EventManager → Bid Placement → Blockchain
 #### WebSocket
 
 - Counter-bidding via real-time events
+- Pre-queue filtering rejects irrelevant events before they consume queue capacity
 - Automatic reconnection with exponential backoff (max 5 retries)
 - Graceful degradation to scheduled-only mode on failure
 
@@ -529,4 +559,5 @@ Entry (bid.ts) → EventManager → Bid Placement → Blockchain
 
 - `processingTokens` map prevents race conditions on same token
 - Bid deduplication with 30-second cooldown per token
+- Per-token event dedup with 5-second cooldown prevents queue flooding from rapid-fire WebSocket events
 - `isScheduledRunning` and `isProcessingQueue` coordinate WebSocket vs scheduled tasks
