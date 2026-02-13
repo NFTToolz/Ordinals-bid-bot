@@ -340,6 +340,49 @@ export async function withSpinner<T>(message: string, fn: () => Promise<T>): Pro
 }
 
 /**
+ * Display a loading spinner with dynamic message updates.
+ * The fn receives an updateMessage callback to change the spinner text in real-time.
+ */
+export async function withProgressSpinner<T>(
+  initialMessage: string,
+  fn: (updateMessage: (msg: string) => void) => Promise<T>
+): Promise<T> {
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let i = 0;
+  let stopped = false;
+  let currentMessage = initialMessage;
+  let maxMessageLength = initialMessage.length;
+
+  const interval = setInterval(() => {
+    if (!stopped) {
+      const line = `\r${chalk.cyan(frames[i])} ${currentMessage}`;
+      process.stdout.write(line + ' '.repeat(Math.max(0, maxMessageLength - currentMessage.length + 4)));
+      i = (i + 1) % frames.length;
+    }
+  }, 80);
+
+  const updateMessage = (msg: string) => {
+    currentMessage = msg;
+    if (msg.length > maxMessageLength) {
+      maxMessageLength = msg.length;
+    }
+  };
+
+  try {
+    const result = await fn(updateMessage);
+    stopped = true;
+    clearInterval(interval);
+    process.stdout.write('\r' + ' '.repeat(maxMessageLength + 10) + '\r');
+    return result;
+  } catch (error) {
+    stopped = true;
+    clearInterval(interval);
+    process.stdout.write('\r' + ' '.repeat(maxMessageLength + 10) + '\r');
+    throw error;
+  }
+}
+
+/**
  * Format BTC amount
  */
 export function formatBTC(satoshis: number): string {

@@ -6,6 +6,7 @@ import {
   showWarning,
   showInfo,
   withSpinner,
+  withProgressSpinner,
 } from '../../utils/display';
 import { promptConfirm } from '../../utils/prompts';
 import { performCancellation, resetBotData } from './cancel';
@@ -57,7 +58,12 @@ export async function stopBot(): Promise<void> {
 
   console.log('');
 
-  const cancelResult = await withSpinner('Canceling all offers...', performCancellation);
+  const cancelResult = await withProgressSpinner(
+    'Canceling offers [0 canceled]...',
+    (update) => performCancellation(undefined, (canceled) => {
+      update(`Canceling offers [${canceled} canceled]...`);
+    })
+  );
 
   console.log('');
 

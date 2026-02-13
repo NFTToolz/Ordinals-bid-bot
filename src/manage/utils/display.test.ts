@@ -12,6 +12,7 @@ import {
   showWarning,
   showInfo,
   withSpinner,
+  withProgressSpinner,
   showImportantBox,
   showTransactionPreview,
   showCollectionSummary,
@@ -462,6 +463,98 @@ describe('Display Utilities', () => {
       const fn = vi.fn().mockRejectedValue(new Error('Error'));
 
       const resultPromise = withSpinner('Loading...', fn);
+      vi.advanceTimersByTime(100);
+
+      try {
+        await resultPromise;
+      } catch {
+        // Expected
+      }
+
+      expect(clearIntervalSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('withProgressSpinner', () => {
+    let stdoutSpy: any;
+    let clearIntervalSpy: any;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      clearIntervalSpy = vi.spyOn(global, 'clearInterval');
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      stdoutSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+    });
+
+    it('should return result of async function', async () => {
+      const fn = vi.fn().mockImplementation(async () => 'result');
+
+      const resultPromise = withProgressSpinner('Loading...', fn);
+      vi.advanceTimersByTime(100);
+      const result = await resultPromise;
+
+      expect(result).toBe('result');
+    });
+
+    it('should call provided function with update callback', async () => {
+      const fn = vi.fn().mockImplementation(async (update: (msg: string) => void) => {
+        expect(typeof update).toBe('function');
+        return 'done';
+      });
+
+      const resultPromise = withProgressSpinner('Starting...', fn);
+      vi.advanceTimersByTime(100);
+      await resultPromise;
+
+      expect(fn).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    it('should update displayed message when update callback is called', async () => {
+      const fn = vi.fn().mockImplementation(async (update: (msg: string) => void) => {
+        update('Progress [1/5]...');
+        return 'done';
+      });
+
+      const resultPromise = withProgressSpinner('Progress [0/5]...', fn);
+      vi.advanceTimersByTime(100);
+      await resultPromise;
+
+      const outputs = stdoutSpy.mock.calls.map((c: any) => c[0]).join('');
+      expect(outputs).toContain('Progress [1/5]...');
+    });
+
+    it('should propagate errors from function', async () => {
+      const fn = vi.fn().mockImplementation(async () => {
+        throw new Error('Progress error');
+      });
+
+      const resultPromise = withProgressSpinner('Loading...', fn);
+      vi.advanceTimersByTime(100);
+
+      await expect(resultPromise).rejects.toThrow('Progress error');
+    });
+
+    it('should clear interval on success', async () => {
+      const fn = vi.fn().mockImplementation(async () => 'done');
+
+      const resultPromise = withProgressSpinner('Loading...', fn);
+      vi.advanceTimersByTime(100);
+      await resultPromise;
+
+      expect(clearIntervalSpy).toHaveBeenCalled();
+    });
+
+    it('should clear interval on error', async () => {
+      const fn = vi.fn().mockImplementation(async () => {
+        throw new Error('Error');
+      });
+
+      const resultPromise = withProgressSpinner('Loading...', fn);
       vi.advanceTimersByTime(100);
 
       try {

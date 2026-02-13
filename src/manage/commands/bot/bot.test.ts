@@ -54,6 +54,7 @@ vi.mock('../../utils/display', () => ({
   getSeparatorWidth: vi.fn(() => 60),
   formatBTC: vi.fn((sats: number) => `${(sats / 100000000).toFixed(8)} BTC`),
   withSpinner: vi.fn().mockImplementation(async (message, fn) => fn()),
+  withProgressSpinner: vi.fn().mockImplementation(async (message, fn) => fn((msg: string) => {})),
 }));
 
 // Mock prompts

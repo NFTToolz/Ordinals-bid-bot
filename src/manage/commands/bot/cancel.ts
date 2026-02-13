@@ -13,6 +13,7 @@ import {
   showTable,
   formatAddress,
   withSpinner,
+  withProgressSpinner,
 } from '../../utils/display';
 import { promptConfirm } from '../../utils/prompts';
 import {
@@ -79,6 +80,8 @@ interface FetchOfferCountsResult {
   counts: WalletOfferCounts[];
   fetchedOffers: Map<string, IOffer[]>;
 }
+
+export type CancelProgressCallback = (canceled: number, detail?: string) => void;
 
 // Reset bot data files (bid history)
 export function resetBotData(): { historyReset: boolean } {
@@ -186,7 +189,8 @@ async function cancelBid(
 
 async function cancelAllItemOffers(
   addresses: AddressInfo[],
-  prefetchedOffers?: Map<string, IOffer[]>
+  prefetchedOffers?: Map<string, IOffer[]>,
+  onProgress?: CancelProgressCallback
 ): Promise<{ canceled: number; errors: string[] }> {
   let canceled = 0;
   const errors: string[] = [];
@@ -203,11 +207,16 @@ async function cancelAllItemOffers(
 
       if (offers.length > 0) {
         const cancelOps = offers.map((offer: IOffer) =>
-          cancelBid(offer, addr.privateKey, addr.paymentAddress)
+          cancelBid(offer, addr.privateKey, addr.paymentAddress).then((success) => {
+            if (success) {
+              canceled++;
+              onProgress?.(canceled, addr.label);
+            }
+            return success;
+          })
         );
 
-        const results = await Promise.all(cancelOps);
-        canceled += results.filter(Boolean).length;
+        await Promise.all(cancelOps);
       }
     } catch (error: unknown) {
       errors.push(`Failed to check offers for ${addr.address.slice(0, 10)}...: ${getErrorMessage(error)}`);
@@ -219,7 +228,9 @@ async function cancelAllItemOffers(
 }
 
 async function cancelAllCollectionOffers(
-  collections: CollectionConfig[]
+  collections: CollectionConfig[],
+  onProgress?: CancelProgressCallback,
+  runningCount = 0
 ): Promise<{ canceled: number; errors: string[] }> {
   let canceled = 0;
   const errors: string[] = [];
@@ -252,6 +263,7 @@ async function cancelAllCollectionOffers(
         if (ourOffer) {
           await cancelCollectionOffer([ourOffer.id], publicKey, privateKey);
           canceled++;
+          onProgress?.(runningCount + canceled, item.collectionSymbol);
         }
       } catch (error: unknown) {
         errors.push(`Failed to cancel collection offer for ${item.collectionSymbol}: ${getErrorMessage(error)}`);
@@ -344,14 +356,17 @@ async function fetchOfferCounts(): Promise<FetchOfferCountsResult> {
   return { counts, fetchedOffers };
 }
 
-export async function performCancellation(prefetchedOffers?: Map<string, IOffer[]>): Promise<CancelResult> {
+export async function performCancellation(
+  prefetchedOffers?: Map<string, IOffer[]>,
+  onProgress?: CancelProgressCallback
+): Promise<CancelResult> {
   const collections = loadCollections();
 
   ensureWalletPoolInitialized();
 
   const addresses = getReceiveAddressesToCheck(collections);
-  const itemResult = await cancelAllItemOffers(addresses, prefetchedOffers);
-  const collectionResult = await cancelAllCollectionOffers(collections);
+  const itemResult = await cancelAllItemOffers(addresses, prefetchedOffers, onProgress);
+  const collectionResult = await cancelAllCollectionOffers(collections, onProgress, itemResult.canceled);
 
   return {
     itemOffersCanceled: itemResult.canceled,
@@ -466,7 +481,12 @@ export async function cancelOffers(): Promise<void> {
 
   console.log('');
 
-  const result = await withSpinner('Canceling all offers...', () => performCancellation(fetchedOffers));
+  const result = await withProgressSpinner(
+    `Canceling offers [0/${total}]...`,
+    (update) => performCancellation(fetchedOffers, (canceled) => {
+      update(`Canceling offers [${canceled}/${total}]...`);
+    })
+  );
 
   console.log('');
 
