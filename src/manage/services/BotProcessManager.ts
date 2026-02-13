@@ -81,6 +81,7 @@ export interface BotRuntimeStats {
       unknownCollection: number;
       ownWallet: number;
       deduplicated: number;
+      superseded: number;
       total: number;
     };
   };

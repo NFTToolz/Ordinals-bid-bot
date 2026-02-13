@@ -94,9 +94,12 @@ describe('bidLogic', () => {
     it('should have correct WATCHED_EVENTS', () => {
       expect(WATCHED_EVENTS).toContain('offer_placed');
       expect(WATCHED_EVENTS).toContain('coll_offer_created');
+      expect(WATCHED_EVENTS).toContain('coll_offer_edited');
+      expect(WATCHED_EVENTS).toContain('offer_cancelled');
+      expect(WATCHED_EVENTS).toContain('coll_offer_cancelled');
       expect(WATCHED_EVENTS).toContain('buying_broadcasted');
-      expect(WATCHED_EVENTS).not.toContain('offer_cancelled');
-      expect(WATCHED_EVENTS).toHaveLength(5);
+      expect(WATCHED_EVENTS).not.toContain('list');
+      expect(WATCHED_EVENTS).toHaveLength(8);
     });
   });
 
@@ -835,7 +838,50 @@ describe('bidLogic', () => {
 
     it('should accept simple events without extra fields', () => {
       expect(isValidWebSocketMessage({
+        kind: 'coll_offer_cancelled',
+        collectionSymbol: 'col'
+      })).toBe(true);
+    });
+
+    it('should require tokenId for offer_cancelled', () => {
+      expect(isValidWebSocketMessage({
         kind: 'offer_cancelled',
+        collectionSymbol: 'col'
+      })).toBe(false);
+    });
+
+    it('should accept valid offer_cancelled with tokenId', () => {
+      expect(isValidWebSocketMessage({
+        kind: 'offer_cancelled',
+        collectionSymbol: 'col',
+        tokenId: 'token123'
+      })).toBe(true);
+    });
+
+    it('should require listedPrice and buyerPaymentAddress for coll_offer_edited', () => {
+      expect(isValidWebSocketMessage({
+        kind: 'coll_offer_edited',
+        collectionSymbol: 'col'
+      })).toBe(false);
+      expect(isValidWebSocketMessage({
+        kind: 'coll_offer_edited',
+        collectionSymbol: 'col',
+        listedPrice: 1000
+      })).toBe(false);
+    });
+
+    it('should accept valid coll_offer_edited with all fields', () => {
+      expect(isValidWebSocketMessage({
+        kind: 'coll_offer_edited',
+        collectionSymbol: 'col',
+        listedPrice: 1000,
+        buyerPaymentAddress: 'addr'
+      })).toBe(true);
+    });
+
+    it('should accept coll_offer_cancelled with just kind and collectionSymbol', () => {
+      expect(isValidWebSocketMessage({
+        kind: 'coll_offer_cancelled',
         collectionSymbol: 'col'
       })).toBe(true);
     });
@@ -845,6 +891,9 @@ describe('bidLogic', () => {
     it('should return true for watched events', () => {
       expect(isWatchedEvent('offer_placed')).toBe(true);
       expect(isWatchedEvent('coll_offer_created')).toBe(true);
+      expect(isWatchedEvent('coll_offer_edited')).toBe(true);
+      expect(isWatchedEvent('offer_cancelled')).toBe(true);
+      expect(isWatchedEvent('coll_offer_cancelled')).toBe(true);
       expect(isWatchedEvent('buying_broadcasted')).toBe(true);
       expect(isWatchedEvent('offer_accepted_broadcasted')).toBe(true);
       expect(isWatchedEvent('coll_offer_fulfill_broadcasted')).toBe(true);
@@ -854,7 +903,7 @@ describe('bidLogic', () => {
       expect(isWatchedEvent('listing_created')).toBe(false);
       expect(isWatchedEvent('unknown_event')).toBe(false);
       expect(isWatchedEvent('')).toBe(false);
-      expect(isWatchedEvent('offer_cancelled')).toBe(false);
+      expect(isWatchedEvent('list')).toBe(false);
     });
   });
 

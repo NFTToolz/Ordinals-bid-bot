@@ -930,13 +930,15 @@ class EventManager {
   private ready = false;
   private startupEventsDiscarded = 0;
   private static readonly DROP_LOG_INTERVAL = 50;
-  private tokenEventDedup = new Map<string, number>();
+  private itemEventDedup = new Map<string, number>();
+  private collectionEventDedup = new Map<string, number>();
   private static readonly DEDUP_COOLDOWN_MS = 5_000;
   private preFilterStats = {
     notWatched: 0,
     unknownCollection: 0,
     ownWallet: 0,
     deduplicated: 0,
+    superseded: 0,
     total: 0,
   };
 
@@ -972,18 +974,49 @@ class EventManager {
     return this.startupEventsDiscarded;
   }
 
-  /** Purge expired entries from the per-token dedup map. */
+  /** Purge expired entries from the dedup maps. */
   cleanupDedupMap(): void {
     const now = Date.now();
     let cleaned = 0;
-    for (const [tokenId, timestamp] of this.tokenEventDedup.entries()) {
+    for (const [key, timestamp] of this.itemEventDedup.entries()) {
       if (now - timestamp > EventManager.DEDUP_COOLDOWN_MS * 2) {
-        this.tokenEventDedup.delete(tokenId);
+        this.itemEventDedup.delete(key);
+        cleaned++;
+      }
+    }
+    for (const [key, timestamp] of this.collectionEventDedup.entries()) {
+      if (now - timestamp > EventManager.DEDUP_COOLDOWN_MS * 2) {
+        this.collectionEventDedup.delete(key);
         cleaned++;
       }
     }
     if (cleaned > 0) {
-      Logger.debug(`[CLEANUP] Removed ${cleaned} entries from tokenEventDedup map (size: ${this.tokenEventDedup.size})`);
+      Logger.debug(`[CLEANUP] Removed ${cleaned} entries from dedup maps (item: ${this.itemEventDedup.size}, collection: ${this.collectionEventDedup.size})`);
+    }
+  }
+
+  /**
+   * Compute a dedup key for in-queue superseding.
+   * Events with the same key supersede each other — only the newest survives.
+   * Returns null for purchase events (never superseded) and unknown kinds.
+   *
+   * Grouping:
+   * - offer_placed + offer_cancelled share key per tokenId (latest state wins)
+   * - coll_offer_created + coll_offer_edited + coll_offer_cancelled share key per collection
+   *   (all trigger "check your collection offer position", only the latest matters)
+   */
+  private getQueueDedupKey(event: CollectOfferActivity): string | null {
+    if (isPurchaseEvent(event.kind)) return null;
+    switch (event.kind) {
+      case 'offer_placed':
+      case 'offer_cancelled':
+        return event.tokenId ? `item:${event.collectionSymbol}:${event.tokenId}` : null;
+      case 'coll_offer_created':
+      case 'coll_offer_edited':
+      case 'coll_offer_cancelled':
+        return `coll_offer:${event.collectionSymbol}`;
+      default:
+        return null;
     }
   }
 
@@ -1010,8 +1043,8 @@ class EventManager {
       return;
     }
 
-    // Filter 3: Own-wallet detection for offer_placed / coll_offer_created
-    if (event.kind === 'offer_placed' || event.kind === 'coll_offer_created') {
+    // Filter 3: Own-wallet detection for offer_placed / coll_offer_created / coll_offer_edited
+    if (event.kind === 'offer_placed' || event.kind === 'coll_offer_created' || event.kind === 'coll_offer_edited') {
       if (isOurPaymentAddress(event.buyerPaymentAddress)) {
         this.preFilterStats.ownWallet++;
         this.preFilterStats.total++;
@@ -1019,16 +1052,44 @@ class EventManager {
       }
     }
 
-    // Filter 4: Per-token dedup for offer_placed (only latest matters within cooldown)
-    if (event.kind === 'offer_placed' && event.tokenId) {
-      const lastSeen = this.tokenEventDedup.get(event.tokenId);
+    // Filter 4: Per-token dedup for item events (offer_placed + offer_cancelled share cooldown)
+    if ((event.kind === 'offer_placed' || event.kind === 'offer_cancelled') && event.tokenId) {
+      const lastSeen = this.itemEventDedup.get(event.tokenId);
       const now = Date.now();
       if (lastSeen && now - lastSeen < EventManager.DEDUP_COOLDOWN_MS) {
         this.preFilterStats.deduplicated++;
         this.preFilterStats.total++;
         return;
       }
-      this.tokenEventDedup.set(event.tokenId, now);
+      this.itemEventDedup.set(event.tokenId, now);
+    }
+
+    // Filter 5: Per-collection dedup for collection offer events
+    if (event.kind === 'coll_offer_created' || event.kind === 'coll_offer_edited' || event.kind === 'coll_offer_cancelled') {
+      const lastSeen = this.collectionEventDedup.get(event.collectionSymbol);
+      const now = Date.now();
+      if (lastSeen && now - lastSeen < EventManager.DEDUP_COOLDOWN_MS) {
+        this.preFilterStats.deduplicated++;
+        this.preFilterStats.total++;
+        return;
+      }
+      this.collectionEventDedup.set(event.collectionSymbol, now);
+    }
+
+    // === In-queue superseding: newer event replaces older event with same dedup key ===
+    // This prevents stale events from consuming API calls when the queue drains slowly.
+    // e.g., 5 offer_cancelled events for the same token → only the newest survives.
+    // offer_placed and offer_cancelled share a key per token (latest state wins).
+    const dedupKey = this.getQueueDedupKey(event);
+    if (dedupKey) {
+      const existingIdx = this.queue.findIndex(
+        (e: CollectOfferActivity) => this.getQueueDedupKey(e) === dedupKey
+      );
+      if (existingIdx !== -1) {
+        this.queue.splice(existingIdx, 1);
+        this.preFilterStats.superseded++;
+        this.preFilterStats.total++;
+      }
     }
 
     // === Queue overflow handling ===
@@ -1138,6 +1199,21 @@ class EventManager {
       // Log when maxFloorBid is capped (check original config value, not the capped one)
       if (collection.maxFloorBid > 100 && !(collection.traits && collection.traits.length > 0)) {
         Logger.warning(`[WS] ${collectionSymbol}: maxFloorBid ${collection.maxFloorBid}% capped to 100% (non-trait offer)`);
+      }
+
+      // Early exit for cancellation events BEFORE costly collectionDetails() API call.
+      // Most cancel events are for tokens/collections we have no active bid on.
+      if (message.kind === 'offer_cancelled') {
+        if (!bidHistory[collectionSymbol]?.ourBids?.[tokenId]) return;
+        if (!bottomListings.includes(tokenId)) return;
+      }
+      if (message.kind === 'coll_offer_cancelled') {
+        if (!bidHistory[collectionSymbol]?.highestCollectionOffer) return;
+      }
+      // Early exit for offer_placed on tokens not in our target list.
+      // bottomListings is from memory (computed above), no API cost.
+      if (message.kind === 'offer_placed' && collection.offerType === 'ITEM') {
+        if (!bottomListings.includes(tokenId)) return;
       }
 
       let collectionData;
@@ -1349,9 +1425,90 @@ class EventManager {
               }
             }
           }
+        } else if (message.kind === 'offer_cancelled') {
+          // A competitor cancelled their bid — check if we're still top
+          // (ourBids and bottomListings already checked in early-exit before collectionDetails)
+
+          // API call: fetch current top offer to verify our position
+          let bestOffer;
+          try {
+            bestOffer = await getBestOffer(tokenId);
+          } catch (err) {
+            Logger.warning(`[WS] ${tokenId.slice(-8)}: API error checking top offer after cancel: ${getErrorMessage(err)}`);
+            return;
+          }
+
+          if (!bestOffer?.offers?.length) {
+            // No offers left — we might have been cancelled too, or we're the only one
+            bidHistory[collectionSymbol].topBids[tokenId] = true;
+            return;
+          }
+
+          const topOffer = bestOffer.offers[0];
+
+          // If we're the top bidder, just confirm state
+          if (isOurPaymentAddress(topOffer.buyerPaymentAddress)) {
+            bidHistory[collectionSymbol].topBids[tokenId] = true;
+            Logger.debug(`[WS] ${tokenId.slice(-8)}: Confirmed top bid after competitor cancel`);
+            return;
+          }
+
+          // We're NOT top — someone else has a higher bid. Counter-bid if within limits.
+          const topPrice = Number(topOffer.price);
+          if (isNaN(topPrice) || topPrice > maxOffer) {
+            Logger.bidSkipped(collectionSymbol, tokenId, 'Top offer exceeds max after cancel', topPrice, topPrice, maxOffer);
+            return;
+          }
+
+          const bidPrice = Math.round(topPrice + outBidAmount);
+          if (bidPrice > maxOffer) {
+            Logger.bidSkipped(collectionSymbol, tokenId, 'Counter-bid would exceed max', topPrice, bidPrice, maxOffer);
+            return;
+          }
+
+          // Rate limit + dedup + lock (same pattern as offer_placed)
+          const lastBidTime = recentBids.get(tokenId);
+          if (lastBidTime && Date.now() - lastBidTime < RECENT_BID_COOLDOWN_MS) {
+            return;
+          }
+          if (isGloballyRateLimited()) {
+            const waitMs = getGlobalResetWaitTime();
+            await delay(waitMs + 1000);
+          }
+          const lockAcquired = await acquireTokenLock(tokenId);
+          if (!lockAcquired) return;
+
+          const bidAttemptTime = Date.now();
+          addRecentBid(tokenId, bidAttemptTime);
+
+          if (isGloballyRateLimited()) {
+            const waitMs = getGlobalResetWaitTime();
+            await delay(waitMs + 1000);
+          }
+
+          try {
+            const result = await placeBidWithRotation(collection, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, undefined, maxOffer);
+            if (result.success) {
+              addRecentBid(tokenId, Date.now());
+              bidHistory[collectionSymbol].topBids[tokenId] = true;
+              bidHistory[collectionSymbol].ourBids[tokenId] = {
+                price: bidPrice,
+                expiration: expiration,
+                paymentAddress: result.paymentAddress
+              };
+              Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID', { floorPrice, maxOffer });
+            } else {
+              recentBids.delete(tokenId);
+            }
+          } catch (error) {
+            recentBids.delete(tokenId);
+            throw error;
+          } finally {
+            releaseTokenLock(tokenId);
+          }
         }
       } else if (offerType === "COLLECTION") {
-        if (message.kind === "coll_offer_created") {
+        if (message.kind === "coll_offer_created" || message.kind === "coll_offer_edited") {
           const collectionSymbol = message.collectionSymbol
 
           const incomingBidAmount = message.listedPrice
@@ -1367,7 +1524,7 @@ class EventManager {
 
           // Address already checked at line 1147 with isOurPaymentAddress(), so we only need price comparison
           if (Number(incomingBidAmount) > Number(ourBidPrice)) {
-            Logger.websocket.event('coll_offer_created', collectionSymbol);
+            Logger.websocket.event(message.kind, collectionSymbol);
 
             // Atomically acquire lock for this collection to prevent race conditions
             const lockAcquired = await acquireTokenLock(collectionSymbol);
@@ -1429,6 +1586,70 @@ class EventManager {
             } finally {
               releaseTokenLock(collectionSymbol);
             }
+          }
+        } else if (message.kind === 'coll_offer_cancelled') {
+          // A competitor cancelled their collection offer — verify our position
+          // (highestCollectionOffer already checked in early-exit before collectionDetails)
+
+          let offerData;
+          try {
+            offerData = await getBestCollectionOffer(collectionSymbol);
+          } catch (err) {
+            Logger.warning(`[WS] ${collectionSymbol}: API error checking collection offers after cancel: ${getErrorMessage(err)}`);
+            return;
+          }
+
+          if (!offerData?.offers?.length) {
+            Logger.debug(`[WS] ${collectionSymbol}: No collection offers remain after cancel`);
+            return;
+          }
+
+          // Check if we're the top collection offer
+          const topCollOffer = offerData.offers[0];
+          if (isOurReceiveAddress(topCollOffer.btcParams?.makerOrdinalReceiveAddress)) {
+            Logger.debug(`[WS] ${collectionSymbol}: Confirmed top collection offer after competitor cancel`);
+            return;
+          }
+
+          // We're not top — counter-bid if the top offer is within limits
+          const topPrice = Number(topCollOffer.price);
+          if (isNaN(topPrice) || topPrice > maxOffer) {
+            return;
+          }
+
+          const bidPrice = Math.round(topPrice + outBidAmount);
+          if (bidPrice > maxOffer || bidPrice >= floorPrice) {
+            return;
+          }
+
+          const lockAcquired = await acquireTokenLock(collectionSymbol);
+          if (!lockAcquired) return;
+
+          try {
+            // Cancel our existing offer first (same pattern as coll_offer_created handler)
+            const ourOffer = offerData.offers.find((item) =>
+              isOurReceiveAddress(item.btcParams?.makerOrdinalReceiveAddress));
+            if (ourOffer) {
+              let cancelPub = publicKey, cancelPriv = privateKey;
+              const makerAddr = ourOffer.btcParams?.makerPaymentAddress;
+              if (ENABLE_WALLET_ROTATION && makerAddr) {
+                const creds = getWalletCredentialsByPaymentAddress(makerAddr);
+                if (creds) { cancelPub = creds.publicKey; cancelPriv = creds.privateKey; }
+                else { Logger.warning(`[CANCEL] No credentials for ${makerAddr}, skipping`); return; }
+              }
+              await cancelCollectionOffer([ourOffer.id], cancelPub, cancelPriv);
+            }
+
+            const feeSatsPerVbyte = collection.feeSatsPerVbyte || 28;
+            await placeCollectionBid(bidPrice, expiration, collectionSymbol,
+              buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte,
+              maxOffer, undefined, buyerPaymentAddress);
+            bidHistory[collectionSymbol].highestCollectionOffer = { price: bidPrice, buyerPaymentAddress };
+            Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
+          } catch (error) {
+            Logger.error(`[WS] Failed to counter-bid collection offer for ${collectionSymbol}`, getErrorMessage(error));
+          } finally {
+            releaseTokenLock(collectionSymbol);
           }
         }
       } else {
@@ -3895,14 +4116,14 @@ function isValidWebSocketMessage(message: unknown): message is CollectOfferActiv
     return false;
   }
 
-  // For offer_placed, buying, and fulfillment events, tokenId is required
-  const tokenEvents = ['offer_placed', 'buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
+  // For offer_placed, offer_cancelled, buying, and fulfillment events, tokenId is required
+  const tokenEvents = ['offer_placed', 'offer_cancelled', 'buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
   if (tokenEvents.includes(msg.kind) && typeof msg.tokenId !== 'string') {
     return false;
   }
 
   // listedPrice can be string or number, but must exist for offer events
-  if (msg.kind === 'offer_placed' || msg.kind === 'coll_offer_created') {
+  if (msg.kind === 'offer_placed' || msg.kind === 'coll_offer_created' || msg.kind === 'coll_offer_edited') {
     if (msg.listedPrice === undefined || msg.listedPrice === null) {
       return false;
     }

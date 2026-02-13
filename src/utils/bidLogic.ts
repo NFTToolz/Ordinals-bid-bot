@@ -590,13 +590,13 @@ export function isValidWebSocketMessage(message: unknown): message is WebSocketM
   }
 
   // For offer_placed and buying events, tokenId is required
-  const tokenEvents = ['offer_placed', 'buying_broadcasted', 'offer_accepted_broadcasted'];
+  const tokenEvents = ['offer_placed', 'offer_cancelled', 'buying_broadcasted', 'offer_accepted_broadcasted'];
   if (tokenEvents.includes(msg.kind) && typeof msg.tokenId !== 'string') {
     return false;
   }
 
   // listedPrice can be string or number, but must exist for offer events
-  if (msg.kind === 'offer_placed' || msg.kind === 'coll_offer_created') {
+  if (msg.kind === 'offer_placed' || msg.kind === 'coll_offer_created' || msg.kind === 'coll_offer_edited') {
     if (msg.listedPrice === undefined || msg.listedPrice === null) {
       return false;
     }
@@ -615,6 +615,9 @@ export function isValidWebSocketMessage(message: unknown): message is WebSocketM
 export const WATCHED_EVENTS = [
   'offer_placed',
   'coll_offer_created',
+  'coll_offer_edited',
+  'offer_cancelled',
+  'coll_offer_cancelled',
   'buying_broadcasted',
   'offer_accepted_broadcasted',
   'coll_offer_fulfill_broadcasted'

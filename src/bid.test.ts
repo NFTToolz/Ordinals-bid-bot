@@ -1185,7 +1185,7 @@ describe('Bid.ts Logic Tests', () => {
     it('should not count startup discards in preFilterStats', () => {
       let ready = false;
       let startupEventsDiscarded = 0;
-      const preFilterStats = { notWatched: 0, unknownCollection: 0, ownWallet: 0, deduplicated: 0, total: 0 };
+      const preFilterStats = { notWatched: 0, unknownCollection: 0, ownWallet: 0, deduplicated: 0, superseded: 0, total: 0 };
 
       function receiveEvent(event: any) {
         if (!ready) {
@@ -1228,6 +1228,9 @@ describe('Bid.ts Logic Tests', () => {
       const watchedEvents = [
         'offer_placed',
         'coll_offer_created',
+        'coll_offer_edited',
+        'offer_cancelled',
+        'coll_offer_cancelled',
         'buying_broadcasted',
         'offer_accepted_broadcasted',
         'coll_offer_fulfill_broadcasted',
@@ -1236,15 +1239,17 @@ describe('Bid.ts Logic Tests', () => {
       expect(watchedEvents.includes('offer_placed')).toBe(true);
       expect(watchedEvents.includes('listing_created')).toBe(false);
       expect(watchedEvents.includes('buying_broadcasted')).toBe(true);
-      expect(watchedEvents.includes('offer_cancelled')).toBe(false);
+      expect(watchedEvents.includes('offer_cancelled')).toBe(true);
+      expect(watchedEvents.includes('coll_offer_edited')).toBe(true);
+      expect(watchedEvents.includes('coll_offer_cancelled')).toBe(true);
     });
   });
 
   describe('Pre-Queue Filtering', () => {
     it('should reject events with unwatched kinds before queuing', () => {
       const queue: any[] = [];
-      const preFilterStats = { notWatched: 0, unknownCollection: 0, ownWallet: 0, deduplicated: 0, total: 0 };
-      const watchedEvents = ['offer_placed', 'coll_offer_created', 'buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
+      const preFilterStats = { notWatched: 0, unknownCollection: 0, ownWallet: 0, deduplicated: 0, superseded: 0, total: 0 };
+      const watchedEvents = ['offer_placed', 'coll_offer_created', 'coll_offer_edited', 'offer_cancelled', 'coll_offer_cancelled', 'buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
       const collectionSymbols = new Set(['test-collection']);
 
       function receiveEvent(event: { kind: string; collectionSymbol: string }) {
@@ -1261,7 +1266,7 @@ describe('Bid.ts Logic Tests', () => {
         queue.push(event);
       }
 
-      receiveEvent({ kind: 'offer_cancelled', collectionSymbol: 'test-collection' });
+      receiveEvent({ kind: 'list', collectionSymbol: 'test-collection' });
       receiveEvent({ kind: 'listing_created', collectionSymbol: 'test-collection' });
       receiveEvent({ kind: 'offer_placed', collectionSymbol: 'unknown-collection' });
       receiveEvent({ kind: 'offer_placed', collectionSymbol: 'test-collection' });
@@ -1293,6 +1298,81 @@ describe('Bid.ts Logic Tests', () => {
       receiveEvent({ kind: 'offer_placed', tokenId: 'token2' }, now + 1000);  // different token
 
       expect(queue).toHaveLength(3);
+    });
+
+    it('should supersede older events in queue with same dedup key', () => {
+      const queue: any[] = [];
+      let superseded = 0;
+      const purchaseKinds = ['buying_broadcasted', 'offer_accepted_broadcasted', 'coll_offer_fulfill_broadcasted'];
+
+      function getDedupKey(event: any): string | null {
+        if (purchaseKinds.includes(event.kind)) return null;
+        switch (event.kind) {
+          case 'offer_placed':
+          case 'offer_cancelled':
+            return event.tokenId ? `item:${event.collectionSymbol}:${event.tokenId}` : null;
+          case 'coll_offer_created':
+          case 'coll_offer_edited':
+          case 'coll_offer_cancelled':
+            return `coll_offer:${event.collectionSymbol}`;
+          default:
+            return null;
+        }
+      }
+
+      function receiveEvent(event: any) {
+        const key = getDedupKey(event);
+        if (key) {
+          const idx = queue.findIndex((e: any) => getDedupKey(e) === key);
+          if (idx !== -1) {
+            queue.splice(idx, 1);
+            superseded++;
+          }
+        }
+        queue.push(event);
+      }
+
+      // Same token, same kind → superseded
+      receiveEvent({ kind: 'offer_placed', collectionSymbol: 'col', tokenId: 't1', listedPrice: 100 });
+      receiveEvent({ kind: 'offer_placed', collectionSymbol: 'col', tokenId: 't1', listedPrice: 200 });
+      expect(queue).toHaveLength(1);
+      expect(queue[0].listedPrice).toBe(200); // newest wins
+      expect(superseded).toBe(1);
+
+      // offer_cancelled supersedes offer_placed for same token (shared key)
+      receiveEvent({ kind: 'offer_cancelled', collectionSymbol: 'col', tokenId: 't1' });
+      expect(queue).toHaveLength(1);
+      expect(queue[0].kind).toBe('offer_cancelled');
+      expect(superseded).toBe(2);
+
+      // Different token → no supersede
+      receiveEvent({ kind: 'offer_placed', collectionSymbol: 'col', tokenId: 't2', listedPrice: 300 });
+      expect(queue).toHaveLength(2);
+
+      // coll_offer_edited supersedes coll_offer_created (shared key)
+      receiveEvent({ kind: 'coll_offer_created', collectionSymbol: 'col-a', listedPrice: 500 });
+      receiveEvent({ kind: 'coll_offer_edited', collectionSymbol: 'col-a', listedPrice: 600 });
+      expect(queue).toHaveLength(3);
+      expect(queue[2].kind).toBe('coll_offer_edited');
+      expect(superseded).toBe(3);
+
+      // coll_offer_cancelled supersedes coll_offer_created (shared key)
+      receiveEvent({ kind: 'coll_offer_cancelled', collectionSymbol: 'col-a' });
+      expect(queue).toHaveLength(3); // replaced the coll_offer_edited
+      expect(queue[2].kind).toBe('coll_offer_cancelled');
+      expect(superseded).toBe(4);
+
+      // coll_offer_created supersedes coll_offer_cancelled (shared key)
+      receiveEvent({ kind: 'coll_offer_created', collectionSymbol: 'col-a', listedPrice: 700 });
+      expect(queue).toHaveLength(3); // replaced the coll_offer_cancelled
+      expect(queue[2].kind).toBe('coll_offer_created');
+      expect(superseded).toBe(5);
+
+      // Purchase events are never superseded
+      receiveEvent({ kind: 'buying_broadcasted', collectionSymbol: 'col', tokenId: 't1' });
+      receiveEvent({ kind: 'buying_broadcasted', collectionSymbol: 'col', tokenId: 't1' });
+      expect(queue).toHaveLength(5); // both survive
+      expect(superseded).toBe(5); // unchanged
     });
 
     it('should protect purchase events from being dropped on overflow', () => {
@@ -1378,6 +1458,146 @@ describe('Bid.ts Logic Tests', () => {
 
       // With fake timers, this should complete instantly
       expect(true).toBe(true);
+    });
+  });
+
+  describe('Cancellation Event Handling', () => {
+    it('offer_cancelled with no active bid should early return', () => {
+      const bidHistory: Record<string, any> = {
+        'test-col': { ourBids: {}, topBids: {}, quantity: 0 }
+      };
+      const tokenId = 'token123';
+
+      // No bid on this token → early return
+      const hasActiveBid = !!bidHistory['test-col']?.ourBids?.[tokenId];
+      expect(hasActiveBid).toBe(false);
+    });
+
+    it('offer_cancelled when we are top should confirm topBids', () => {
+      const bidHistory: Record<string, any> = {
+        'test-col': {
+          ourBids: { 'token123': { price: 50000, expiration: Date.now() + 3600000 } },
+          topBids: {},
+          quantity: 0
+        }
+      };
+      const tokenId = 'token123';
+      const primaryPaymentAddress = 'bc1qouraddress';
+
+      // Simulate: we are the top bidder after cancel
+      const topOffer = { buyerPaymentAddress: primaryPaymentAddress, price: 50000 };
+      const isOurs = topOffer.buyerPaymentAddress === primaryPaymentAddress;
+
+      if (isOurs) {
+        bidHistory['test-col'].topBids[tokenId] = true;
+      }
+
+      expect(bidHistory['test-col'].topBids[tokenId]).toBe(true);
+    });
+
+    it('offer_cancelled when not top and within limits should counter-bid', () => {
+      const maxOffer = 100000;
+      const outBidAmount = 100;
+      const topPrice = 60000;
+
+      // We're not top, calculate counter-bid
+      const bidPrice = Math.round(topPrice + outBidAmount);
+      const shouldBid = bidPrice <= maxOffer;
+
+      expect(shouldBid).toBe(true);
+      expect(bidPrice).toBe(60100);
+    });
+
+    it('offer_cancelled when top offer exceeds maxOffer should skip', () => {
+      const maxOffer = 50000;
+      const topPrice = 60000;
+
+      const shouldSkip = isNaN(topPrice) || topPrice > maxOffer;
+      expect(shouldSkip).toBe(true);
+    });
+
+    it('coll_offer_edited should be treated same as coll_offer_created', () => {
+      const handledKinds = ['coll_offer_created', 'coll_offer_edited'];
+      expect(handledKinds.includes('coll_offer_edited')).toBe(true);
+      expect(handledKinds.includes('coll_offer_created')).toBe(true);
+    });
+
+    it('coll_offer_cancelled with no active collection offer should early return', () => {
+      const bidHistory: Record<string, any> = {
+        'test-col': { highestCollectionOffer: undefined, quantity: 0 }
+      };
+
+      const hasActiveOffer = !!bidHistory['test-col']?.highestCollectionOffer;
+      expect(hasActiveOffer).toBe(false);
+    });
+
+    it('offer_placed for non-target token should early return before collectionDetails', () => {
+      const bottomListings = ['tokenA', 'tokenB', 'tokenC'];
+      const collection = { offerType: 'ITEM' };
+      const tokenId = 'tokenXYZ'; // not in bottomListings
+
+      // This is the early-exit check added before collectionDetails()
+      const shouldEarlyReturn =
+        collection.offerType === 'ITEM' && !bottomListings.includes(tokenId);
+      expect(shouldEarlyReturn).toBe(true);
+
+      // A token that IS in bottomListings should proceed
+      const targetToken = 'tokenB';
+      const shouldProceed =
+        collection.offerType === 'ITEM' && !bottomListings.includes(targetToken);
+      expect(shouldProceed).toBe(false);
+
+      // COLLECTION type should not early-return even for non-target token
+      const collOffer = { offerType: 'COLLECTION' };
+      const collShouldReturn =
+        collOffer.offerType === 'ITEM' && !bottomListings.includes(tokenId);
+      expect(collShouldReturn).toBe(false);
+    });
+
+    it('item events should share dedup cooldown per token', () => {
+      const itemEventDedup = new Map<string, number>();
+      const DEDUP_COOLDOWN = 5000;
+      const now = Date.now();
+
+      // offer_placed sets the cooldown for token1
+      itemEventDedup.set('token1', now);
+
+      // offer_cancelled for same token within cooldown should be blocked
+      const cancelBlocked = itemEventDedup.has('token1') &&
+        now - itemEventDedup.get('token1')! < DEDUP_COOLDOWN;
+      expect(cancelBlocked).toBe(true);
+
+      // Different token should not be blocked
+      expect(itemEventDedup.has('token2')).toBe(false);
+
+      // After cooldown expires, same token is unblocked
+      const expiredTime = now - DEDUP_COOLDOWN - 1;
+      itemEventDedup.set('token1', expiredTime);
+      const afterCooldown = itemEventDedup.has('token1') &&
+        now - itemEventDedup.get('token1')! < DEDUP_COOLDOWN;
+      expect(afterCooldown).toBe(false);
+    });
+
+    it('collection events should share dedup cooldown per collection', () => {
+      const collectionEventDedup = new Map<string, number>();
+      const DEDUP_COOLDOWN = 5000;
+      const now = Date.now();
+
+      // coll_offer_created sets the cooldown for collection C
+      collectionEventDedup.set('col-abc', now);
+
+      // coll_offer_edited for same collection within cooldown should be blocked
+      const editedBlocked = collectionEventDedup.has('col-abc') &&
+        now - collectionEventDedup.get('col-abc')! < DEDUP_COOLDOWN;
+      expect(editedBlocked).toBe(true);
+
+      // coll_offer_cancelled for same collection within cooldown should be blocked
+      const cancelledBlocked = collectionEventDedup.has('col-abc') &&
+        now - collectionEventDedup.get('col-abc')! < DEDUP_COOLDOWN;
+      expect(cancelledBlocked).toBe(true);
+
+      // Different collection should not be blocked
+      expect(collectionEventDedup.has('col-xyz')).toBe(false);
     });
   });
 });

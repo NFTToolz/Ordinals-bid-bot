@@ -12,6 +12,7 @@
 		"restart": "yarn cancel && sleep 5 && yarn bid",
 		"cancel": "ts-node src/cancel.ts",
 		"scan:collections": "ts-node src/scanCollections.ts",
+		"monitor:ws": "ts-node scripts/ws-event-monitor.ts",
 		"start": "node dist/bid.js",
 		"start:cancel": "node dist/cancel.js",
 		"start:manage": "node dist/manage/index.js",

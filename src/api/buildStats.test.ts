@@ -28,6 +28,7 @@ function createMockDeps(overrides: Partial<StatsDependencies> = {}): StatsDepend
       unknownCollection: 0,
       ownWallet: 0,
       deduplicated: 0,
+      superseded: 0,
       total: 0,
     },
     queueSize: 1,
@@ -68,6 +69,7 @@ describe('buildRuntimeStats', () => {
       unknownCollection: 0,
       ownWallet: 0,
       deduplicated: 0,
+      superseded: 0,
       total: 0,
     });
     expect(stats.websocket.connected).toBe(true);
@@ -187,7 +189,8 @@ describe('buildRuntimeStats', () => {
       unknownCollection: 45,
       ownWallet: 30,
       deduplicated: 80,
-      total: 275,
+      superseded: 15,
+      total: 290,
     };
     const deps = createMockDeps({ droppedEventsCount: 42, preFilterStats });
     const stats = buildRuntimeStats(deps);

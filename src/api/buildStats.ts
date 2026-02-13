@@ -64,6 +64,7 @@ export interface StatsDependencies {
     unknownCollection: number;
     ownWallet: number;
     deduplicated: number;
+    superseded: number;
     total: number;
   };
   /** PQueue size (waiting) */
