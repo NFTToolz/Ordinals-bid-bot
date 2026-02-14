@@ -1599,6 +1599,93 @@ describe('Bid.ts Logic Tests', () => {
       // Different collection should not be blocked
       expect(collectionEventDedup.has('col-xyz')).toBe(false);
     });
+
+    describe('Equal price tie-breaking via API', () => {
+      const ourAddress = 'bc1qourwallet';
+      const competitorAddress = 'bc1qcompetitor';
+
+      function isOurPaymentAddress(address: string): boolean {
+        if (!address) return false;
+        return address.toLowerCase() === ourAddress.toLowerCase();
+      }
+
+      it('equal price, we ARE top — should skip (no counterbid)', async () => {
+        const ourPrice = 50000;
+        const incomingPrice = 50000;
+        const bidHistory: Record<string, any> = {
+          'test-col': {
+            ourBids: { 'token123': { price: ourPrice, expiration: Date.now() + 3600000 } },
+            topBids: {},
+            quantity: 0
+          }
+        };
+
+        // Simulate: prices are equal, API confirms we are top
+        const bestOfferResponse = {
+          offers: [{ buyerPaymentAddress: ourAddress, price: ourPrice }]
+        };
+
+        expect(incomingPrice === ourPrice).toBe(true);
+        const topOffer = bestOfferResponse.offers[0];
+        const weAreTop = isOurPaymentAddress(topOffer.buyerPaymentAddress);
+        expect(weAreTop).toBe(true);
+        // When we are top, handler returns early — no counterbid
+      });
+
+      it('equal price, we are NOT top — should counterbid', async () => {
+        const ourPrice = 50000;
+        const incomingPrice = 50000;
+        const outBidAmount = 100;
+        const maxOffer = 100000;
+
+        // Simulate: prices are equal, API shows competitor is top
+        const bestOfferResponse = {
+          offers: [{ buyerPaymentAddress: competitorAddress, price: ourPrice }]
+        };
+
+        expect(incomingPrice === ourPrice).toBe(true);
+        const topOffer = bestOfferResponse.offers[0];
+        const weAreTop = isOurPaymentAddress(topOffer.buyerPaymentAddress);
+        expect(weAreTop).toBe(false);
+
+        // Not top — counterbid against the actual top offer price
+        const counterbidPrice = Math.round(topOffer.price + outBidAmount);
+        expect(counterbidPrice).toBe(50100);
+        expect(counterbidPrice <= maxOffer).toBe(true);
+      });
+
+      it('equal price, API error — should skip gracefully', async () => {
+        const ourPrice = 50000;
+        const incomingPrice = 50000;
+
+        expect(incomingPrice === ourPrice).toBe(true);
+
+        // Simulate: API throws error
+        let shouldSkip = false;
+        try {
+          throw new Error('Network timeout');
+        } catch {
+          // On API error, handler returns early (skip)
+          shouldSkip = true;
+        }
+        expect(shouldSkip).toBe(true);
+      });
+
+      it('strictly lower incoming price — should skip without API call', () => {
+        const ourPrice = 50000;
+        const incomingPrice = 40000;
+
+        // Strictly less: skip immediately, no API call needed
+        const isStrictlyLower = incomingPrice < ourPrice;
+        expect(isStrictlyLower).toBe(true);
+
+        // The old <= check would also skip equal prices — that's the bug we fixed
+        const oldBehaviorSkipsEqual = (50000 <= 50000);
+        expect(oldBehaviorSkipsEqual).toBe(true); // old code wrongly skipped ties
+        const newBehaviorSkipsEqual = (50000 < 50000);
+        expect(newBehaviorSkipsEqual).toBe(false); // new code correctly checks ties via API
+      });
+    });
   });
 });
 

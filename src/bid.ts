@@ -1279,13 +1279,37 @@ class EventManager {
               // Verify the incoming bid is actually the top offer
               if (ourExistingBid) {
                 // CASE 1: We have an existing bid - check if we're outbid
-                if (verifiedOfferPrice <= ourExistingBid.price) {
-                  // Incoming bid is not higher than ours - we still have top bid, skip
-                  Logger.info(`[WS] ${tokenId.slice(-8)}: Incoming bid ${verifiedOfferPrice} <= our bid ${ourExistingBid.price}, still top`);
+                if (verifiedOfferPrice < ourExistingBid.price) {
+                  // Incoming bid is lower than ours - we're still top, skip
+                  Logger.info(`[WS] ${tokenId.slice(-8)}: Incoming bid ${verifiedOfferPrice} < our bid ${ourExistingBid.price}, still top`);
                   return;
                 }
-                // We're outbid - proceed to counterbid against verifiedOfferPrice
-                Logger.info(`[WS] ${tokenId.slice(-8)}: Outbid (${ourExistingBid.price} -> ${verifiedOfferPrice}), counterbidding`);
+
+                if (verifiedOfferPrice === ourExistingBid.price) {
+                  // Equal price — ME ranks by timestamp, so verify actual position via API
+                  let bestOffer;
+                  try {
+                    bestOffer = await getBestOffer(tokenId);
+                  } catch (offerError: unknown) {
+                    Logger.warning(`[WS] ${tokenId.slice(-8)}: API error verifying top bid, skipping: ${getErrorMessage(offerError)}`);
+                    return;
+                  }
+                  if (!bestOffer?.offers?.length) {
+                    Logger.info(`[WS] ${tokenId.slice(-8)}: No offers found after equal-price check, skipping`);
+                    return;
+                  }
+                  const topOffer = bestOffer.offers[0];
+                  if (isOurPaymentAddress(topOffer.buyerPaymentAddress)) {
+                    Logger.info(`[WS] ${tokenId.slice(-8)}: Equal price ${verifiedOfferPrice}, confirmed still top`);
+                    return;
+                  }
+                  // Not top — use actual top price for counterbid
+                  verifiedOfferPrice = topOffer.price;
+                  Logger.info(`[WS] ${tokenId.slice(-8)}: Equal price but not top, counterbidding against ${verifiedOfferPrice}`);
+                } else {
+                  // We're outbid - proceed to counterbid against verifiedOfferPrice
+                  Logger.info(`[WS] ${tokenId.slice(-8)}: Outbid (${ourExistingBid.price} -> ${verifiedOfferPrice}), counterbidding`);
+                }
               } else {
                 // CASE 2: No existing bid - verify WebSocket shows actual top offer
                 let bestOffer;
