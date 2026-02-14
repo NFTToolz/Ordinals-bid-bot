@@ -11,7 +11,7 @@ import { retrieveTokens, ITokenData } from "./functions/Tokens";
 import axiosInstance from "./axios/axiosInstance";
 import limiter from "./bottleneck";
 import WebSocket from 'ws';
-import Logger, { getBidStatsData, formatBTC } from "./utils/logger";
+import Logger, { getBidStatsData, formatBTC, formatWalletForLog } from "./utils/logger";
 import { printVersionBanner } from "./utils/version";
 import { getErrorMessage, getErrorResponseData, getErrorStatus, InsufficientFundsError } from "./utils/errorUtils";
 import { verifyBalanceForRetry } from "./utils/balanceVerification";
@@ -1394,7 +1394,7 @@ class EventManager {
                   }
 
                   try {
-                    const result = await placeBidWithRotation(collection, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, undefined, maxOffer);
+                    const result = await placeBidWithRotation(collection, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer);
                     if (result.success) {
                       addRecentBid(tokenId, Date.now());  // Update with actual completion time
                       bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -1403,7 +1403,7 @@ class EventManager {
                         expiration: expiration,
                         paymentAddress: result.paymentAddress
                       }
-                      Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID', { floorPrice, maxOffer });
+                      Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID', { floorPrice, maxOffer, wallet: formatWalletForLog(result.walletLabel, result.paymentAddress) });
                     } else {
                       // Bid failed - remove the early deduplication entry to allow retry
                       recentBids.delete(tokenId);
@@ -1487,7 +1487,7 @@ class EventManager {
           }
 
           try {
-            const result = await placeBidWithRotation(collection, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, undefined, maxOffer);
+            const result = await placeBidWithRotation(collection, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer);
             if (result.success) {
               addRecentBid(tokenId, Date.now());
               bidHistory[collectionSymbol].topBids[tokenId] = true;
@@ -1496,7 +1496,7 @@ class EventManager {
                 expiration: expiration,
                 paymentAddress: result.paymentAddress
               };
-              Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID', { floorPrice, maxOffer });
+              Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'COUNTERBID', { floorPrice, maxOffer, wallet: formatWalletForLog(result.walletLabel, result.paymentAddress) });
             } else {
               recentBids.delete(tokenId);
             }
@@ -1578,7 +1578,7 @@ class EventManager {
                     price: bidPrice,
                     buyerPaymentAddress: buyerPaymentAddress
                   }
-                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
+                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
                 }
               } catch (error: unknown) {
                 Logger.error(`[WS] Failed to place collection bid for ${collectionSymbol}`, getErrorMessage(error));
@@ -1645,7 +1645,7 @@ class EventManager {
               buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte,
               maxOffer, undefined, buyerPaymentAddress);
             bidHistory[collectionSymbol].highestCollectionOffer = { price: bidPrice, buyerPaymentAddress };
-            Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
+            Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
           } catch (error) {
             Logger.error(`[WS] Failed to counter-bid collection offer for ${collectionSymbol}`, getErrorMessage(error));
           } finally {
@@ -2028,7 +2028,6 @@ class EventManager {
 
               const { id: tokenId, price: listedPrice } = token
               const fullTokenData = tokenDataMap[tokenId];
-              const sellerReceiveAddress = fullTokenData?.listedSellerReceiveAddress;
               const tokenOutput = fullTokenData?.output;
               const genesisTransaction = fullTokenData?.genesisTransaction;
 
@@ -2134,7 +2133,7 @@ class EventManager {
                     const bidPrice = currentPrice + Math.round(outBidMargin * CONVERSION_RATE)
                     if (bidPrice <= maxOffer) {
                       try {
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer)
                         if (result.success) {
                           addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                           bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -2143,7 +2142,7 @@ class EventManager {
                             expiration: expiration,
                             paymentAddress: result.paymentAddress
                           }
-                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID', { floorPrice, minOffer, maxOffer });
+                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID', { floorPrice, minOffer, maxOffer, wallet: formatWalletForLog(result.walletLabel, result.paymentAddress) });
                           newBidsPlaced++;
                           successfulBidsPlaced++;
                         } else {
@@ -2181,7 +2180,7 @@ class EventManager {
                   const bidPrice = minOffer
                   if (bidPrice <= maxOffer) {
                     try {
-                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
+                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer)
                       if (result.success) {
                         addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                         bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -2190,7 +2189,7 @@ class EventManager {
                           expiration: expiration,
                           paymentAddress: result.paymentAddress
                         }
-                        Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'NEW', { floorPrice, minOffer, maxOffer });
+                        Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'NEW', { floorPrice, minOffer, maxOffer, wallet: formatWalletForLog(result.walletLabel, result.paymentAddress) });
                         newBidsPlaced++;
                         successfulBidsPlaced++;
                       } else {
@@ -2238,7 +2237,7 @@ class EventManager {
 
                     if (bidPrice <= maxOffer) {
                       try {
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer)
                         if (result.success) {
                           addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                           bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -2247,7 +2246,7 @@ class EventManager {
                             expiration: expiration,
                             paymentAddress: result.paymentAddress
                           }
-                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID', { floorPrice, minOffer, maxOffer });
+                          Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID', { floorPrice, minOffer, maxOffer, wallet: formatWalletForLog(result.walletLabel, result.paymentAddress) });
                           newBidsPlaced++;
                           successfulBidsPlaced++;
                         }
@@ -2271,7 +2270,7 @@ class EventManager {
 
                         if (bidPrice <= maxOffer) {
                           try {
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer)
                             if (result.success) {
                               addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                               bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -2299,7 +2298,7 @@ class EventManager {
                       if (bestPrice !== bidPrice) { // self adjust bids.
                         if (bidPrice <= maxOffer) {
                           try {
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, sellerReceiveAddress, maxOffer)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer)
                             if (result.success) {
                               addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                               bidHistory[collectionSymbol].topBids[tokenId] = true
@@ -2401,7 +2400,7 @@ class EventManager {
                     price: bidPrice,
                     buyerPaymentAddress: buyerPaymentAddress
                   }
-                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
+                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
                 }
               } catch (error) {
                 Logger.error(`Failed to place collection offer for ${collectionSymbol}`, error);
@@ -2524,7 +2523,7 @@ class EventManager {
                   price: bidPrice,
                   buyerPaymentAddress: buyerPaymentAddress
                 }
-                Logger.collectionOfferPlaced(collectionSymbol, bidPrice);
+                Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
               } catch (error) {
                 Logger.error(`Failed to place initial collection offer for ${collectionSymbol}`, error);
               }
@@ -3284,6 +3283,7 @@ function gatherStatsDeps(): StatsDependencies {
         bidsPerMinute: stats.bidsPerMinute,
         wallets: stats.wallets.map(w => ({
           label: w.label,
+          paymentAddress: w.paymentAddress,
           bidsInWindow: w.bidsInWindow,
           isAvailable: w.isAvailable,
           secondsUntilReset: w.secondsUntilReset,
@@ -3298,6 +3298,7 @@ function gatherStatsDeps(): StatsDependencies {
       bidsPerMinute: stats.bidsPerMinute,
       wallets: stats.wallets.map(w => ({
         label: w.label,
+        paymentAddress: w.paymentAddress,
         bidsInWindow: w.bidsInWindow,
         isAvailable: w.isAvailable,
         secondsUntilReset: w.secondsUntilReset,
@@ -3736,7 +3737,6 @@ async function placeBidWithRotation(
   fallbackPaymentAddress: string,
   fallbackPublicKey: string,
   fallbackPrivateKey: string,
-  sellerReceiveAddress?: string,
   maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ): Promise<PlaceBidResult> {
   let buyerTokenReceiveAddress = fallbackReceiveAddress;
@@ -3795,6 +3795,12 @@ async function placeBidWithRotation(
     // so we don't need to call recordSuccessfulBid separately
   }
 
+  // ME requires buyerReceiveAddress = buyerPaymentAddress for item offers
+  // unless all ordinals should go to a centralized TOKEN_RECEIVE_ADDRESS
+  if (!CENTRALIZE_RECEIVE_ADDRESS) {
+    buyerTokenReceiveAddress = buyerPaymentAddress;
+  }
+
   // M4: Validate offer price before proceeding to API call
   if (offerPrice <= 0) {
     Logger.warning(`[BID] Rejected zero/negative offer price (${offerPrice}) for ${tokenId.slice(-8)}`);
@@ -3824,7 +3830,6 @@ async function placeBidWithRotation(
       buyerPaymentAddress,
       publicKey,
       privateKey,
-      sellerReceiveAddress,
       maxAllowedPrice
     );
 
@@ -3899,7 +3904,6 @@ async function placeBid(
   buyerPaymentAddress: string,
   publicKey: string,
   privateKey: string,
-  sellerReceiveAddress?: string,
   maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ) {
   try {
@@ -3952,9 +3956,9 @@ async function placeBid(
       });
     }
 
-    const unsignedOffer = await createOffer(tokenId, price, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, FEE_RATE_TIER, sellerReceiveAddress, maxAllowedPrice)
+    const unsignedOffer = await createOffer(tokenId, price, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, FEE_RATE_TIER, maxAllowedPrice)
     const signedOffer = signData(unsignedOffer, privateKey)
-    await submitSignedOfferOrder(signedOffer, tokenId, price, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey, sellerReceiveAddress)
+    await submitSignedOfferOrder(signedOffer, tokenId, price, expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey)
     return true
 
   } catch (error: unknown) {
@@ -4007,9 +4011,9 @@ async function placeBid(
         );
         await delay(30_000);
         try {
-          const unsignedOffer = await createOffer(tokenId, Math.round(offerPrice), expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, FEE_RATE_TIER, sellerReceiveAddress, maxAllowedPrice);
+          const unsignedOffer = await createOffer(tokenId, Math.round(offerPrice), expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, FEE_RATE_TIER, maxAllowedPrice);
           const signedOffer = signData(unsignedOffer, privateKey);
-          await submitSignedOfferOrder(signedOffer, tokenId, Math.round(offerPrice), expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey, sellerReceiveAddress);
+          await submitSignedOfferOrder(signedOffer, tokenId, Math.round(offerPrice), expiration, buyerPaymentAddress, buyerTokenReceiveAddress, publicKey, FEE_RATE_TIER, privateKey);
           Logger.info(`[PLACEBID] Token ${tokenId.slice(-8)}: Retry succeeded after stale cache delay`);
           return true;
         } catch (retryError: unknown) {

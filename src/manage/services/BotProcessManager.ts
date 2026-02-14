@@ -65,6 +65,7 @@ export interface BotRuntimeStats {
     bidsPerMinute: number;
     wallets: Array<{
       label: string;
+      paymentAddress?: string;
       bidsInWindow: number;
       isAvailable: boolean;
       secondsUntilReset: number;
@@ -100,6 +101,7 @@ export interface BotRuntimeStats {
       bidsPerMinute: number;
       wallets: Array<{
         label: string;
+        paymentAddress?: string;
         bidsInWindow: number;
         isAvailable: boolean;
         secondsUntilReset: number;

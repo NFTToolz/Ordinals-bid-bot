@@ -199,7 +199,6 @@ describe('Offer API Functions', () => {
           validParams.buyerPaymentAddress,
           validParams.publicKey,
           validParams.feerateTier,
-          undefined, // sellerReceiveAddress
           40000 // maxAllowedPrice - lower than price
         )
       ).rejects.toThrow('[SAFETY]');
@@ -216,7 +215,6 @@ describe('Offer API Functions', () => {
         validParams.buyerPaymentAddress,
         validParams.publicKey,
         validParams.feerateTier,
-        undefined,
         50000 // maxAllowedPrice equals price
       );
 

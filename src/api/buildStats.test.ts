@@ -174,8 +174,8 @@ describe('buildRuntimeStats', () => {
       total: 3,
       bidsPerMinute: 5,
       wallets: [
-        { label: 'w1', bidsInWindow: 2, isAvailable: true, secondsUntilReset: 0 },
-        { label: 'w2', bidsInWindow: 5, isAvailable: false, secondsUntilReset: 15 },
+        { label: 'w1', paymentAddress: 'bc1qw1', bidsInWindow: 2, isAvailable: true, secondsUntilReset: 0 },
+        { label: 'w2', paymentAddress: 'bc1qw2', bidsInWindow: 5, isAvailable: false, secondsUntilReset: 15 },
       ],
     };
     const deps = createMockDeps({ walletPool });

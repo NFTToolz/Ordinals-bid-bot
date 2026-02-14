@@ -41,6 +41,18 @@ function renderOverview(stats: BotRuntimeStats): void {
   console.log(`  Total waits:       ${pacer.totalWaits}`);
   console.log('');
 
+  // Build active bid count per wallet from bidHistory
+  const activeBidsByWallet = new Map<string, number>();
+  if (stats.bidHistory) {
+    for (const entry of Object.values(stats.bidHistory)) {
+      for (const bid of Object.values(entry.ourBids)) {
+        if (bid.paymentAddress) {
+          activeBidsByWallet.set(bid.paymentAddress, (activeBidsByWallet.get(bid.paymentAddress) || 0) + 1);
+        }
+      }
+    }
+  }
+
   // WALLET GROUPS or WALLET POOL
   if (stats.walletGroups) {
     const wg = stats.walletGroups;
@@ -51,8 +63,9 @@ function renderOverview(stats: BotRuntimeStats): void {
       group.wallets.forEach(w => {
         const statusIcon = w.isAvailable ? chalk.green('*') : chalk.yellow('-');
         const bidInfo = `${w.bidsInWindow}/${group.bidsPerMinute} bids`;
+        const activeSuffix = w.paymentAddress ? ` | ${activeBidsByWallet.get(w.paymentAddress) || 0} active` : '';
         const resetInfo = !w.isAvailable ? chalk.dim(` (reset ${w.secondsUntilReset}s)`) : '';
-        console.log(`    ${statusIcon} ${w.label}: ${bidInfo}${resetInfo}`);
+        console.log(`    ${statusIcon} ${w.label}: ${bidInfo}${activeSuffix}${resetInfo}`);
       });
     }
     console.log('');
@@ -63,8 +76,9 @@ function renderOverview(stats: BotRuntimeStats): void {
     wp.wallets.forEach(w => {
       const statusIcon = w.isAvailable ? chalk.green('*') : chalk.yellow('-');
       const bidInfo = `${w.bidsInWindow}/${wp.bidsPerMinute} bids`;
+      const activeSuffix = w.paymentAddress ? ` | ${activeBidsByWallet.get(w.paymentAddress) || 0} active` : '';
       const resetInfo = !w.isAvailable ? chalk.dim(` (reset ${w.secondsUntilReset}s)`) : '';
-      console.log(`  ${statusIcon} ${w.label}: ${bidInfo}${resetInfo}`);
+      console.log(`  ${statusIcon} ${w.label}: ${bidInfo}${activeSuffix}${resetInfo}`);
     });
     console.log('');
   }

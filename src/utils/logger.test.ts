@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { formatBTC, formatSats, formatTokenId, BidStats, getBidStatsData, bidStats, Logger, LogLevel, setLogLevel, getLogLevel } from './logger';
+import { formatBTC, formatSats, formatTokenId, formatWalletForLog, BidStats, getBidStatsData, bidStats, Logger, LogLevel, setLogLevel, getLogLevel } from './logger';
 
 describe('Logger Utilities', () => {
   describe('formatBTC', () => {
@@ -77,6 +77,29 @@ describe('Logger Utilities', () => {
       const inscriptionId = 'abc123def456789012345678901234567890123456789012345678901234i0';
       const result = formatTokenId(inscriptionId);
       expect(result).toBe('...901234i0');
+    });
+  });
+
+  describe('formatWalletForLog', () => {
+    it('should return undefined when no address provided', () => {
+      expect(formatWalletForLog('Label')).toBeUndefined();
+      expect(formatWalletForLog()).toBeUndefined();
+    });
+
+    it('should format address only (no label)', () => {
+      expect(formatWalletForLog(undefined, 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')).toBe('bc1q...f3t4');
+    });
+
+    it('should format label with address', () => {
+      expect(formatWalletForLog('Wallet A', 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')).toBe('Wallet A (bc1q...f3t4)');
+    });
+
+    it('should return short addresses unchanged', () => {
+      expect(formatWalletForLog(undefined, 'bc1q1234')).toBe('bc1q1234');
+    });
+
+    it('should handle label with short address', () => {
+      expect(formatWalletForLog('Main', 'bc1q1234')).toBe('Main (bc1q1234)');
     });
   });
 
@@ -349,6 +372,19 @@ describe('Logger Utilities', () => {
         const output = consoleSpy.mock.calls[0][0];
         expect(output).toContain('BID PLACED');
       });
+
+      it('should log Wallet line when wallet is provided', () => {
+        Logger.bidPlaced('test-collection', 'token123i0', 50000, 'NEW', { wallet: 'Wallet A (bc1q...abcd)' });
+        const output = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
+        expect(output).toContain('Wallet:');
+        expect(output).toContain('Wallet A (bc1q...abcd)');
+      });
+
+      it('should not log Wallet line when wallet is not provided', () => {
+        Logger.bidPlaced('test-collection', 'token123i0', 50000, 'NEW', { floorPrice: 100000 });
+        const output = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
+        expect(output).not.toContain('Wallet:');
+      });
     });
 
     describe('bidAdjusted', () => {
@@ -427,6 +463,19 @@ describe('Logger Utilities', () => {
         expect(consoleSpy).toHaveBeenCalled();
         const newStats = getBidStatsData();
         expect(newStats.bidsPlaced).toBe(initialBids + 1);
+      });
+
+      it('should log Wallet line when wallet is provided', () => {
+        Logger.collectionOfferPlaced('test-collection', 50000, 'bc1q...abcd');
+        const output = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
+        expect(output).toContain('Wallet:');
+        expect(output).toContain('bc1q...abcd');
+      });
+
+      it('should not log Wallet line when wallet is not provided', () => {
+        Logger.collectionOfferPlaced('test-collection', 50000);
+        const output = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
+        expect(output).not.toContain('Wallet:');
       });
     });
 

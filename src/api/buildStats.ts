@@ -30,6 +30,7 @@ export interface StatsDependencies {
     bidsPerMinute: number;
     wallets: Array<{
       label: string;
+      paymentAddress: string;
       bidsInWindow: number;
       isAvailable: boolean;
       secondsUntilReset: number;
@@ -46,6 +47,7 @@ export interface StatsDependencies {
       bidsPerMinute: number;
       wallets: Array<{
         label: string;
+        paymentAddress: string;
         bidsInWindow: number;
         isAvailable: boolean;
         secondsUntilReset: number;

@@ -127,6 +127,13 @@ export function formatTokenId(tokenId: string): string {
   return tokenId.length > 12 ? `...${tokenId.slice(-8)}` : tokenId;
 }
 
+// Format wallet identity for log output
+export function formatWalletForLog(label?: string, address?: string): string | undefined {
+  if (!address) return undefined;
+  const short = address.length > 10 ? `${address.slice(0, 4)}...${address.slice(-4)}` : address;
+  return label ? `${label} (${short})` : short;
+}
+
 export const Logger = {
   // Debug - Verbose diagnostic output (only visible at LOG_LEVEL=debug)
   debug(message: string, details?: unknown) {
@@ -202,6 +209,7 @@ export const Logger = {
       floorPrice?: number;
       minOffer?: number;
       maxOffer?: number;
+      wallet?: string;
     }
   ) {
     bidStats.increment('bidsPlaced');
@@ -217,7 +225,11 @@ export const Logger = {
       const reason = price === details.minOffer ? 'minOffer' : price === details.maxOffer ? 'maxOffer' : 'calculated';
       console.log(`  Reason:     ${colors.dim}${reason}${colors.reset}`);
     }
-    console.log(`  Type:       ${colors.cyan}${type}${colors.reset}\n`);
+    console.log(`  Type:       ${colors.cyan}${type}${colors.reset}`);
+    if (details?.wallet) {
+      console.log(`  Wallet:     ${colors.dim}${details.wallet}${colors.reset}`);
+    }
+    console.log('');
   },
 
   // Bid adjusted
@@ -277,13 +289,17 @@ export const Logger = {
   },
 
   // Collection offer placed
-  collectionOfferPlaced(collectionSymbol: string, price: number) {
+  collectionOfferPlaced(collectionSymbol: string, price: number, wallet?: string) {
     bidStats.increment('bidsPlaced');
     if (!shouldLog(LogLevel.INFO)) return;
     const timestamp = getTimestamp();
     console.log(`${colors.bright}${colors.green}[${timestamp}] COLLECTION OFFER PLACED${colors.reset}`);
     console.log(`  Collection: ${colors.bright}${collectionSymbol}${colors.reset}`);
-    console.log(`  Price:      ${colors.bright}${colors.green}${formatBTC(price)}${colors.reset}\n`);
+    console.log(`  Price:      ${colors.bright}${colors.green}${formatBTC(price)}${colors.reset}`);
+    if (wallet) {
+      console.log(`  Wallet:     ${colors.dim}${wallet}${colors.reset}`);
+    }
+    console.log('');
   },
 
   // Schedule start

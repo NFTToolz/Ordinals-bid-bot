@@ -307,14 +307,12 @@ export function signCollectionOffer(unsignedData: ICollectionOfferResponseData, 
     Logger.info('[SIGN] Signing 2 inputs');
     for (let index of inputs) {
       offerPsbt.signInput(index, keyPair);
-      offerPsbt.finalizeInput(index);
     }
 
     if (offers.cancelPsbtBase64) {
       cancelPsbt = bitcoin.Psbt.fromBase64(offers.cancelPsbtBase64);
       for (let index of inputs) {
         cancelPsbt.signInput(index, keyPair);
-        cancelPsbt.finalizeInput(index);
       }
       signedCancelledPSBTBase64 = cancelPsbt.toBase64();
     }
@@ -343,7 +341,6 @@ export async function createOffer(
   buyerPaymentAddress: string,
   publicKey: string,
   feerateTier: string,
-  sellerReceiveAddress?: string,
   maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
 ) {
   // Defensive validation - throw error if price exceeds max before any API call
@@ -360,7 +357,6 @@ export async function createOffer(
     buyerPaymentAddress: buyerPaymentAddress,
     buyerPaymentPublicKey: publicKey,
     feerateTier: feerateTier,
-    ...(sellerReceiveAddress && { sellerReceiveAddress })
   };
 
   try {
@@ -412,6 +408,8 @@ export async function createOffer(
 export interface UnsignedPsbtData {
   psbtBase64: string;
   toSignInputs: number[];
+  toSignSigHash?: number;
+  toSignOrdinalInputs?: number[];
 }
 
 export function signData(unsignedData: UnsignedPsbtData, privateKey: string): string {
@@ -420,15 +418,19 @@ export function signData(unsignedData: UnsignedPsbtData, privateKey: string): st
     throw new Error('[SIGN] Invalid unsigned data: missing psbtBase64 or toSignInputs');
   }
 
+  if (unsignedData.toSignInputs.length === 0) {
+    throw new Error('[SIGN] toSignInputs is empty');
+  }
+
   try {
     const psbt = bitcoin.Psbt.fromBase64(unsignedData.psbtBase64);
     const keyPair: ECPairInterface = ECPair.fromWIF(privateKey, network)
 
     for (let index of unsignedData.toSignInputs) {
       psbt.signInput(index, keyPair);
-      psbt.finalizeInput(index);
+      // No finalizeInput — ME expects partial signatures
     }
-    psbt.signAllInputs(keyPair)
+    // No signAllInputs — only sign the inputs ME specifies
 
     const signedBuyingPSBTBase64 = psbt.toBase64();
     return signedBuyingPSBTBase64;
@@ -465,8 +467,7 @@ export async function submitSignedOfferOrder(
   buyerReceiveAddress: string,
   publicKey: string,
   feerateTier: string,
-  privateKey: string,
-  sellerReceiveAddress?: string
+  privateKey: string
 ) {
   const url = 'https://nfttools.pro/magiceden/v2/ord/btc/offers/create';
   const data = {
@@ -478,7 +479,6 @@ export async function submitSignedOfferOrder(
     buyerPaymentAddress: buyerPaymentAddress,
     buyerPaymentPublicKey: publicKey,
     buyerReceiveAddress: buyerReceiveAddress,
-    ...(sellerReceiveAddress && { sellerReceiveAddress })
   };
 
   let errorOccurred = false;

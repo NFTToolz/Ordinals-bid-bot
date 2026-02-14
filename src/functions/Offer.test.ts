@@ -148,7 +148,7 @@ describe('Offer Signing', () => {
       expect(() => signData(invalidData, TEST_WIF)).toThrow('Failed to sign PSBT');
     });
 
-    it('should throw error for empty toSignInputs array (no inputs to sign)', () => {
+    it('should throw error for empty toSignInputs array', () => {
       const psbt = new bitcoin.Psbt({ network: bitcoin.networks.bitcoin });
 
       const data = {
@@ -156,8 +156,7 @@ describe('Offer Signing', () => {
         toSignInputs: [],
       };
 
-      // With empty toSignInputs, signAllInputs will fail because there are no inputs
-      expect(() => signData(data, TEST_WIF)).toThrow('Failed to sign PSBT');
+      expect(() => signData(data, TEST_WIF)).toThrow('toSignInputs is empty');
     });
   });
 
@@ -463,7 +462,6 @@ describe('Offer API Functions', () => {
           'bc1qpayment',
           'publicKey123',
           'halfHour',
-          undefined,
           50000 // maxAllowedPrice lower than price
         )
       ).rejects.toThrow('[SAFETY]');
@@ -481,7 +479,6 @@ describe('Offer API Functions', () => {
         'bc1qpayment',
         'publicKey123',
         'halfHour',
-        undefined,
         100000 // maxAllowedPrice higher than price
       );
 
@@ -504,7 +501,7 @@ describe('Offer API Functions', () => {
       ).rejects.toThrow();
     });
 
-    it('should include sellerReceiveAddress when provided', async () => {
+    it('should not include sellerReceiveAddress in params', async () => {
       const mockResponse = { psbtBase64: 'base64', toSignInputs: [0] };
       vi.mocked(axiosInstance.get).mockResolvedValueOnce({ data: mockResponse });
 
@@ -515,18 +512,12 @@ describe('Offer API Functions', () => {
         'bc1preceive',
         'bc1qpayment',
         'publicKey123',
-        'halfHour',
-        'bc1qseller'
+        'halfHour'
       );
 
-      expect(axiosInstance.get).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          params: expect.objectContaining({
-            sellerReceiveAddress: 'bc1qseller',
-          }),
-        })
-      );
+      const callArgs = vi.mocked(axiosInstance.get).mock.calls[0];
+      const params = callArgs[1]?.params;
+      expect(params).not.toHaveProperty('sellerReceiveAddress');
     });
   });
 
