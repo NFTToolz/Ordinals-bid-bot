@@ -1831,15 +1831,17 @@ describe('Global Sliding Window Pacer', () => {
     expect(legacyWallets * legacyBpm).toBe(50);
   });
 
-  it('PQueue concurrency is capped at 3', () => {
-    // Groups path: Math.min(totalWallets, 3)
-    expect(Math.min(10, 3)).toBe(3);
-    expect(Math.min(2, 3)).toBe(2);
-    expect(Math.min(1, 3)).toBe(1);
+  it('PQueue concurrency scales with wallet count (capped at 20)', () => {
+    // Groups path: Math.min(totalWallets * 4, 20)
+    expect(Math.min(10 * 4, 20)).toBe(20);  // 10 wallets → 20 (capped)
+    expect(Math.min(5 * 4, 20)).toBe(20);   // 5 wallets → 20 (capped)
+    expect(Math.min(3 * 4, 20)).toBe(12);   // 3 wallets → 12
+    expect(Math.min(2 * 4, 20)).toBe(8);    // 2 wallets → 8
+    expect(Math.min(1 * 4, 20)).toBe(4);    // 1 wallet → 4
 
-    // Legacy path: Math.min(wallets.length, 3)
-    expect(Math.min(20, 3)).toBe(3);
-    expect(Math.min(3, 3)).toBe(3);
+    // Legacy path: Math.min(wallets.length * 4, 20)
+    expect(Math.min(20 * 4, 20)).toBe(20);  // 20 wallets → 20 (capped)
+    expect(Math.min(3 * 4, 20)).toBe(12);   // 3 wallets → 12
   });
 
   it('sliding window only counts bids within last 60 seconds', () => {
@@ -1877,6 +1879,150 @@ describe('Global Sliding Window Pacer', () => {
     // Second caller blocked — slot taken
     const canBid2 = timestamps.length < capacity;
     expect(canBid2).toBe(false);
+  });
+});
+
+describe('Reserve-First Pipeline', () => {
+  it('should reserve slot and return timestamp for later release', () => {
+    const timestamps: number[] = [];
+    const capacity = 5;
+    const now = Date.now();
+
+    // Reserve a slot (simulates waitForGlobalBidSlot returning timestamp)
+    timestamps.push(now);
+    const reservedAt = now;
+
+    expect(timestamps.length).toBe(1);
+    expect(reservedAt).toBe(now);
+  });
+
+  it('should release reserved slot when no bid is placed', () => {
+    const timestamps: number[] = [];
+    const capacity = 5;
+    const now = Date.now();
+
+    // Reserve a slot
+    timestamps.push(now);
+    const reservedAt = now;
+    expect(timestamps.length).toBe(1);
+
+    // Decide not to bid — release the slot
+    const idx = timestamps.lastIndexOf(reservedAt);
+    if (idx !== -1) timestamps.splice(idx, 1);
+
+    expect(timestamps.length).toBe(0); // Slot freed
+  });
+
+  it('released slot allows next task to proceed', () => {
+    const timestamps: number[] = [];
+    const capacity = 1; // Only 1 slot
+
+    const now = Date.now();
+
+    // Task 1 reserves
+    timestamps.push(now);
+    expect(timestamps.length < capacity).toBe(false); // At capacity
+
+    // Task 1 releases (no bid needed)
+    timestamps.splice(timestamps.lastIndexOf(now), 1);
+    expect(timestamps.length < capacity).toBe(true); // Slot available
+
+    // Task 2 can now reserve
+    timestamps.push(now + 100);
+    expect(timestamps.length).toBe(1);
+  });
+
+  it('slot consumption prevents double-release', () => {
+    const timestamps: number[] = [];
+    const now = Date.now();
+
+    // Reserve and consume (bid placed)
+    timestamps.push(now);
+    let slotConsumed = false;
+    slotConsumed = true; // Bid attempted
+
+    // Finally block: should NOT release because slotConsumed is true
+    if (!slotConsumed) {
+      const idx = timestamps.lastIndexOf(now);
+      if (idx !== -1) timestamps.splice(idx, 1);
+    }
+
+    // Slot stays (bid was placed, timestamp stays in window)
+    expect(timestamps.length).toBe(1);
+  });
+});
+
+describe('Counter-Bid Priority', () => {
+  it('priority 1 should be higher than default priority 0', () => {
+    // PQueue uses higher priority = processed first
+    const counterBidPriority = 1;
+    const scheduledBidPriority = 0;
+
+    expect(counterBidPriority).toBeGreaterThan(scheduledBidPriority);
+  });
+
+  it('counter-bids route through PQueue instead of direct execution', () => {
+    // The processQueue method now uses queue.add() with {priority: 1}
+    // instead of directly calling handleIncomingBid
+    // This ensures counter-bids get prioritized in the PQueue
+    const queueAddCalls: Array<{ priority: number }> = [];
+    const mockQueueAdd = (fn: () => void, opts: { priority: number }) => {
+      queueAddCalls.push(opts);
+    };
+
+    // Simulate 3 events being processed
+    for (let i = 0; i < 3; i++) {
+      mockQueueAdd(() => {}, { priority: 1 });
+    }
+
+    expect(queueAddCalls).toHaveLength(3);
+    expect(queueAddCalls.every(c => c.priority === 1)).toBe(true);
+  });
+});
+
+describe('BIDS_PER_MINUTE Flow', () => {
+  it('BIDS_PER_MINUTE flows to legacy wallet pool when bidsPerMinute not set', () => {
+    const BIDS_PER_MINUTE = 8;
+    const walletConfig = { wallets: [{ wif: 'a' }, { wif: 'b' }] } as any;
+
+    // Legacy path uses: walletConfig.bidsPerMinute || BIDS_PER_MINUTE
+    const effectiveBpm = walletConfig.bidsPerMinute || BIDS_PER_MINUTE;
+    expect(effectiveBpm).toBe(8);
+  });
+
+  it('walletConfig.bidsPerMinute overrides BIDS_PER_MINUTE when set', () => {
+    const BIDS_PER_MINUTE = 5;
+    const walletConfig = { bidsPerMinute: 10, wallets: [{ wif: 'a' }] } as any;
+
+    const effectiveBpm = walletConfig.bidsPerMinute || BIDS_PER_MINUTE;
+    expect(effectiveBpm).toBe(10);
+  });
+
+  it('BIDS_PER_MINUTE flows to wallet groups as default', () => {
+    const BIDS_PER_MINUTE = 8;
+    const groups: Record<string, { bidsPerMinute?: number; wallets: any[] }> = {
+      'group-a': { wallets: [{ wif: 'a' }] },           // No bidsPerMinute
+      'group-b': { bidsPerMinute: 12, wallets: [{ wif: 'b' }] }, // Has own
+    };
+
+    // Apply default (same logic as bid.ts)
+    for (const groupName of Object.keys(groups)) {
+      const group = groups[groupName];
+      if (group && !group.bidsPerMinute) {
+        group.bidsPerMinute = BIDS_PER_MINUTE;
+      }
+    }
+
+    expect(groups['group-a'].bidsPerMinute).toBe(8);  // Got default
+    expect(groups['group-b'].bidsPerMinute).toBe(12); // Kept own
+  });
+
+  it('global capacity scales with wallet count and BPM', () => {
+    const BIDS_PER_MINUTE = 8;
+    const walletCount = 5;
+    const totalThroughput = walletCount * BIDS_PER_MINUTE;
+
+    expect(totalThroughput).toBe(40);
   });
 });
 

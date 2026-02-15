@@ -111,6 +111,12 @@ export interface StatsDependencies {
     quantity: number;
     walletGroup?: string;
   }>;
+  /** Global pacer throughput metrics */
+  globalPacer: {
+    used: number;
+    capacity: number;
+    queueConcurrency: number;
+  };
 }
 
 /**
@@ -173,5 +179,6 @@ export function buildRuntimeStats(deps: StatsDependencies): BotRuntimeStats {
     bidsTracked: deps.bidsTracked,
     bidHistory: deps.bidHistory,
     collections: deps.collections,
+    globalPacer: deps.globalPacer,
   };
 }

@@ -38,6 +38,11 @@ function createMockDeps(overrides: Partial<StatsDependencies> = {}): StatsDepend
     bidsTracked: 15,
     bidHistory: {},
     collections: [],
+    globalPacer: {
+      used: 3,
+      capacity: 25,
+      queueConcurrency: 20,
+    },
     ...overrides,
   };
 }
@@ -202,5 +207,17 @@ describe('buildRuntimeStats', () => {
     const deps = createMockDeps({ startupEventsDiscarded: 137 });
     const stats = buildRuntimeStats(deps);
     expect(stats.queue.startupEventsDiscarded).toBe(137);
+  });
+
+  it('should pass through globalPacer metrics', () => {
+    const deps = createMockDeps({
+      globalPacer: { used: 10, capacity: 40, queueConcurrency: 20 },
+    });
+    const stats = buildRuntimeStats(deps);
+    expect(stats.globalPacer).toEqual({
+      used: 10,
+      capacity: 40,
+      queueConcurrency: 20,
+    });
   });
 });

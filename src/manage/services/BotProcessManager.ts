@@ -129,6 +129,11 @@ export interface BotRuntimeStats {
     quantity: number;
     walletGroup?: string;
   }>;
+  globalPacer?: {
+    used: number;
+    capacity: number;
+    queueConcurrency: number;
+  };
 }
 
 /**
