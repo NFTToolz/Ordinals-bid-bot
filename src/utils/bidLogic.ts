@@ -134,6 +134,9 @@ export function calculateOutbidPrice(
   maxBid: number
 ): number | null {
   const outBidAmount = Math.round(margin * CONVERSION_RATE);
+  if (outBidAmount <= 0) {
+    return null;
+  }
   const bidPrice = Math.round(currentPrice + outBidAmount);
 
   if (bidPrice > maxBid) {

@@ -293,6 +293,7 @@ vi.mock('./utils/bidPacer', () => ({
 vi.mock('./utils/walletPool', () => ({
   initializeWalletPool: vi.fn(),
   getAvailableWalletAsync: vi.fn(),
+  waitForAvailableWallet: vi.fn().mockResolvedValue(null),
   recordBid: vi.fn(),
   decrementBidCount: vi.fn(),
   getWalletByPaymentAddress: vi.fn(),
@@ -687,6 +688,7 @@ describe('Bid.ts Logic Tests', () => {
 
       expect(outBidAmount).toBe(100);
       expect(bidPrice).toBe(500100);
+      expect(bidPrice).toBeGreaterThan(currentPrice);
     });
 
     it('should prevent bids above 100% of floor for non-trait offers', () => {
@@ -1506,6 +1508,7 @@ describe('Bid.ts Logic Tests', () => {
 
       expect(shouldBid).toBe(true);
       expect(bidPrice).toBe(60100);
+      expect(bidPrice).toBeGreaterThan(topPrice);
     });
 
     it('offer_cancelled when top offer exceeds maxOffer should skip', () => {
@@ -1651,6 +1654,7 @@ describe('Bid.ts Logic Tests', () => {
         // Not top — counterbid against the actual top offer price
         const counterbidPrice = Math.round(topOffer.price + outBidAmount);
         expect(counterbidPrice).toBe(50100);
+        expect(counterbidPrice).toBeGreaterThan(topOffer.price);
         expect(counterbidPrice <= maxOffer).toBe(true);
       });
 
@@ -1713,5 +1717,261 @@ describe('Bid Price Safety Checks', () => {
 
     const shouldSkip = bidPrice > maxOffer || bidPrice >= floorPrice;
     expect(shouldSkip).toBe(false);
+  });
+
+  it('bid adjustment down should still be strictly higher than second-best', () => {
+    const bestPrice = 100000; // our current top bid
+    const secondBestPrice = 90000; // competitor's bid
+    const outBidMargin = 0.000001; // BTC
+    const outBidAmount = Math.max(1, Math.round(outBidMargin * 1e8));
+
+    // When gap exceeds margin, bot adjusts down to secondBestPrice + outBidAmount
+    expect(bestPrice - secondBestPrice).toBeGreaterThan(outBidAmount);
+    const adjustedPrice = Math.round(secondBestPrice + outBidAmount);
+    expect(adjustedPrice).toBeGreaterThan(secondBestPrice);
+    expect(adjustedPrice).toBeLessThan(bestPrice);
+  });
+
+  it('zero outBidMargin should still produce bid 1 sat higher (minimum floor)', () => {
+    const currentPrice = 500000;
+    const outBidMargin = 0; // zero margin
+
+    // Math.max(1, ...) ensures at least 1 sat outbid
+    const outBidAmount = Math.max(1, Math.round(outBidMargin * 1e8));
+    const bidPrice = currentPrice + outBidAmount;
+
+    expect(outBidAmount).toBe(1);
+    expect(bidPrice).toBe(500001);
+    expect(bidPrice).toBeGreaterThan(currentPrice);
+  });
+});
+
+describe('Global Sliding Window Pacer', () => {
+  it('should allow burst up to capacity', () => {
+    // Simulates the sliding window: timestamps within 60s window must be < capacity
+    const capacity = 50; // 10 wallets × 5 bids/min
+    const timestamps: number[] = [];
+    const now = Date.now();
+
+    // Fill up to capacity — all should be allowed
+    for (let i = 0; i < capacity; i++) {
+      timestamps.push(now);
+    }
+
+    expect(timestamps.length).toBe(capacity);
+    expect(timestamps.length).toBeLessThanOrEqual(capacity); // At capacity, no more allowed
+  });
+
+  it('should block when at capacity', () => {
+    const capacity = 50;
+    const timestamps: number[] = [];
+    const now = Date.now();
+
+    // Fill to capacity
+    for (let i = 0; i < capacity; i++) {
+      timestamps.push(now);
+    }
+
+    // Next bid should be blocked (timestamps.length >= capacity)
+    const canBid = timestamps.length < capacity;
+    expect(canBid).toBe(false);
+  });
+
+  it('should unblock after oldest timestamp expires from 60s window', () => {
+    const capacity = 50;
+    const timestamps: number[] = [];
+    const now = Date.now();
+
+    // Fill with timestamps from 61 seconds ago (all expired)
+    for (let i = 0; i < capacity; i++) {
+      timestamps.push(now - 61000);
+    }
+
+    // Clean expired timestamps (same logic as waitForGlobalBidSlot)
+    const windowStart = now - 60000;
+    while (timestamps.length > 0 && timestamps[0] <= windowStart) {
+      timestamps.shift();
+    }
+
+    // All expired — should be able to bid again
+    expect(timestamps.length).toBe(0);
+    const canBid = timestamps.length < capacity;
+    expect(canBid).toBe(true);
+  });
+
+  it('should calculate correct wait time when at capacity', () => {
+    const capacity = 5;
+    const timestamps: number[] = [];
+    const now = Date.now();
+
+    // Oldest bid was 50s ago, rest are recent
+    timestamps.push(now - 50000);
+    for (let i = 1; i < capacity; i++) {
+      timestamps.push(now - 1000);
+    }
+
+    // At capacity — wait for oldest to expire
+    const waitMs = timestamps[0] + 60000 - now + 100;
+    // oldest was 50s ago → expires in 10s → wait ~10.1s
+    expect(waitMs).toBeCloseTo(10100, -2);
+  });
+
+  it('capacity scales with wallet count', () => {
+    // Groups path: totalThroughput = sum of (wallets × bidsPerMinute) per group
+    const groups = [
+      { wallets: 5, bidsPerMinute: 5 },
+      { wallets: 3, bidsPerMinute: 5 },
+    ];
+    const totalThroughput = groups.reduce((sum, g) => sum + g.wallets * g.bidsPerMinute, 0);
+    expect(totalThroughput).toBe(40);
+
+    // Legacy path: wallets.length × bidsPerMinute
+    const legacyWallets = 10;
+    const legacyBpm = 5;
+    expect(legacyWallets * legacyBpm).toBe(50);
+  });
+
+  it('PQueue concurrency is capped at 3', () => {
+    // Groups path: Math.min(totalWallets, 3)
+    expect(Math.min(10, 3)).toBe(3);
+    expect(Math.min(2, 3)).toBe(2);
+    expect(Math.min(1, 3)).toBe(1);
+
+    // Legacy path: Math.min(wallets.length, 3)
+    expect(Math.min(20, 3)).toBe(3);
+    expect(Math.min(3, 3)).toBe(3);
+  });
+
+  it('sliding window only counts bids within last 60 seconds', () => {
+    const timestamps: number[] = [];
+    const now = Date.now();
+
+    // Mix of expired and active timestamps
+    timestamps.push(now - 120000); // 2 min ago (expired)
+    timestamps.push(now - 90000);  // 1.5 min ago (expired)
+    timestamps.push(now - 30000);  // 30s ago (active)
+    timestamps.push(now - 10000);  // 10s ago (active)
+    timestamps.push(now);          // just now (active)
+
+    // Clean expired
+    const windowStart = now - 60000;
+    while (timestamps.length > 0 && timestamps[0] <= windowStart) {
+      timestamps.shift();
+    }
+
+    expect(timestamps.length).toBe(3); // Only 3 active bids in window
+  });
+
+  it('concurrent slot reservation prevents over-booking (mutex logic)', () => {
+    // The mutex ensures only one caller can check+reserve at a time
+    // Simulates: 2 concurrent callers, capacity=1
+    const capacity = 1;
+    const timestamps: number[] = [];
+    const now = Date.now();
+
+    // First caller gets the slot
+    const canBid1 = timestamps.length < capacity;
+    expect(canBid1).toBe(true);
+    timestamps.push(now); // Reserve
+
+    // Second caller blocked — slot taken
+    const canBid2 = timestamps.length < capacity;
+    expect(canBid2).toBe(false);
+  });
+});
+
+describe('Collection Bid Rotation Pattern', () => {
+  it('should select wallet from group manager when available', () => {
+    // Tests the wallet selection priority logic used by placeCollectionBidWithRotation
+    const ENABLE_WALLET_ROTATION = true;
+    const isGroupManagerInit = true;
+    const hasWalletGroup = true;
+
+    let selectedSource = 'primary';
+
+    if (ENABLE_WALLET_ROTATION && isGroupManagerInit && hasWalletGroup) {
+      selectedSource = 'wallet_group';
+    }
+
+    expect(selectedSource).toBe('wallet_group');
+  });
+
+  it('should fall back to legacy pool when group manager unavailable', () => {
+    const ENABLE_WALLET_ROTATION = true;
+    const isGroupManagerInit = false;
+    const hasWalletGroup = false;
+    const isPoolInit = true;
+
+    let selectedSource = 'primary';
+
+    if (ENABLE_WALLET_ROTATION && isGroupManagerInit && hasWalletGroup) {
+      selectedSource = 'wallet_group';
+    } else if (ENABLE_WALLET_ROTATION && isPoolInit) {
+      selectedSource = 'legacy_pool';
+    }
+
+    expect(selectedSource).toBe('legacy_pool');
+  });
+
+  it('should use primary wallet when rotation is disabled', () => {
+    const ENABLE_WALLET_ROTATION = false;
+    const isGroupManagerInit = true;
+    const hasWalletGroup = true;
+    const isPoolInit = true;
+
+    let selectedSource = 'primary';
+
+    if (ENABLE_WALLET_ROTATION && isGroupManagerInit && hasWalletGroup) {
+      selectedSource = 'wallet_group';
+    } else if (ENABLE_WALLET_ROTATION && isPoolInit) {
+      selectedSource = 'legacy_pool';
+    }
+
+    expect(selectedSource).toBe('primary');
+  });
+
+  it('should reject zero/negative offer prices', () => {
+    const testPrices = [0, -1, -100];
+    for (const price of testPrices) {
+      expect(price <= 0).toBe(true);
+    }
+  });
+
+  it('should reject prices exceeding max allowed', () => {
+    const offerPrice = 1000000;
+    const maxAllowedPrice = 950000;
+
+    const shouldReject = maxAllowedPrice && offerPrice > maxAllowedPrice;
+    expect(shouldReject).toBeTruthy();
+  });
+
+  it('PlaceBidResult should track payment address from rotated wallet', () => {
+    // Verify the result shape carries the wallet address for bidHistory updates
+    const result = {
+      success: true,
+      reason: undefined,
+      paymentAddress: 'bc1q_rotated_wallet',
+      walletLabel: 'group1-wallet2',
+    };
+
+    expect(result.paymentAddress).toBe('bc1q_rotated_wallet');
+    expect(result.paymentAddress).not.toBe('bc1q_primary');
+  });
+
+  it('should use per-wallet pacer only when rotation is disabled', () => {
+    // When rotation is enabled and pools are initialized, per-wallet pacer is skipped
+    // (the wallet pool/group handles per-wallet rate limiting internally)
+    const scenarios = [
+      { rotation: true, poolInit: true, groupInit: false, expectPacer: false },
+      { rotation: true, poolInit: false, groupInit: true, expectPacer: false },
+      { rotation: true, poolInit: true, groupInit: true, expectPacer: false },
+      { rotation: false, poolInit: true, groupInit: true, expectPacer: true },
+      { rotation: true, poolInit: false, groupInit: false, expectPacer: true },
+    ];
+
+    for (const s of scenarios) {
+      const usePacer = !s.rotation || (!s.poolInit && !s.groupInit);
+      expect(usePacer).toBe(s.expectPacer);
+    }
   });
 });

@@ -164,6 +164,7 @@ describe('bidLogic', () => {
 
       const result = calculateOutbidPrice(currentPrice, margin, maxBid);
       expect(result).toBe(1001000); // 1000000 + 1000
+      expect(result!).toBeGreaterThan(currentPrice);
     });
 
     it('should return null when outbid would exceed max', () => {
@@ -184,9 +185,22 @@ describe('bidLogic', () => {
       expect(result).toBe(2000000);
     });
 
-    it('should handle zero margin', () => {
+    it('should return null for zero margin (same price is not an outbid)', () => {
       const result = calculateOutbidPrice(1000000, 0, 2000000);
-      expect(result).toBe(1000000);
+      expect(result).toBeNull();
+    });
+
+    it('should return null for negative margin', () => {
+      const result = calculateOutbidPrice(1000000, -0.00001, 2000000);
+      expect(result).toBeNull();
+    });
+
+    it('should produce strictly higher price with minimum valid margin (1 sat)', () => {
+      const currentPrice = 1000000;
+      const margin = 0.00000001; // 1 sat
+      const result = calculateOutbidPrice(currentPrice, margin, 2000000);
+      expect(result).not.toBeNull();
+      expect(result!).toBeGreaterThan(currentPrice);
     });
   });
 

@@ -53,7 +53,6 @@ import { BidHistoryDirtyTracker } from "./utils/fileWriteTracker";
 import {
   // Bid Calculation
   calculateBidPrice,
-  calculateOutbidPrice,
   calculateMinimumBidPrice,
   CONVERSION_RATE as BID_CONVERSION_RATE,
 
@@ -313,10 +312,11 @@ function forceReleaseTokenLock(tokenId: string): void {
   }
 }
 
-// Global minimum bid interval - scales with total wallet throughput capacity
-// Recalculated after wallet init; 2s floor prevents API hammering (30/min hard cap)
-let minBidIntervalMs = 12000; // Default 5/min, recalculated after wallet init
-let lastGlobalBidTime = 0;
+// Global sliding window pacer - tracks bid timestamps in a 60s window
+// Capacity recalculated after wallet init based on total wallet throughput
+const globalBidTimestamps: number[] = [];
+let globalBidCapacity = 5; // Default 5/min, recalculated after wallet init
+const globalPacerMutex = new Mutex();
 
 // Rate limit deduplication: Track recently bid tokens to prevent duplicate bids
 const recentBids: Map<string, number> = new Map();
@@ -340,20 +340,35 @@ function addRecentBid(tokenId: string, timestamp: number): void {
 }
 
 /**
- * Enforce global minimum interval between ALL bids.
- * This prevents rapid-fire bids from overwhelming the API.
- * The actual per-wallet rate limit is enforced by WalletPool's sliding window.
+ * Enforce global bid rate limit using a sliding window counter.
+ * Tracks actual bid timestamps in the last 60s and blocks when at capacity.
+ * Uses a mutex to prevent concurrent over-booking of slots.
+ * The per-wallet rate limit is enforced separately by WalletPool's sliding window.
  */
 async function waitForGlobalBidSlot(): Promise<void> {
-  const now = Date.now();
-  const elapsed = now - lastGlobalBidTime;
-  const waitTime = minBidIntervalMs - elapsed;
+  while (true) {
+    const waitMs = await globalPacerMutex.runExclusive(() => {
+      const now = Date.now();
+      const windowStart = now - 60000;
 
-  if (waitTime > 0) {
-    Logger.info(`[GLOBAL PACER] Waiting ${(waitTime / 1000).toFixed(1)}s before next bid`);
-    await delay(waitTime);
+      // Clean expired timestamps outside 60s window
+      while (globalBidTimestamps.length > 0 && globalBidTimestamps[0] <= windowStart) {
+        globalBidTimestamps.shift();
+      }
+
+      if (globalBidTimestamps.length < globalBidCapacity) {
+        globalBidTimestamps.push(now); // Reserve slot
+        return 0;
+      }
+
+      // Wait for oldest to expire + 100ms buffer
+      return globalBidTimestamps[0] + 60000 - now + 100;
+    });
+
+    if (waitMs <= 0) return; // Slot reserved
+    Logger.info(`[GLOBAL PACER] At capacity (${globalBidCapacity}/min), waiting ${(waitMs / 1000).toFixed(1)}s`);
+    await delay(waitMs); // Wait OUTSIDE mutex, then retry
   }
-  lastGlobalBidTime = Date.now();
 }
 
 // Purchase deduplication: Track processed purchase event IDs with timestamps to prevent double-counting
@@ -910,8 +925,8 @@ const BID_HISTORY_MAX_AGE_MS = BOT_CONSTANTS.BID_HISTORY_TTL_MS;
 const BID_HISTORY_CLEANUP_INTERVAL_MS = BOT_CONSTANTS.BID_HISTORY_CLEANUP_INTERVAL_MS;
 const MAX_BIDS_PER_COLLECTION = BOT_CONSTANTS.MAX_BIDS_PER_COLLECTION;
 
-// Must be 1 to ensure pacer works correctly - prevents race conditions where multiple
-// tasks call waitForSlot() before any recordBid() completes
+// Starts at 1, increased after wallet init to allow concurrent bids from different wallets.
+// Global pacer mutex + per-wallet sliding windows prevent rate limit violations.
 const queue = new PQueue({
   concurrency: 1
 });
@@ -1190,7 +1205,8 @@ class EventManager {
       const publicKey = keyPair.publicKey.toString('hex');
       const buyerPaymentAddress = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: network }).address as string
       // Use Math.round to prevent floating-point drift (e.g., 0.000001 * 1e8 = 99.99999999)
-      const outBidAmount = Math.round(outBidMargin * 1e8)
+      // Math.max(1, ...) ensures outbid is always at least 1 sat higher (same price loses to earlier bidder)
+      const outBidAmount = Math.max(1, Math.round(outBidMargin * 1e8))
       const maxFloorBid = collection.offerType === "ITEM" && collection.traits && collection.traits.length > 0
         ? collection.maxFloorBid
         : (collection.maxFloorBid <= 100 ? collection.maxFloorBid : 100);
@@ -1591,21 +1607,19 @@ class EventManager {
                 }
               }
               const feeSatsPerVbyte = collection.feeSatsPerVbyte || 28
-              try {
-                if (bidPrice > maxOffer) {
-                  Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed max', +(incomingBidAmount), bidPrice, maxOffer);
-                } else if (bidPrice >= floorPrice) {
-                  Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed floor price', +(incomingBidAmount), bidPrice, floorPrice);
-                } else {
-                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, undefined, buyerPaymentAddress)
+              if (bidPrice > maxOffer) {
+                Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed max', +(incomingBidAmount), bidPrice, maxOffer);
+              } else if (bidPrice >= floorPrice) {
+                Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Counter-bid would exceed floor price', +(incomingBidAmount), bidPrice, floorPrice);
+              } else {
+                const result = await placeCollectionBidWithRotation(collection, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, undefined)
+                if (result.success) {
                   bidHistory[collectionSymbol].highestCollectionOffer = {
                     price: bidPrice,
-                    buyerPaymentAddress: buyerPaymentAddress
+                    buyerPaymentAddress: result.paymentAddress || buyerPaymentAddress
                   }
-                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
+                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(result.walletLabel, result.paymentAddress || buyerPaymentAddress));
                 }
-              } catch (error: unknown) {
-                Logger.error(`[WS] Failed to place collection bid for ${collectionSymbol}`, getErrorMessage(error));
               }
             } finally {
               releaseTokenLock(collectionSymbol);
@@ -1665,11 +1679,13 @@ class EventManager {
             }
 
             const feeSatsPerVbyte = collection.feeSatsPerVbyte || 28;
-            await placeCollectionBid(bidPrice, expiration, collectionSymbol,
-              buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte,
-              maxOffer, undefined, buyerPaymentAddress);
-            bidHistory[collectionSymbol].highestCollectionOffer = { price: bidPrice, buyerPaymentAddress };
-            Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
+            const result = await placeCollectionBidWithRotation(collection, bidPrice, expiration, collectionSymbol,
+              buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte,
+              maxOffer, undefined);
+            if (result.success) {
+              bidHistory[collectionSymbol].highestCollectionOffer = { price: bidPrice, buyerPaymentAddress: result.paymentAddress || buyerPaymentAddress };
+              Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(result.walletLabel, result.paymentAddress || buyerPaymentAddress));
+            }
           } catch (error) {
             Logger.error(`[WS] Failed to counter-bid collection offer for ${collectionSymbol}`, getErrorMessage(error));
           } finally {
@@ -2287,7 +2303,7 @@ class EventManager {
                     successfulBidsPlaced++;
                     if (secondTopOffer) {
                       const secondBestPrice = secondTopOffer.price
-                      const outBidAmount = Math.round(outBidMargin * CONVERSION_RATE)
+                      const outBidAmount = Math.max(1, Math.round(outBidMargin * CONVERSION_RATE))
                       if (bestPrice - secondBestPrice > outBidAmount) {
                         // Round after arithmetic to prevent floating-point drift
                         const bidPrice = Math.round(secondBestPrice + outBidAmount)
@@ -2415,19 +2431,16 @@ class EventManager {
             const bidPrice = currentPrice + Math.round(outBidMargin * CONVERSION_RATE)
 
             if (bidPrice <= maxOffer) {
-              try {
-                if (bidPrice < floorPrice) {
-                  await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
+              if (bidPrice < floorPrice) {
+                const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                if (result.success) {
                   bidHistory[collectionSymbol].offerType = "COLLECTION"
-
                   bidHistory[collectionSymbol].highestCollectionOffer = {
                     price: bidPrice,
-                    buyerPaymentAddress: buyerPaymentAddress
+                    buyerPaymentAddress: result.paymentAddress || buyerPaymentAddress
                   }
-                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
+                  Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(result.walletLabel, result.paymentAddress || buyerPaymentAddress));
                 }
-              } catch (error) {
-                Logger.error(`Failed to place collection offer for ${collectionSymbol}`, error);
               }
             } else {
               Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Calculated offer exceeds maxBid', currentPrice, bidPrice, maxOffer);
@@ -2436,7 +2449,7 @@ class EventManager {
           } else {
             if (secondTopOffer) {
               const secondBestPrice = secondTopOffer.price.amount
-              const outBidAmount = Math.round(outBidMargin * CONVERSION_RATE)
+              const outBidAmount = Math.max(1, Math.round(outBidMargin * CONVERSION_RATE))
               if (bestPrice - secondBestPrice > outBidAmount) {
                 // Round after arithmetic to prevent floating-point drift
                 const bidPrice = Math.round(secondBestPrice + outBidAmount)
@@ -2469,18 +2482,16 @@ class EventManager {
                 }
 
                 if (bidPrice <= maxOffer) {
-                  try {
-                    if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
+                  if (bidPrice < floorPrice) {
+                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                    if (result.success) {
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
-                        buyerPaymentAddress: buyerPaymentAddress
+                        buyerPaymentAddress: result.paymentAddress || buyerPaymentAddress
                       }
                       Logger.bidAdjusted(collectionSymbol, 'COLLECTION', bestPrice, bidPrice);
                     }
-                  } catch (error) {
-                    Logger.error(`Failed to adjust collection offer for ${collectionSymbol}`, error);
                   }
                 } else {
                   Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Adjusted offer would exceed maxBid', secondBestPrice, bidPrice, maxOffer);
@@ -2517,18 +2528,16 @@ class EventManager {
                 }
 
                 if (bidPrice <= maxOffer) {
-                  try {
-                    if (bidPrice < floorPrice) {
-                      await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
+                  if (bidPrice < floorPrice) {
+                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                    if (result.success) {
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
-                        buyerPaymentAddress: buyerPaymentAddress
+                        buyerPaymentAddress: result.paymentAddress || buyerPaymentAddress
                       }
                       Logger.bidAdjusted(collectionSymbol, 'COLLECTION', bestPrice, bidPrice);
                     }
-                  } catch (error) {
-                    Logger.error(`Failed to adjust collection offer for ${collectionSymbol}`, error);
                   }
                 } else {
                   Logger.bidSkipped(collectionSymbol, 'COLLECTION', 'Calculated bid exceeds maxBid', bidPrice, bidPrice, maxOffer);
@@ -2540,16 +2549,14 @@ class EventManager {
           const bidPrice = minOffer
           if (bidPrice <= maxOffer) {
             if (bidPrice < floorPrice) {
-              try {
-                await placeCollectionBid(bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, buyerPaymentAddress)
+              const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+              if (result.success) {
                 bidHistory[collectionSymbol].offerType = "COLLECTION"
                 bidHistory[collectionSymbol].highestCollectionOffer = {
                   price: bidPrice,
-                  buyerPaymentAddress: buyerPaymentAddress
+                  buyerPaymentAddress: result.paymentAddress || buyerPaymentAddress
                 }
-                Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(undefined, buyerPaymentAddress));
-              } catch (error) {
-                Logger.error(`Failed to place initial collection offer for ${collectionSymbol}`, error);
+                Logger.collectionOfferPlaced(collectionSymbol, bidPrice, formatWalletForLog(result.walletLabel, result.paymentAddress || buyerPaymentAddress));
               }
             }
           }
@@ -3180,8 +3187,10 @@ if (ENABLE_WALLET_ROTATION) {
           }
         }
         if (totalThroughput > 0) {
-          minBidIntervalMs = Math.max(2000, Math.floor(60000 / totalThroughput));
-          Logger.info(`[GLOBAL PACER] Interval set to ${(minBidIntervalMs / 1000).toFixed(1)}s (${totalThroughput} bids/min across all wallets)`);
+          globalBidCapacity = totalThroughput;
+          queue.concurrency = Math.min(totalWallets, 3);
+          Logger.info(`[GLOBAL PACER] Capacity set to ${globalBidCapacity} bids/min (across all wallets)`);
+          Logger.info(`[BID QUEUE] Concurrency set to ${queue.concurrency}`);
           pacerLimit = totalThroughput;
         }
 
@@ -3196,8 +3205,10 @@ if (ENABLE_WALLET_ROTATION) {
         // Scale global pacer with total wallet throughput
         const totalThroughput = walletConfig.wallets.length * (walletConfig.bidsPerMinute || 5);
         if (totalThroughput > 0) {
-          minBidIntervalMs = Math.max(2000, Math.floor(60000 / totalThroughput));
-          Logger.info(`[GLOBAL PACER] Interval set to ${(minBidIntervalMs / 1000).toFixed(1)}s (${totalThroughput} bids/min across all wallets)`);
+          globalBidCapacity = totalThroughput;
+          queue.concurrency = Math.min(walletConfig.wallets.length, 3);
+          Logger.info(`[GLOBAL PACER] Capacity set to ${globalBidCapacity} bids/min (across all wallets)`);
+          Logger.info(`[BID QUEUE] Concurrency set to ${queue.concurrency}`);
           pacerLimit = totalThroughput;
         }
 
@@ -3836,7 +3847,7 @@ async function placeBidWithRotation(
   }
 
   // Enforce global minimum interval between ALL bids (regardless of wallet rotation)
-  // This prevents API rate limits since Magic Eden limits ~5 bids/min per API key, not per wallet
+  // This prevents rapid-fire bids from overwhelming the API when multiple wallets bid concurrently
   await waitForGlobalBidSlot();
 
   try {
@@ -3914,6 +3925,164 @@ async function placeBidWithRotation(
       // Pass error message so pacer can extract retry duration
       onRateLimitError(errorMessage);
       Logger.pacer.error(tokenId);
+    }
+
+    return { success: false, reason: isRateLimitError ? 'rate_limit' : 'error' };
+  }
+}
+
+/**
+ * Place a collection bid with optional wallet rotation support.
+ * Mirrors placeBidWithRotation() but for COLLECTION offer types.
+ * When wallet rotation is enabled, selects an available wallet from the group/pool.
+ * Enforces global minimum interval and per-wallet rate limiting.
+ */
+async function placeCollectionBidWithRotation(
+  collectionConfig: CollectionData | null,
+  offerPrice: number,
+  expiration: number,
+  collectionSymbol: string,
+  fallbackReceiveAddress: string,
+  fallbackPaymentAddress: string,
+  fallbackPublicKey: string,
+  fallbackPrivateKey: string,
+  feeSatsPerVbyte: number = 28,
+  maxAllowedPrice?: number,
+  balance?: number
+): Promise<PlaceBidResult> {
+  let buyerTokenReceiveAddress = fallbackReceiveAddress;
+  let buyerPaymentAddress = fallbackPaymentAddress;
+  let publicKey = fallbackPublicKey;
+  let privateKey = fallbackPrivateKey;
+  let walletLabel: string | undefined;
+  let usingWalletPool = false;
+
+  // Priority 1: Use wallet group manager if enabled and collection has walletGroup assigned
+  if (ENABLE_WALLET_ROTATION && isWalletGroupManagerInitialized() && collectionConfig?.walletGroup) {
+    const manager = getWalletGroupManager();
+    const groupName = collectionConfig.walletGroup;
+
+    if (manager.hasGroup(groupName)) {
+      const wallet = await manager.waitForAvailableWallet(groupName, BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
+      if (!wallet) {
+        Logger.wallet.allRateLimited(collectionSymbol);
+        return { success: false, reason: 'wallet_exhausted' };
+      }
+
+      buyerTokenReceiveAddress = CENTRALIZE_RECEIVE_ADDRESS
+        ? fallbackReceiveAddress
+        : wallet.config.receiveAddress;
+      buyerPaymentAddress = wallet.paymentAddress;
+      publicKey = wallet.publicKey;
+      privateKey = wallet.config.wif;
+      walletLabel = wallet.config.label;
+      usingWalletPool = true;
+
+      Logger.wallet.using(walletLabel || 'unnamed', collectionSymbol);
+    }
+  }
+  // Priority 2: Legacy single wallet pool (backward compatibility)
+  else if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
+    const wallet = await waitForAvailableWallet(BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
+    if (!wallet) {
+      Logger.wallet.allRateLimited(collectionSymbol);
+      return { success: false, reason: 'wallet_exhausted' };
+    }
+
+    buyerTokenReceiveAddress = CENTRALIZE_RECEIVE_ADDRESS
+      ? fallbackReceiveAddress
+      : wallet.config.receiveAddress;
+    buyerPaymentAddress = wallet.paymentAddress;
+    publicKey = wallet.publicKey;
+    privateKey = wallet.config.wif;
+    walletLabel = wallet.config.label;
+    usingWalletPool = true;
+
+    Logger.wallet.using(walletLabel || 'unnamed', collectionSymbol);
+  }
+
+  // Validate offer price before proceeding to API call
+  if (offerPrice <= 0) {
+    Logger.warning(`[COLLECTION BID] Rejected zero/negative offer price (${offerPrice}) for ${collectionSymbol}`);
+    return { success: false, reason: 'invalid_price' };
+  }
+  if (maxAllowedPrice && offerPrice > maxAllowedPrice) {
+    Logger.warning(`[COLLECTION BID] Rejected offer price ${offerPrice} exceeding max ${maxAllowedPrice} for ${collectionSymbol}`);
+    return { success: false, reason: 'price_exceeds_max' };
+  }
+
+  // Enforce global minimum interval between ALL bids (regardless of wallet rotation)
+  // This prevents rapid-fire bids from overwhelming the API when multiple wallets bid concurrently
+  await waitForGlobalBidSlot();
+
+  try {
+    // Only use per-wallet pacer if wallet rotation is disabled
+    // When wallet rotation is enabled, the wallet pool/group handles per-wallet rate limiting
+    if (!ENABLE_WALLET_ROTATION || (!isWalletPoolInitialized() && !isWalletGroupManagerInitialized())) {
+      await waitForBidSlot();
+    }
+
+    const success = await placeCollectionBid(
+      offerPrice,
+      expiration,
+      collectionSymbol,
+      buyerTokenReceiveAddress,
+      publicKey,
+      privateKey,
+      feeSatsPerVbyte,
+      maxAllowedPrice,
+      balance,
+      buyerPaymentAddress
+    );
+
+    if (success) {
+      recordPacerBid();
+    } else {
+      if (usingWalletPool) {
+        if (isWalletGroupManagerInitialized() && collectionConfig?.walletGroup) {
+          const manager = getWalletGroupManager();
+          const walletInfo = manager.getWalletByPaymentAddress(buyerPaymentAddress);
+          if (walletInfo) {
+            manager.decrementBidCount(walletInfo.groupName, buyerPaymentAddress);
+          }
+        } else {
+          decrementWalletBidCount(buyerPaymentAddress);
+        }
+      }
+    }
+
+    return {
+      success: success === true,
+      reason: success ? undefined : 'bid_rejected',
+      paymentAddress: success ? buyerPaymentAddress : undefined,
+      walletLabel,
+    };
+  } catch (error: unknown) {
+    if (usingWalletPool) {
+      if (isWalletGroupManagerInitialized() && collectionConfig?.walletGroup) {
+        const manager = getWalletGroupManager();
+        const walletInfo = manager.getWalletByPaymentAddress(buyerPaymentAddress);
+        if (walletInfo) {
+          manager.decrementBidCount(walletInfo.groupName, buyerPaymentAddress);
+        }
+      } else {
+        decrementWalletBidCount(buyerPaymentAddress);
+      }
+    }
+
+    const errorData = getErrorResponseData(error);
+    const errorDataStr = typeof errorData === 'object' && errorData !== null && 'error' in errorData
+      ? String((errorData as { error: unknown }).error)
+      : typeof errorData === 'string' ? errorData : '';
+    const errorMessage = errorDataStr || getErrorMessage(error);
+    const isRateLimitError =
+      getErrorStatus(error) === 429 ||
+      errorMessage.toLowerCase().includes('rate limit') ||
+      errorMessage.toLowerCase().includes('too many requests');
+
+    if (isRateLimitError) {
+      onRateLimitError(errorMessage);
+      Logger.pacer.error(collectionSymbol);
     }
 
     return { success: false, reason: isRateLimitError ? 'rate_limit' : 'error' };
