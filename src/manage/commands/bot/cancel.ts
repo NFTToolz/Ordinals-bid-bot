@@ -51,6 +51,7 @@ config();
 const network = bitcoin.networks.bitcoin;
 
 const ENABLE_WALLET_ROTATION = process.env.ENABLE_WALLET_ROTATION === 'true';
+const CENTRALIZE_RECEIVE_ADDRESS = process.env.CENTRALIZE_RECEIVE_ADDRESS === 'true';
 
 const tinysecp: TinySecp256k1Interface = require('tiny-secp256k1');
 const ECPair: ECPairAPI = ECPairFactory(tinysecp);
@@ -79,6 +80,7 @@ interface WalletOfferCounts {
 interface FetchOfferCountsResult {
   counts: WalletOfferCounts[];
   fetchedOffers: Map<string, IOffer[]>;
+  warnings: string[];
 }
 
 export type CancelProgressCallback = (canceled: number, detail?: string) => void;
@@ -97,7 +99,7 @@ export function resetBotData(): { historyReset: boolean } {
   return { historyReset };
 }
 
-function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInfo[] {
+function getReceiveAddressesToCheck(collections: CollectionConfig[], warnings: string[]): AddressInfo[] {
   const addresses: AddressInfo[] = [];
   const seenAddresses = new Set<string>();
 
@@ -126,9 +128,11 @@ function getReceiveAddressesToCheck(collections: CollectionConfig[]): AddressInf
             seenAddresses.add(wallet.receiveAddress.toLowerCase());
           }
         }
+      } else {
+        warnings.push('Could not load rotation wallets (encrypted file — unlock wallets first)');
       }
     } catch (error) {
-      // Failed to load wallet config
+      warnings.push(`Failed to load rotation wallets: ${getErrorMessage(error)}`);
     }
   }
 
@@ -197,11 +201,13 @@ async function cancelAllItemOffers(
 
   for (const addr of addresses) {
     try {
+      // When !CENTRALIZE_RECEIVE_ADDRESS, offers are stored under payment address
+      const queryAddress = CENTRALIZE_RECEIVE_ADDRESS ? addr.address : addr.paymentAddress;
       let offers: IOffer[];
-      if (prefetchedOffers?.has(addr.address)) {
-        offers = prefetchedOffers.get(addr.address)!;
+      if (prefetchedOffers?.has(queryAddress)) {
+        offers = prefetchedOffers.get(queryAddress)!;
       } else {
-        const offerData = await getUserOffers(addr.address);
+        const offerData = await getUserOffers(queryAddress);
         offers = offerData?.offers ?? [];
       }
 
@@ -253,11 +259,13 @@ async function cancelAllCollectionOffers(
 
       try {
         const bestOffers = await getBestCollectionOffer(item.collectionSymbol);
-        // Check all our receive addresses from all wallets (supports wallet groups)
-        const ourReceiveAddresses = getAllOurReceiveAddresses();
+        // When !CENTRALIZE_RECEIVE_ADDRESS, offers are stored under payment addresses
+        const ourAddresses = CENTRALIZE_RECEIVE_ADDRESS
+          ? getAllOurReceiveAddresses()
+          : getAllOurPaymentAddresses();
         const ourOffer = bestOffers?.offers?.find(
           (offer: ICollectionOffer) =>
-            ourReceiveAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
+            ourAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
         ) as ICollectionOffer | undefined;
 
         if (ourOffer) {
@@ -274,13 +282,16 @@ async function cancelAllCollectionOffers(
   return { canceled, errors };
 }
 
-function ensureWalletPoolInitialized(): void {
+function ensureWalletPoolInitialized(warnings: string[]): void {
   if (!ENABLE_WALLET_ROTATION) return;
   if (isWalletPoolInitialized()) return;
 
   try {
     const walletsData = loadWallets();
-    if (!walletsData) return;
+    if (!walletsData) {
+      warnings.push('Could not load rotation wallets (encrypted file — unlock wallets first)');
+      return;
+    }
 
     if (isGroupsFormat(walletsData)) {
       const allWallets: WalletConfig[] = [];
@@ -297,35 +308,42 @@ function ensureWalletPoolInitialized(): void {
       initializeWalletPool(walletsData.wallets, walletsData.bidsPerMinute || 5, network);
     }
   } catch (error) {
-    // Failed to initialize wallet pool
+    warnings.push(`Failed to initialize wallet pool: ${getErrorMessage(error)}`);
   }
 }
 
 export async function fetchOfferCounts(): Promise<FetchOfferCountsResult> {
+  const warnings: string[] = [];
   const collections = loadCollections();
-  ensureWalletPoolInitialized();
-  const addresses = getReceiveAddressesToCheck(collections);
+  ensureWalletPoolInitialized(warnings);
+  const addresses = getReceiveAddressesToCheck(collections, warnings);
   const counts: WalletOfferCounts[] = [];
   const fetchedOffers = new Map<string, IOffer[]>();
 
   for (const addr of addresses) {
     let itemOffers = 0;
     let collectionOffers = 0;
+    const label = addr.label || addr.address.slice(0, 10) + '...';
 
     // Count item offers
+    // When !CENTRALIZE_RECEIVE_ADDRESS, offers are stored under payment address
+    const queryAddress = CENTRALIZE_RECEIVE_ADDRESS ? addr.address : addr.paymentAddress;
     try {
-      const offerData = await getUserOffers(addr.address);
+      const offerData = await getUserOffers(queryAddress);
       const offers = offerData?.offers;
       if (Array.isArray(offers)) {
         itemOffers = offers.length;
-        fetchedOffers.set(addr.address, offers);
+        fetchedOffers.set(queryAddress, offers);
       }
-    } catch {
-      // Default to 0
+    } catch (error) {
+      warnings.push(`Failed to check item offers for ${label}: ${getErrorMessage(error)}`);
     }
 
     // Count collection offers for COLLECTION-type collections matching this wallet
-    const ourReceiveAddresses = getAllOurReceiveAddresses();
+    // When !CENTRALIZE_RECEIVE_ADDRESS, offers are stored under payment addresses
+    const ourAddresses = CENTRALIZE_RECEIVE_ADDRESS
+      ? getAllOurReceiveAddresses()
+      : getAllOurPaymentAddresses();
     const collectionTypeConfigs = collections.filter(c => c.offerType === 'COLLECTION');
     for (const col of collectionTypeConfigs) {
       const colReceiveAddress = col.tokenReceiveAddress ?? getReceiveAddress();
@@ -334,13 +352,13 @@ export async function fetchOfferCounts(): Promise<FetchOfferCountsResult> {
         const bestOffers = await getBestCollectionOffer(col.collectionSymbol);
         const ourOffer = bestOffers?.offers?.find(
           (offer: ICollectionOffer) =>
-            ourReceiveAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
+            ourAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
         );
         if (ourOffer) {
           collectionOffers++;
         }
-      } catch {
-        // Default to 0
+      } catch (error) {
+        warnings.push(`Failed to check collection offers for ${col.collectionSymbol}: ${getErrorMessage(error)}`);
       }
     }
 
@@ -354,7 +372,7 @@ export async function fetchOfferCounts(): Promise<FetchOfferCountsResult> {
     }
   }
 
-  return { counts, fetchedOffers };
+  return { counts, fetchedOffers, warnings };
 }
 
 export async function performCancellation(
@@ -363,9 +381,9 @@ export async function performCancellation(
 ): Promise<CancelResult> {
   const collections = loadCollections();
 
-  ensureWalletPoolInitialized();
+  ensureWalletPoolInitialized([]);
 
-  const addresses = getReceiveAddressesToCheck(collections);
+  const addresses = getReceiveAddressesToCheck(collections, []);
   const itemResult = await cancelAllItemOffers(addresses, prefetchedOffers, onProgress);
   const collectionResult = await cancelAllCollectionOffers(collections, onProgress, itemResult.canceled);
 
@@ -382,17 +400,19 @@ export async function cancelOffersForCollection(
 ): Promise<CancelResult> {
   const collections = loadCollections();
 
-  ensureWalletPoolInitialized();
+  ensureWalletPoolInitialized([]);
 
   let itemOffersCanceled = 0;
   let collectionOffersCanceled = 0;
   const errors: string[] = [];
 
   // Cancel item offers for this collection
-  const addresses = getReceiveAddressesToCheck(collections);
+  const addresses = getReceiveAddressesToCheck(collections, []);
   for (const addr of addresses) {
     try {
-      const offerData = await getUserOffers(addr.address);
+      // When !CENTRALIZE_RECEIVE_ADDRESS, offers are stored under payment address
+      const queryAddress = CENTRALIZE_RECEIVE_ADDRESS ? addr.address : addr.paymentAddress;
+      const offerData = await getUserOffers(queryAddress);
       const offers = offerData?.offers;
 
       if (Array.isArray(offers) && offers.length > 0) {
@@ -416,10 +436,13 @@ export async function cancelOffersForCollection(
   if (offerType === 'COLLECTION') {
     try {
       const bestOffers = await getBestCollectionOffer(collectionSymbol);
-      const ourReceiveAddresses = getAllOurReceiveAddresses();
+      // When !CENTRALIZE_RECEIVE_ADDRESS, offers are stored under payment addresses
+      const ourAddresses = CENTRALIZE_RECEIVE_ADDRESS
+        ? getAllOurReceiveAddresses()
+        : getAllOurPaymentAddresses();
       const ourOffer = bestOffers?.offers?.find(
         (offer: ICollectionOffer) =>
-          ourReceiveAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
+          ourAddresses.has(offer.btcParams.makerOrdinalReceiveAddress.toLowerCase())
       ) as ICollectionOffer | undefined;
 
       if (ourOffer) {
@@ -447,15 +470,28 @@ export async function cancelOffersForCollection(
 export async function cancelOffers(): Promise<void> {
   showSectionHeader('CANCEL ALL OFFERS');
 
-  const { counts, fetchedOffers } = await withSpinner('Checking active offers...', fetchOfferCounts);
+  const { counts, fetchedOffers, warnings } = await withSpinner('Checking active offers...', fetchOfferCounts);
 
   const totalItem = counts.reduce((sum, c) => sum + c.itemOffers, 0);
   const totalCollection = counts.reduce((sum, c) => sum + c.collectionOffers, 0);
   const total = totalItem + totalCollection;
 
   if (total === 0) {
-    showInfo('No active offers found');
+    if (warnings.length > 0) {
+      showWarning('Could not fully check for active offers:');
+      warnings.forEach((w) => showWarning(`  ${w}`));
+      console.log('');
+      showInfo('No offers found, but results may be incomplete due to errors above');
+    } else {
+      showInfo('No active offers found');
+    }
     return;
+  }
+
+  if (warnings.length > 0) {
+    showWarning('Some checks failed (results may be incomplete):');
+    warnings.forEach((w) => showWarning(`  ${w}`));
+    console.log('');
   }
 
   console.log('');

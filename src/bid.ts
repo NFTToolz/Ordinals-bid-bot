@@ -892,9 +892,13 @@ function getReceiveAddressesToQuery(): string[] {
     return addresses;
   }
 
+  // When !CENTRALIZE_RECEIVE_ADDRESS, offers are stored under payment addresses (bc1q...)
+  // so we must query payment addresses instead of receive addresses (bc1p...)
+
   // Add wallet group manager addresses if enabled
   if (ENABLE_WALLET_ROTATION && isWalletGroupManagerInitialized()) {
-    for (const addr of getWalletGroupManager().getAllReceiveAddresses()) {
+    const addrs = getWalletGroupManager().getAllPaymentAddresses();
+    for (const addr of addrs) {
       if (!seen.has(addr.toLowerCase())) {
         addresses.push(addr);
         seen.add(addr.toLowerCase());
@@ -904,7 +908,8 @@ function getReceiveAddressesToQuery(): string[] {
 
   // Add legacy wallet pool addresses if enabled
   if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    for (const addr of getWalletPool().getAllReceiveAddresses()) {
+    const addrs = getWalletPool().getAllPaymentAddresses();
+    for (const addr of addrs) {
       if (!seen.has(addr.toLowerCase())) {
         addresses.push(addr);
         seen.add(addr.toLowerCase());
@@ -912,9 +917,14 @@ function getReceiveAddressesToQuery(): string[] {
     }
   }
 
-  // Add default address
-  if (TOKEN_RECEIVE_ADDRESS && !seen.has(TOKEN_RECEIVE_ADDRESS.toLowerCase())) {
-    addresses.push(TOKEN_RECEIVE_ADDRESS);
+  // Primary wallet: derive payment address from FUNDING_WIF
+  if (hasFundingWIF()) {
+    const wif = getFundingWIF();
+    const keyPair = ECPair.fromWIF(wif, network);
+    const payAddr = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network }).address;
+    if (payAddr && !seen.has(payAddr.toLowerCase())) {
+      addresses.push(payAddr);
+    }
   }
 
   return addresses;
@@ -2048,6 +2058,8 @@ class EventManager {
       let bestOfferIssue = 0;          // bestOffer is null/empty/malformed
       let bidsFailed = 0;              // Bids that failed (rate limit, wallet exhaustion, API error, etc.)
       let successfulBidsPlaced = 0;    // Tokens where we have/placed a valid bid (counts toward bidCount target)
+      let walletExhaustedForCycle = false; // Set when wallets are rate-limited, skips remaining tokens
+      let skippedWalletExhausted = 0;     // Count of tokens skipped due to wallet exhaustion
       const targetBidCount = bidCount;
 
       if (offerType.toUpperCase() === "ITEM") {
@@ -2063,6 +2075,10 @@ class EventManager {
             .map(token => async () => {
               // Early exit if we've placed enough successful bids
               if (successfulBidsPlaced >= targetBidCount) {
+                return;
+              }
+              if (walletExhaustedForCycle) {
+                skippedWalletExhausted++;
                 return;
               }
 
@@ -2188,6 +2204,10 @@ class EventManager {
                         } else {
                           Logger.warning(`[BID] Bid failed for ${collectionSymbol} ${tokenId.slice(-8)}: ${result.reason || 'unknown'}`);
                           bidsFailed++;
+                          if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+                            walletExhaustedForCycle = true;
+                            Logger.info(`[SCHEDULE] ${collectionSymbol}: Wallets exhausted for this cycle, skipping remaining tokens`);
+                          }
                         }
                       } catch (error) {
                         Logger.error(`Failed to place bid for ${collectionSymbol} ${tokenId}`, error);
@@ -2235,6 +2255,10 @@ class EventManager {
                       } else {
                         Logger.warning(`[BID] Bid failed for ${collectionSymbol} ${tokenId.slice(-8)}: ${result.reason || 'unknown'}`);
                         bidsFailed++;
+                        if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+                          walletExhaustedForCycle = true;
+                          Logger.info(`[SCHEDULE] ${collectionSymbol}: Wallets exhausted for this cycle, skipping remaining tokens`);
+                        }
                       }
                     } catch (error) {
                       Logger.error(`Failed to place minimum bid for ${collectionSymbol} ${tokenId}`, error);
@@ -2289,6 +2313,9 @@ class EventManager {
                           Logger.bidPlaced(collectionSymbol, tokenId, bidPrice, 'OUTBID', { floorPrice, minOffer, maxOffer, wallet: formatWalletForLog(result.walletLabel, result.paymentAddress) });
                           newBidsPlaced++;
                           successfulBidsPlaced++;
+                        } else if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+                          walletExhaustedForCycle = true;
+                          Logger.info(`[SCHEDULE] ${collectionSymbol}: Wallets exhausted for this cycle, skipping remaining tokens`);
                         }
                       } catch (error) {
                         Logger.error(`Failed to outbid for ${collectionSymbol} ${tokenId}`, error);
@@ -2321,6 +2348,9 @@ class EventManager {
                               }
                               Logger.bidAdjusted(collectionSymbol, tokenId, bestPrice, bidPrice);
                               bidsAdjusted++;
+                            } else if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+                              walletExhaustedForCycle = true;
+                              Logger.info(`[SCHEDULE] ${collectionSymbol}: Wallets exhausted for this cycle, skipping remaining tokens`);
                             }
                           } catch (error) {
                             Logger.error(`Failed to adjust bid for ${collectionSymbol} ${tokenId}`, error);
@@ -2349,6 +2379,9 @@ class EventManager {
                               }
                               Logger.bidAdjusted(collectionSymbol, tokenId, bestPrice, bidPrice);
                               bidsAdjusted++;
+                            } else if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+                              walletExhaustedForCycle = true;
+                              Logger.info(`[SCHEDULE] ${collectionSymbol}: Wallets exhausted for this cycle, skipping remaining tokens`);
                             }
                           } catch (error) {
                             Logger.error(`Failed to self-adjust bid for ${collectionSymbol} ${tokenId}`, error);
@@ -2583,6 +2616,7 @@ class EventManager {
         currentActiveBids,
         bidCount,
         successfulBidsPlaced,
+        skippedWalletExhausted,
       });
 
       restartState.set(item.collectionSymbol, false);

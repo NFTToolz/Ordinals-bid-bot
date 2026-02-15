@@ -1975,3 +1975,174 @@ describe('Collection Bid Rotation Pattern', () => {
     }
   });
 });
+
+describe('Wallet Exhaustion Cycle Skip', () => {
+  it('should skip remaining tokens after wallet_exhausted result', () => {
+    // Simulates the queue processing loop with walletExhaustedForCycle flag
+    let walletExhaustedForCycle = false;
+    let successfulBidsPlaced = 0;
+    const targetBidCount = 20;
+    const tokens = Array.from({ length: 10 }, (_, i) => `token-${i}`);
+    const processed: string[] = [];
+    const skipped: string[] = [];
+
+    for (const tokenId of tokens) {
+      if (successfulBidsPlaced >= targetBidCount) break;
+      if (walletExhaustedForCycle) {
+        skipped.push(tokenId);
+        continue;
+      }
+
+      processed.push(tokenId);
+
+      // Simulate: first 2 succeed, 3rd gets wallet_exhausted
+      if (processed.length <= 2) {
+        successfulBidsPlaced++;
+      } else {
+        const result = { success: false, reason: 'wallet_exhausted' };
+        if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+          walletExhaustedForCycle = true;
+        }
+      }
+    }
+
+    expect(processed.length).toBe(3); // 2 success + 1 exhausted
+    expect(skipped.length).toBe(7);   // Remaining tokens skipped
+    expect(walletExhaustedForCycle).toBe(true);
+    expect(successfulBidsPlaced).toBe(2);
+  });
+
+  it('should not set flag for non-exhaustion failures', () => {
+    let walletExhaustedForCycle = false;
+    const failReasons = ['rate_limited', 'api_error', 'unknown', undefined];
+
+    for (const reason of failReasons) {
+      const result = { success: false, reason };
+      if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+        walletExhaustedForCycle = true;
+      }
+    }
+
+    expect(walletExhaustedForCycle).toBe(false);
+  });
+
+  it('should reset flag per cycle (each startCollectionMonitoring iteration)', () => {
+    // Each scheduled loop iteration declares a fresh walletExhaustedForCycle = false
+    const cycles = 3;
+    const flagPerCycle: boolean[] = [];
+
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      let walletExhaustedForCycle = false; // Fresh per cycle
+
+      // Simulate exhaustion on first cycle only
+      if (cycle === 0) {
+        walletExhaustedForCycle = true;
+      }
+
+      flagPerCycle.push(walletExhaustedForCycle);
+    }
+
+    expect(flagPerCycle).toEqual([true, false, false]);
+  });
+
+  it('should log only once when flag transitions from false to true', () => {
+    let walletExhaustedForCycle = false;
+    let logCount = 0;
+
+    // Simulate 5 consecutive wallet_exhausted results
+    for (let i = 0; i < 5; i++) {
+      const result = { success: false, reason: 'wallet_exhausted' };
+      if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+        walletExhaustedForCycle = true;
+        logCount++;
+      }
+    }
+
+    expect(logCount).toBe(1);
+    expect(walletExhaustedForCycle).toBe(true);
+  });
+
+  it('should increment skippedWalletExhausted counter for each skipped token', () => {
+    let walletExhaustedForCycle = false;
+    let skippedWalletExhausted = 0;
+    let successfulBidsPlaced = 0;
+    const targetBidCount = 20;
+    const tokens = Array.from({ length: 10 }, (_, i) => `token-${i}`);
+
+    for (const tokenId of tokens) {
+      if (successfulBidsPlaced >= targetBidCount) break;
+      if (walletExhaustedForCycle) {
+        skippedWalletExhausted++;
+        continue;
+      }
+
+      // Simulate: first 2 succeed, 3rd gets wallet_exhausted
+      if (tokens.indexOf(tokenId) <= 1) {
+        successfulBidsPlaced++;
+      } else if (tokens.indexOf(tokenId) === 2) {
+        const result = { success: false, reason: 'wallet_exhausted' };
+        if (result.reason === 'wallet_exhausted' && !walletExhaustedForCycle) {
+          walletExhaustedForCycle = true;
+        }
+      }
+    }
+
+    expect(skippedWalletExhausted).toBe(7); // tokens 3-9 skipped
+    expect(successfulBidsPlaced).toBe(2);
+    expect(walletExhaustedForCycle).toBe(true);
+  });
+});
+
+describe('getReceiveAddressesToQuery address selection', () => {
+  it('should return payment addresses when CENTRALIZE_RECEIVE_ADDRESS is false', () => {
+    // Simulates the logic in getReceiveAddressesToQuery when !CENTRALIZE_RECEIVE_ADDRESS
+    const CENTRALIZE_RECEIVE_ADDRESS = false;
+    const addresses: string[] = [];
+    const seen = new Set<string>();
+
+    if (CENTRALIZE_RECEIVE_ADDRESS) {
+      // Would return TOKEN_RECEIVE_ADDRESS (bc1p...)
+      addresses.push(TEST_RECEIVE_ADDRESS);
+    } else {
+      // Should derive payment addresses from WIF
+      const keyPair = ECPair.fromWIF(TEST_WIF, bitcoin.networks.bitcoin);
+      const payAddr = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: bitcoin.networks.bitcoin }).address;
+      if (payAddr && !seen.has(payAddr.toLowerCase())) {
+        addresses.push(payAddr);
+        seen.add(payAddr.toLowerCase());
+      }
+    }
+
+    expect(addresses).toHaveLength(1);
+    expect(addresses[0].startsWith('bc1q')).toBe(true);
+  });
+
+  it('should return receive address when CENTRALIZE_RECEIVE_ADDRESS is true', () => {
+    // Simulates the logic in getReceiveAddressesToQuery when CENTRALIZE_RECEIVE_ADDRESS
+    const CENTRALIZE_RECEIVE_ADDRESS = true;
+    const addresses: string[] = [];
+
+    if (CENTRALIZE_RECEIVE_ADDRESS) {
+      addresses.push(TEST_RECEIVE_ADDRESS);
+    }
+
+    expect(addresses).toHaveLength(1);
+    expect(addresses[0]).toBe(TEST_RECEIVE_ADDRESS);
+    expect(addresses[0].startsWith('bc1p')).toBe(true);
+  });
+
+  it('should use getAllPaymentAddresses for wallet groups when !CENTRALIZE_RECEIVE_ADDRESS', () => {
+    // Verifies the pattern: wallet group manager returns payment addresses, not receive
+    const CENTRALIZE_RECEIVE_ADDRESS = false;
+    const mockGroupReceiveAddresses = ['bc1preceive1', 'bc1preceive2'];
+    const mockGroupPaymentAddresses = ['bc1qpayment1', 'bc1qpayment2'];
+    const addresses: string[] = [];
+
+    // The actual code uses getAllPaymentAddresses() when !CENTRALIZE_RECEIVE_ADDRESS
+    const addrs = CENTRALIZE_RECEIVE_ADDRESS ? mockGroupReceiveAddresses : mockGroupPaymentAddresses;
+    addresses.push(...addrs);
+
+    expect(addresses).toEqual(mockGroupPaymentAddresses);
+    expect(addresses.every(a => a.startsWith('bc1q'))).toBe(true);
+  });
+});

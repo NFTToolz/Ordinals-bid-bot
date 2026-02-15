@@ -146,36 +146,67 @@ function getAllWalletAddresses(): string[] {
   return addresses;
 }
 
+const CENTRALIZE_RECEIVE_ADDRESS = process.env.CENTRALIZE_RECEIVE_ADDRESS === 'true';
+
 /**
- * Get all wallet taproot receive addresses (bc1p...) for offer lookups.
- * getUserOffers requires taproot receive addresses, not payment addresses.
+ * Get all wallet addresses for offer lookups.
+ * When CENTRALIZE_RECEIVE_ADDRESS=true, returns taproot receive addresses (bc1p...).
+ * When CENTRALIZE_RECEIVE_ADDRESS=false (default), returns payment addresses (bc1q...),
+ * since the bot sets buyerTokenReceiveAddress = buyerPaymentAddress for item offers.
  */
-function getAllReceiveAddresses(): string[] {
+function getOfferQueryAddresses(): string[] {
   const addresses: string[] = [];
 
-  // Main wallet receive address
-  if (hasReceiveAddress()) {
-    try {
-      addresses.push(getReceiveAddress());
-    } catch {
-      // Skip if not configured
-    }
-  }
-
-  // Config wallets already have receiveAddress field
-  const walletsData = loadWallets();
-  if (walletsData) {
-    let configWallets: Array<{ label: string; wif: string; receiveAddress: string }> = [];
-
-    if (isGroupsFormat(walletsData)) {
-      configWallets = getAllWalletsFromGroups();
-    } else if (walletsData.wallets?.length > 0) {
-      configWallets = walletsData.wallets;
+  if (CENTRALIZE_RECEIVE_ADDRESS) {
+    // Use taproot receive addresses
+    if (hasReceiveAddress()) {
+      try {
+        addresses.push(getReceiveAddress());
+      } catch {
+        // Skip if not configured
+      }
     }
 
-    for (const w of configWallets) {
-      if (w.receiveAddress) {
-        addresses.push(w.receiveAddress);
+    const walletsData = loadWallets();
+    if (walletsData) {
+      let configWallets: Array<{ label: string; wif: string; receiveAddress: string }> = [];
+      if (isGroupsFormat(walletsData)) {
+        configWallets = getAllWalletsFromGroups();
+      } else if (walletsData.wallets?.length > 0) {
+        configWallets = walletsData.wallets;
+      }
+      for (const w of configWallets) {
+        if (w.receiveAddress) {
+          addresses.push(w.receiveAddress);
+        }
+      }
+    }
+  } else {
+    // Use payment addresses (offers stored under buyerPaymentAddress)
+    if (hasFundingWIF()) {
+      try {
+        const mainWallet = getWalletFromWIF(getFundingWIF(), network);
+        addresses.push(mainWallet.paymentAddress);
+      } catch {
+        // Skip if invalid
+      }
+    }
+
+    const walletsData = loadWallets();
+    if (walletsData) {
+      let configWallets: Array<{ label: string; wif: string; receiveAddress: string }> = [];
+      if (isGroupsFormat(walletsData)) {
+        configWallets = getAllWalletsFromGroups();
+      } else if (walletsData.wallets?.length > 0) {
+        configWallets = walletsData.wallets;
+      }
+      for (const w of configWallets) {
+        try {
+          const walletInfo = getWalletFromWIF(w.wif, network);
+          addresses.push(walletInfo.paymentAddress);
+        } catch {
+          // Skip if invalid
+        }
       }
     }
   }
@@ -246,7 +277,7 @@ export async function getActiveOfferCount(): Promise<number> {
     return cache.activeOfferCount.data;
   }
 
-  const addresses = getAllReceiveAddresses();
+  const addresses = getOfferQueryAddresses();
   if (addresses.length === 0) {
     return 0;
   }

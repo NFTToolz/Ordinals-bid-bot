@@ -58,12 +58,24 @@ export async function stopBot(): Promise<void> {
 
   console.log('');
 
-  const { counts, fetchedOffers } = await withSpinner('Checking active offers...', fetchOfferCounts);
+  const { counts, fetchedOffers, warnings } = await withSpinner('Checking active offers...', fetchOfferCounts);
   const total = counts.reduce((s, c) => s + c.itemOffers + c.collectionOffers, 0);
 
   if (total === 0) {
-    showInfo('No active offers to cancel');
+    if (warnings.length > 0) {
+      showWarning('Could not fully check for active offers:');
+      warnings.forEach((w) => showWarning(`  ${w}`));
+      console.log('');
+      showInfo('No offers found, but results may be incomplete due to errors above');
+    } else {
+      showInfo('No active offers to cancel');
+    }
   } else {
+    if (warnings.length > 0) {
+      showWarning('Some checks failed (results may be incomplete):');
+      warnings.forEach((w) => showWarning(`  ${w}`));
+      console.log('');
+    }
     const cancelResult = await withProgressSpinner(
       `Canceling offers [0/${total}]...`,
       (update) => performCancellation(fetchedOffers, (canceled) => {

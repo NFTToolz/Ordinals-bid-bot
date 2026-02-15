@@ -707,10 +707,10 @@ export async function submitCancelOfferData(offerId: string, signedPSBTBase64: s
 }
 
 /**
- * Get all offers for a user by their taproot receive address (bc1p...).
- * NOTE: The Magic Eden API's `wallet_address_buyer` param requires a taproot
- * receive address, NOT a payment address (bc1q...). Passing a payment address
- * will return zero results.
+ * Get all offers for a user by the address used as buyerTokenReceiveAddress.
+ * When CENTRALIZE_RECEIVE_ADDRESS=true, this is the taproot receive address (bc1p...).
+ * When CENTRALIZE_RECEIVE_ADDRESS=false, this is the payment address (bc1q...),
+ * since the bot sets buyerTokenReceiveAddress = buyerPaymentAddress.
  * @throws Error on API failure (network error, server error, etc.)
  * @returns UserOffer on success (may have empty offers array if no offers exist)
  */

@@ -513,6 +513,69 @@ describe('Bot Commands', () => {
       expect(display.showTable).toHaveBeenCalled();
       expect(display.showWarning).toHaveBeenCalledWith('Cancellation aborted');
     });
+
+    it('should show warnings when API errors cause 0 offers', async () => {
+      const { cancelOffers } = await import('./cancel');
+      const { getUserOffers } = await import('../../../functions/Offer');
+      const display = await import('../../utils/display');
+
+      vi.mocked(getUserOffers).mockRejectedValueOnce(new Error('API timeout'));
+
+      await cancelOffers();
+
+      expect(display.showWarning).toHaveBeenCalledWith('Could not fully check for active offers:');
+      expect(display.showWarning).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to check item offers')
+      );
+      expect(display.showInfo).toHaveBeenCalledWith(
+        'No offers found, but results may be incomplete due to errors above'
+      );
+    });
+
+    it('should show clean no-offers message when API succeeds with 0', async () => {
+      const { cancelOffers } = await import('./cancel');
+      const display = await import('../../utils/display');
+
+      // Default mock returns { offers: [] } — no errors, no offers
+      await cancelOffers();
+
+      expect(display.showInfo).toHaveBeenCalledWith('No active offers found');
+      expect(display.showWarning).not.toHaveBeenCalledWith(
+        'Could not fully check for active offers:'
+      );
+    });
+  });
+
+  describe('stopBot', () => {
+    it('should show warnings when offer check fails during stop', async () => {
+      const { stopBot } = await import('./stop');
+      const { getUserOffers } = await import('../../../functions/Offer');
+      const prompts = await import('../../utils/prompts');
+      const display = await import('../../utils/display');
+
+      mockIsRunning = true;
+      mockStatus = {
+        running: true,
+        pid: 12345,
+        uptime: '1h 30m',
+        startedAt: new Date(),
+      };
+      // First confirm = stop, second confirm = cancel offers
+      vi.mocked(prompts.promptConfirm)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true);
+      vi.mocked(getUserOffers).mockRejectedValueOnce(new Error('Connection refused'));
+
+      await stopBot();
+
+      expect(display.showWarning).toHaveBeenCalledWith('Could not fully check for active offers:');
+      expect(display.showWarning).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to check item offers')
+      );
+      expect(display.showInfo).toHaveBeenCalledWith(
+        'No offers found, but results may be incomplete due to errors above'
+      );
+    });
   });
 });
 
@@ -572,6 +635,58 @@ describe('Cancel Command Logic', () => {
       const collectionOffers = collections.filter((c) => c.offerType === 'COLLECTION');
 
       expect(collectionOffers).toHaveLength(2);
+    });
+  });
+
+  describe('CENTRALIZE_RECEIVE_ADDRESS address selection', () => {
+    it('should select payment address when CENTRALIZE_RECEIVE_ADDRESS is false', () => {
+      const CENTRALIZE_RECEIVE_ADDRESS = false;
+      const addr = {
+        address: 'bc1p' + 'a'.repeat(58),
+        paymentAddress: 'bc1q' + 'b'.repeat(38),
+      };
+
+      const queryAddress = CENTRALIZE_RECEIVE_ADDRESS ? addr.address : addr.paymentAddress;
+      expect(queryAddress).toBe(addr.paymentAddress);
+      expect(queryAddress.startsWith('bc1q')).toBe(true);
+    });
+
+    it('should select receive address when CENTRALIZE_RECEIVE_ADDRESS is true', () => {
+      const CENTRALIZE_RECEIVE_ADDRESS = true;
+      const addr = {
+        address: 'bc1p' + 'a'.repeat(58),
+        paymentAddress: 'bc1q' + 'b'.repeat(38),
+      };
+
+      const queryAddress = CENTRALIZE_RECEIVE_ADDRESS ? addr.address : addr.paymentAddress;
+      expect(queryAddress).toBe(addr.address);
+      expect(queryAddress.startsWith('bc1p')).toBe(true);
+    });
+
+    it('should use payment addresses for collection offer matching when !CENTRALIZE_RECEIVE_ADDRESS', () => {
+      const CENTRALIZE_RECEIVE_ADDRESS = false;
+      const ourPaymentAddresses = new Set(['bc1qpayment1', 'bc1qpayment2']);
+      const ourReceiveAddresses = new Set(['bc1preceive1', 'bc1preceive2']);
+
+      const ourAddresses = CENTRALIZE_RECEIVE_ADDRESS ? ourReceiveAddresses : ourPaymentAddresses;
+
+      // Offer stored under payment address should be found
+      expect(ourAddresses.has('bc1qpayment1')).toBe(true);
+      // Offer stored under receive address should NOT be found
+      expect(ourAddresses.has('bc1preceive1')).toBe(false);
+    });
+
+    it('should use receive addresses for collection offer matching when CENTRALIZE_RECEIVE_ADDRESS', () => {
+      const CENTRALIZE_RECEIVE_ADDRESS = true;
+      const ourPaymentAddresses = new Set(['bc1qpayment1', 'bc1qpayment2']);
+      const ourReceiveAddresses = new Set(['bc1preceive1', 'bc1preceive2']);
+
+      const ourAddresses = CENTRALIZE_RECEIVE_ADDRESS ? ourReceiveAddresses : ourPaymentAddresses;
+
+      // Offer stored under receive address should be found
+      expect(ourAddresses.has('bc1preceive1')).toBe(true);
+      // Payment address should NOT be found
+      expect(ourAddresses.has('bc1qpayment1')).toBe(false);
     });
   });
 });

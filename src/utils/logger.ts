@@ -593,6 +593,7 @@ export const Logger = {
       currentActiveBids: number;
       bidCount: number;
       successfulBidsPlaced?: number;
+      skippedWalletExhausted?: number;
     }) {
       if (!shouldLog(LogLevel.INFO)) return;
       const timestamp = getTimestamp();
@@ -612,6 +613,9 @@ export const Logger = {
       console.log(`  Skipped (bid > max):       ${colors.yellow}${data.skippedBidTooHigh}${colors.reset}`);
       console.log(`  Skipped (already ours):    ${data.skippedAlreadyOurs}`);
       console.log(`  Bids failed:               ${data.bidsFailed > 0 ? colors.red + data.bidsFailed + colors.reset : data.bidsFailed}`);
+      if (data.skippedWalletExhausted && data.skippedWalletExhausted > 0) {
+        console.log(`  Skipped (wallet exhausted): ${colors.yellow}${data.skippedWalletExhausted}${colors.reset}`);
+      }
       console.log(`  Total active bids:         ${colors.bright}${data.currentActiveBids}${colors.reset} / ${data.bidCount} target`);
       console.log(`${colors.bright}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
       console.log('');
