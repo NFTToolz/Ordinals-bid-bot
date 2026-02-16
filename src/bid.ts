@@ -312,11 +312,28 @@ function forceReleaseTokenLock(tokenId: string): void {
   }
 }
 
-// Global sliding window pacer - tracks bid timestamps in a 60s window
+// Global sliding window pacer - tracks bid slots in a 60s window
+// Uses Map<slotId, timestamp> with monotonic counter for unique IDs
+// (prevents slot leaks from concurrent same-millisecond reservations)
 // Capacity recalculated after wallet init based on total wallet throughput
-const globalBidTimestamps: number[] = [];
+const globalBidSlots: Map<number, number> = new Map(); // slotId → timestamp
+let globalSlotCounter = 0;
 let globalBidCapacity = 5; // Default 5/min, recalculated after wallet init
 const globalPacerMutex = new Mutex();
+
+// Collection details cache with 30s TTL - floor price doesn't change every second
+const collectionDetailsCache = new Map<string, { data: any; fetchedAt: number }>();
+const COLLECTION_DETAILS_CACHE_TTL_MS = 30_000;
+
+async function getCachedCollectionDetails(collectionSymbol: string) {
+  const cached = collectionDetailsCache.get(collectionSymbol);
+  if (cached && Date.now() - cached.fetchedAt < COLLECTION_DETAILS_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  const data = await collectionDetails(collectionSymbol);
+  collectionDetailsCache.set(collectionSymbol, { data, fetchedAt: Date.now() });
+  return data;
+}
 
 // Rate limit deduplication: Track recently bid tokens to prevent duplicate bids
 const recentBids: Map<string, number> = new Map();
@@ -351,21 +368,25 @@ async function waitForGlobalBidSlot(): Promise<number> {
       const now = Date.now();
       const windowStart = now - 60000;
 
-      // Clean expired timestamps outside 60s window
-      while (globalBidTimestamps.length > 0 && globalBidTimestamps[0] <= windowStart) {
-        globalBidTimestamps.shift();
+      // Clean expired slots outside 60s window
+      for (const [id, ts] of globalBidSlots) {
+        if (ts <= windowStart) globalBidSlots.delete(id);
       }
 
-      if (globalBidTimestamps.length < globalBidCapacity) {
-        globalBidTimestamps.push(now); // Reserve slot
-        return { waitMs: 0, reservedAt: now };
+      if (globalBidSlots.size < globalBidCapacity) {
+        const slotId = ++globalSlotCounter;
+        globalBidSlots.set(slotId, now); // Reserve slot with unique ID
+        return { waitMs: 0, slotId };
       }
 
       // Wait for oldest to expire + 100ms buffer
-      return { waitMs: globalBidTimestamps[0] + 60000 - now + 100, reservedAt: 0 };
+      const oldestTs = globalBidSlots.size > 0
+        ? Math.min(...globalBidSlots.values())
+        : now;
+      return { waitMs: oldestTs + 60000 - now + 100, slotId: 0 };
     });
 
-    if (result.waitMs <= 0) return result.reservedAt; // Slot reserved
+    if (result.waitMs <= 0) return result.slotId; // Slot reserved
     Logger.info(`[GLOBAL PACER] At capacity (${globalBidCapacity}/min), waiting ${(result.waitMs / 1000).toFixed(1)}s`);
     await delay(result.waitMs); // Wait OUTSIDE mutex, then retry
   }
@@ -375,12 +396,9 @@ async function waitForGlobalBidSlot(): Promise<number> {
  * Release a previously reserved global bid slot.
  * Used when a task reserves a slot but decides not to bid (e.g., no action needed).
  */
-async function releaseGlobalBidSlot(reservedAt: number): Promise<void> {
+async function releaseGlobalBidSlot(slotId: number): Promise<void> {
   await globalPacerMutex.runExclusive(() => {
-    const idx = globalBidTimestamps.lastIndexOf(reservedAt);
-    if (idx !== -1) {
-      globalBidTimestamps.splice(idx, 1);
-    }
+    globalBidSlots.delete(slotId);
   });
 }
 
@@ -961,7 +979,7 @@ let retryCount: number = 0;
 
 class EventManager {
   queue: any[];
-  isScheduledRunning: boolean;
+  scheduledRunning = new Set<string>();
   private readonly MAX_QUEUE_SIZE = BOT_CONSTANTS.EVENT_QUEUE_CAP;
   private droppedEventsCount = 0;
   private ready = false;
@@ -983,7 +1001,6 @@ class EventManager {
 
   constructor() {
     this.queue = [];
-    this.isScheduledRunning = false;
   }
 
   /** Expose pre-filter stats for the stats API. */
@@ -1247,7 +1264,7 @@ class EventManager {
 
       let collectionData;
       try {
-        collectionData = await collectionDetails(collectionSymbol);
+        collectionData = await getCachedCollectionDetails(collectionSymbol);
       } catch (collectionError: unknown) {
         Logger.warning(`[WS] API error fetching collection details for ${collectionSymbol}, skipping event: ${getErrorMessage(collectionError)}`);
         return;
@@ -1418,13 +1435,6 @@ class EventManager {
                     return;
                   }
 
-                  // Check global rate limit before counter-bidding - wait if rate limited
-                  if (isGloballyRateLimited()) {
-                    const waitMs = getGlobalResetWaitTime();
-                    Logger.queue.waiting(tokenId, Math.ceil(waitMs / 1000));
-                    await delay(waitMs + 1000); // +1s buffer
-                  }
-
                   // Atomically acquire lock for this token to prevent race conditions
                   // IMPORTANT: Lock must be acquired BEFORE adding to recentBids to prevent race where
                   // two events both pass the deduplication check before either acquires the lock
@@ -1439,7 +1449,7 @@ class EventManager {
                   const bidAttemptTime = Date.now();
                   addRecentBid(tokenId, bidAttemptTime);
 
-                  // Re-check rate limit after acquiring lock - wait again if still rate limited
+                  // Check global rate limit after acquiring lock - wait if rate limited
                   if (isGloballyRateLimited()) {
                     const waitMs = getGlobalResetWaitTime();
                     Logger.queue.waiting(tokenId, Math.ceil(waitMs / 1000));
@@ -1519,14 +1529,10 @@ class EventManager {
             return;
           }
 
-          // Rate limit + dedup + lock (same pattern as offer_placed)
+          // Dedup + lock + rate limit (same pattern as offer_placed)
           const lastBidTime = recentBids.get(tokenId);
           if (lastBidTime && Date.now() - lastBidTime < RECENT_BID_COOLDOWN_MS) {
             return;
-          }
-          if (isGloballyRateLimited()) {
-            const waitMs = getGlobalResetWaitTime();
-            await delay(waitMs + 1000);
           }
           const lockAcquired = await acquireTokenLock(tokenId);
           if (!lockAcquired) return;
@@ -1534,6 +1540,7 @@ class EventManager {
           const bidAttemptTime = Date.now();
           addRecentBid(tokenId, bidAttemptTime);
 
+          // Check global rate limit after acquiring lock - wait if rate limited
           if (isGloballyRateLimited()) {
             const waitMs = getGlobalResetWaitTime();
             await delay(waitMs + 1000);
@@ -1743,17 +1750,17 @@ class EventManager {
   }
 
   async runScheduledTask(item: CollectionData): Promise<void> {
-    // Guard: skip if another collection's scheduled task is already running
-    // (prevents concurrent collection data-fetch phases)
-    if (this.isScheduledRunning) {
-      Logger.info(`[SCHEDULE] Skipping cycle for ${item.collectionSymbol} — another scheduled task is running`);
+    const symbol = item.collectionSymbol;
+    // Guard: skip if this collection's scheduled task is already running
+    if (this.scheduledRunning.has(symbol)) {
+      Logger.info(`[SCHEDULE] Skipping cycle for ${symbol} — previous cycle still running`);
       return;
     }
-    this.isScheduledRunning = true;
+    this.scheduledRunning.add(symbol);
     try {
-      await this.processScheduledLoop(item);  // FIX: Added await to prevent concurrent execution
+      await this.processScheduledLoop(item);
     } finally {
-      this.isScheduledRunning = false;
+      this.scheduledRunning.delete(symbol);
     }
   }
 
@@ -1804,7 +1811,7 @@ class EventManager {
       balance = await getBitcoinBalance(buyerPaymentAddress)
       let collectionData;
       try {
-        collectionData = await collectionDetails(collectionSymbol);
+        collectionData = await getCachedCollectionDetails(collectionSymbol);
       } catch (collectionError: unknown) {
         Logger.warning(`[SCHEDULE] API error fetching collection details for ${collectionSymbol}, skipping cycle: ${getErrorMessage(collectionError)}`);
         return;
@@ -2064,9 +2071,8 @@ class EventManager {
           await delay(waitMs);
         }
 
-        await queue.addAll(
-          uniqueListings.sort((a, b) => a.price - b.price)
-            .map(token => async () => {
+        const bidPromises = uniqueListings.sort((a, b) => a.price - b.price)
+          .map(token => queue.add(async () => {
               // Early exit if we've placed enough successful bids
               if (successfulBidsPlaced >= targetBidCount) {
                 return;
@@ -2082,7 +2088,7 @@ class EventManager {
               const genesisTransaction = fullTokenData?.genesisTransaction;
 
               // Declared at try-scope level so catch/finally can access them
-              let reservedAt = 0;
+              let slotId = 0;
               let slotConsumed = false;
               try {
                 tokensProcessed++;
@@ -2097,29 +2103,28 @@ class EventManager {
                 // Reserve-first pipeline: Reserve a global pacer slot BEFORE API calls.
                 // This ensures data is fetched right before bidding (always fresh).
                 // If we decide not to bid, we release the slot for the next task.
-                reservedAt = await waitForGlobalBidSlot();
+                slotId = await waitForGlobalBidSlot();
 
                 // Re-check after waiting — target may have been reached while waiting for slot
                 if (successfulBidsPlaced >= targetBidCount) {
-                  await releaseGlobalBidSlot(reservedAt);
-                  return;
+                  return; // finally block releases slot
                 }
                 if (walletExhaustedForCycle) {
-                  await releaseGlobalBidSlot(reservedAt);
                   skippedWalletExhausted++;
-                  return;
+                  return; // finally block releases slot
                 }
 
                 // Fetch best offer and our existing offers - skip token on API error
+                // When wallet rotation enabled, fetch unfiltered (all wallets) — matches placeBid() behavior
+                // The scheduled loop re-filters with isOurPaymentAddress() at line 2132+
                 let bestOffer;
                 let offerData;
                 try {
                   bestOffer = await getBestOffer(tokenId);
-                  offerData = await getOffers(tokenId, buyerTokenReceiveAddress);
+                  offerData = await getOffers(tokenId, ENABLE_WALLET_ROTATION ? undefined : buyerTokenReceiveAddress);
                 } catch (apiError: unknown) {
                   Logger.warning(`[SCHEDULE] ${tokenId.slice(-8)}: API error fetching offers, skipping: ${getErrorMessage(apiError)}`);
-                  await releaseGlobalBidSlot(reservedAt);
-                  return;
+                  return; // finally block releases slot
                 }
 
                 const ourExistingOffer = (bidHistory[collectionSymbol]?.ourBids?.[tokenId]?.expiration ?? 0) > Date.now()
@@ -2196,9 +2201,9 @@ class EventManager {
                     const bidPrice = currentPrice + Math.round(outBidMargin * CONVERSION_RATE)
                     if (bidPrice <= maxOffer) {
                       try {
-                        slotConsumed = true;
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, true)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
                         if (result.success) {
+                          slotConsumed = true;
                           addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                           bidHistory[collectionSymbol].topBids[tokenId] = true
                           bidHistory[collectionSymbol].ourBids[tokenId] = {
@@ -2248,9 +2253,9 @@ class EventManager {
                   const bidPrice = minOffer
                   if (bidPrice <= maxOffer) {
                     try {
-                      slotConsumed = true;
-                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, true)
+                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
                       if (result.success) {
+                        slotConsumed = true;
                         addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                         bidHistory[collectionSymbol].topBids[tokenId] = true
                         bidHistory[collectionSymbol].ourBids[tokenId] = {
@@ -2310,9 +2315,9 @@ class EventManager {
 
                     if (bidPrice <= maxOffer) {
                       try {
-                        slotConsumed = true;
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, true)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
                         if (result.success) {
+                          slotConsumed = true;
                           addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                           bidHistory[collectionSymbol].topBids[tokenId] = true
                           bidHistory[collectionSymbol].ourBids[tokenId] = {
@@ -2347,9 +2352,9 @@ class EventManager {
 
                         if (bidPrice <= maxOffer) {
                           try {
-                            slotConsumed = true;
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, true)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
                             if (result.success) {
+                              slotConsumed = true;
                               addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                               bidHistory[collectionSymbol].topBids[tokenId] = true
                               bidHistory[collectionSymbol].ourBids[tokenId] = {
@@ -2379,9 +2384,9 @@ class EventManager {
                       if (bestPrice !== bidPrice) { // self adjust bids.
                         if (bidPrice <= maxOffer) {
                           try {
-                            slotConsumed = true;
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, true)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
                             if (result.success) {
+                              slotConsumed = true;
                               addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
                               bidHistory[collectionSymbol].topBids[tokenId] = true
                               bidHistory[collectionSymbol].ourBids[tokenId] = {
@@ -2421,16 +2426,31 @@ class EventManager {
                 bidsFailed++;
               } finally {
                 // Release unused global pacer slot if no bid was attempted
-                if (!slotConsumed && reservedAt > 0) {
-                  await releaseGlobalBidSlot(reservedAt);
+                if (!slotConsumed && slotId > 0) {
+                  await releaseGlobalBidSlot(slotId);
                 }
               }
-            })
-        )
+            }));
+
+        // Summary logging runs after all bid tasks complete (non-blocking).
+        // Per-collection lock released immediately, allowing next cycle to start.
+        Promise.allSettled(bidPromises).then(() => {
+          const currentActiveBids = Object.keys(bidHistory[collectionSymbol].ourBids).filter(
+            tid => bidHistory[collectionSymbol].ourBids[tid]?.expiration > Date.now()
+          ).length;
+          Logger.summary.bidPlacement({
+            tokensProcessed, newBidsPlaced, bidsAdjusted, alreadyHaveBids,
+            noActionNeeded, skippedOfferTooHigh, skippedBidTooHigh, skippedAlreadyOurs,
+            bidsFailed, currentActiveBids, bidCount, successfulBidsPlaced, skippedWalletExhausted,
+          });
+          restartState.set(item.collectionSymbol, false);
+          bidHistoryDirtyTracker.markDirty();
+          Logger.scheduleComplete(item.collectionSymbol, (Date.now() - startTime) / 1000);
+        });
 
       } else if (offerType.toUpperCase() === "COLLECTION") {
         // Reserve-first pipeline for COLLECTION bids (one bid per cycle)
-        const collReservedAt = await waitForGlobalBidSlot();
+        const collSlotId = await waitForGlobalBidSlot();
         let collSlotConsumed = false;
 
         try {
@@ -2487,9 +2507,9 @@ class EventManager {
 
             if (bidPrice <= maxOffer) {
               if (bidPrice < floorPrice) {
-                collSlotConsumed = true;
-                const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, true)
+                const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
                 if (result.success) {
+                  collSlotConsumed = true;
                   bidHistory[collectionSymbol].offerType = "COLLECTION"
                   bidHistory[collectionSymbol].highestCollectionOffer = {
                     price: bidPrice,
@@ -2539,9 +2559,9 @@ class EventManager {
 
                 if (bidPrice <= maxOffer) {
                   if (bidPrice < floorPrice) {
-                    collSlotConsumed = true;
-                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, true)
+                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
                     if (result.success) {
+                      collSlotConsumed = true;
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -2586,9 +2606,9 @@ class EventManager {
 
                 if (bidPrice <= maxOffer) {
                   if (bidPrice < floorPrice) {
-                    collSlotConsumed = true;
-                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, true)
+                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
                     if (result.success) {
+                      collSlotConsumed = true;
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
                       bidHistory[collectionSymbol].highestCollectionOffer = {
                         price: bidPrice,
@@ -2607,9 +2627,9 @@ class EventManager {
           const bidPrice = minOffer
           if (bidPrice <= maxOffer) {
             if (bidPrice < floorPrice) {
-              collSlotConsumed = true;
-              const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, true)
+              const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
               if (result.success) {
+                collSlotConsumed = true;
                 bidHistory[collectionSymbol].offerType = "COLLECTION"
                 bidHistory[collectionSymbol].highestCollectionOffer = {
                   price: bidPrice,
@@ -2623,39 +2643,16 @@ class EventManager {
         } finally {
           // Release unused global pacer slot if no collection bid was attempted
           if (!collSlotConsumed) {
-            await releaseGlobalBidSlot(collReservedAt);
+            await releaseGlobalBidSlot(collSlotId);
           }
         }
+
+        restartState.set(item.collectionSymbol, false);
+        bidHistoryDirtyTracker.markDirty();
+        Logger.scheduleComplete(item.collectionSymbol, (Date.now() - startTime) / 1000);
       } else {
         Logger.warning(`[SCHEDULE] Unknown offerType "${offerType}" for ${collectionSymbol}, skipping bid cycle`);
       }
-
-      // Log bid placement summary
-      const currentActiveBids = Object.keys(bidHistory[collectionSymbol].ourBids).filter(
-        tokenId => bidHistory[collectionSymbol].ourBids[tokenId]?.expiration > Date.now()
-      ).length;
-
-      Logger.summary.bidPlacement({
-        tokensProcessed,
-        newBidsPlaced,
-        bidsAdjusted,
-        alreadyHaveBids,
-        noActionNeeded,
-        skippedOfferTooHigh,
-        skippedBidTooHigh,
-        skippedAlreadyOurs,
-        bidsFailed,
-        currentActiveBids,
-        bidCount,
-        successfulBidsPlaced,
-        skippedWalletExhausted,
-      });
-
-      restartState.set(item.collectionSymbol, false);
-      // Mark bidHistory dirty after all scheduled-loop mutations
-      bidHistoryDirtyTracker.markDirty();
-      const scheduleDuration = (Date.now() - startTime) / 1000;
-      Logger.scheduleComplete(item.collectionSymbol, scheduleDuration);
     } catch (error) {
       Logger.error(`Schedule failed for ${item.collectionSymbol}`, error);
       throw error
@@ -3422,7 +3419,10 @@ function gatherStatsDeps(): StatsDependencies {
   // Count active bids in the global pacer's sliding window
   const now = Date.now();
   const windowStart = now - 60000;
-  const globalPacerUsed = globalBidTimestamps.filter(t => t > windowStart).length;
+  let globalPacerUsed = 0;
+  for (const ts of globalBidSlots.values()) {
+    if (ts > windowStart) globalPacerUsed++;
+  }
 
   return {
     bidStats: bidStatsData,
@@ -3856,7 +3856,7 @@ async function placeBidWithRotation(
   fallbackPublicKey: string,
   fallbackPrivateKey: string,
   maxAllowedPrice?: number,  // Safety cap - last line of defense against overbidding
-  slotReserved = false  // When true, caller already reserved a global pacer slot
+  prefetchedOffers?: { offers: any[] }  // Pre-fetched offer data from scheduled loop
 ): Promise<PlaceBidResult> {
   let buyerTokenReceiveAddress = fallbackReceiveAddress;
   let buyerPaymentAddress = fallbackPaymentAddress;
@@ -3930,11 +3930,9 @@ async function placeBidWithRotation(
     return { success: false, reason: 'price_exceeds_max' };
   }
 
-  // Enforce global minimum interval between ALL bids (regardless of wallet rotation)
-  // When slotReserved=true, caller already reserved a global pacer slot (reserve-first pipeline)
-  if (!slotReserved) {
-    await waitForGlobalBidSlot();
-  }
+  // Counter-bids bypass global pacer — they're rare,
+  // time-sensitive WebSocket events, and already per-wallet rate-limited.
+  // Scheduled bids already reserved their slot in the reserve-first pipeline.
 
   try {
     // Only use per-wallet pacer if wallet rotation is disabled
@@ -3951,7 +3949,8 @@ async function placeBidWithRotation(
       buyerPaymentAddress,
       publicKey,
       privateKey,
-      maxAllowedPrice
+      maxAllowedPrice,
+      prefetchedOffers
     );
 
     if (success) {
@@ -4035,7 +4034,6 @@ async function placeCollectionBidWithRotation(
   feeSatsPerVbyte: number = 28,
   maxAllowedPrice?: number,
   balance?: number,
-  slotReserved = false  // When true, caller already reserved a global pacer slot
 ): Promise<PlaceBidResult> {
   let buyerTokenReceiveAddress = fallbackReceiveAddress;
   let buyerPaymentAddress = fallbackPaymentAddress;
@@ -4098,11 +4096,9 @@ async function placeCollectionBidWithRotation(
     return { success: false, reason: 'price_exceeds_max' };
   }
 
-  // Enforce global minimum interval between ALL bids (regardless of wallet rotation)
-  // When slotReserved=true, caller already reserved a global pacer slot (reserve-first pipeline)
-  if (!slotReserved) {
-    await waitForGlobalBidSlot();
-  }
+  // Counter-bids bypass global pacer — they're rare,
+  // time-sensitive WebSocket events, and already per-wallet rate-limited.
+  // Scheduled bids already reserved their slot in the reserve-first pipeline.
 
   try {
     // Only use per-wallet pacer if wallet rotation is disabled
@@ -4186,28 +4182,35 @@ async function placeBid(
   buyerPaymentAddress: string,
   publicKey: string,
   privateKey: string,
-  maxAllowedPrice?: number  // Safety cap - last line of defense against overbidding
+  maxAllowedPrice?: number,  // Safety cap - last line of defense against overbidding
+  prefetchedOffers?: { offers: any[] }  // Pre-fetched offer data from scheduled loop (avoids redundant API call)
 ) {
   try {
     const price = Math.round(offerPrice)
     // check for current offers and cancel before placing the bid
     // Note: delay removed - per-wallet rate limiting handles API safety
 
-    // Fetch existing offers - abort on API error to prevent duplicate bids
-    // When wallet rotation is enabled, query without wallet filter to find offers from ALL our wallets
+    // Use pre-fetched offers if available (scheduled loop already fetched them),
+    // otherwise fetch from API (counter-bid path)
     let offerData;
-    try {
-      offerData = await getOffers(tokenId, ENABLE_WALLET_ROTATION ? undefined : buyerTokenReceiveAddress);
-    } catch (apiError: unknown) {
-      const status = getErrorStatus(apiError);
-      const msg = getErrorMessage(apiError);
-      // Detect rate limit errors and trigger the rate limit handler before returning
-      if (status === 429 || msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('too many requests')) {
-        onRateLimitError(msg);
-        throw apiError; // Re-throw for rotation handling
+    if (prefetchedOffers) {
+      offerData = prefetchedOffers;
+    } else {
+      // Fetch existing offers - abort on API error to prevent duplicate bids
+      // When wallet rotation is enabled, query without wallet filter to find offers from ALL our wallets
+      try {
+        offerData = await getOffers(tokenId, ENABLE_WALLET_ROTATION ? undefined : buyerTokenReceiveAddress);
+      } catch (apiError: unknown) {
+        const status = getErrorStatus(apiError);
+        const msg = getErrorMessage(apiError);
+        // Detect rate limit errors and trigger the rate limit handler before returning
+        if (status === 429 || msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('too many requests')) {
+          onRateLimitError(msg);
+          throw apiError; // Re-throw for rotation handling
+        }
+        Logger.warning(`[PLACEBID] ${tokenId.slice(-8)}: API error getting existing offers, aborting bid to prevent duplicates: ${msg}`);
+        return false;
       }
-      Logger.warning(`[PLACEBID] ${tokenId.slice(-8)}: API error getting existing offers, aborting bid to prevent duplicates: ${msg}`);
-      return false;
     }
 
     if (Array.isArray(offerData?.offers) && offerData.offers.length > 0) {

@@ -15,10 +15,13 @@ import { Mutex } from 'async-mutex';
 
 /**
  * Simulates the global sliding window pacer used in bid.ts.
- * Manages a 60s window of bid timestamps with mutex-protected slot reservation.
+ * Uses Map<slotId, timestamp> with monotonic counter for unique IDs
+ * (matches the production implementation that prevents slot leaks from
+ * concurrent same-millisecond reservations).
  */
 class PacerSimulator {
-  private timestamps: number[] = [];
+  private slots: Map<number, number> = new Map(); // slotId → timestamp
+  private slotCounter = 0;
   private mutex = new Mutex();
   private _capacity: number;
   private _slotWaitCount = 0;
@@ -31,26 +34,31 @@ class PacerSimulator {
   get slotWaitCount() { return this._slotWaitCount; }
   get used() {
     const windowStart = Date.now() - 60_000;
-    return this.timestamps.filter(t => t > windowStart).length;
+    let count = 0;
+    for (const ts of this.slots.values()) {
+      if (ts > windowStart) count++;
+    }
+    return count;
   }
 
-  /** Reserve a slot — blocks until one is available. Returns the reserved timestamp. */
+  /** Reserve a slot — blocks until one is available. Returns a unique slot ID. */
   async reserveSlot(): Promise<number> {
     while (true) {
       const result = await this.mutex.runExclusive(() => {
         const now = Date.now();
         const windowStart = now - 60_000;
         // Expire old
-        while (this.timestamps.length > 0 && this.timestamps[0] <= windowStart) {
-          this.timestamps.shift();
+        for (const [id, ts] of this.slots) {
+          if (ts <= windowStart) this.slots.delete(id);
         }
-        if (this.timestamps.length < this._capacity) {
-          this.timestamps.push(now);
-          return { available: true, reservedAt: now };
+        if (this.slots.size < this._capacity) {
+          const slotId = ++this.slotCounter;
+          this.slots.set(slotId, now);
+          return { available: true, slotId };
         }
-        return { available: false, reservedAt: 0 };
+        return { available: false, slotId: 0 };
       });
-      if (result.available) return result.reservedAt;
+      if (result.available) return result.slotId;
       this._slotWaitCount++;
       // Poll quickly so released slots are picked up fast (test-friendly)
       await new Promise(r => setTimeout(r, 5));
@@ -58,10 +66,9 @@ class PacerSimulator {
   }
 
   /** Release a previously reserved slot (task decided not to bid). */
-  async releaseSlot(reservedAt: number): Promise<void> {
+  async releaseSlot(slotId: number): Promise<void> {
     await this.mutex.runExclusive(() => {
-      const idx = this.timestamps.lastIndexOf(reservedAt);
-      if (idx !== -1) this.timestamps.splice(idx, 1);
+      this.slots.delete(slotId);
     });
   }
 }
@@ -157,7 +164,8 @@ describe('Throughput Simulation — Reserve-First Pipeline', () => {
   it('pacer blocks at capacity and unblocks after slot expires', async () => {
     // Custom short window (200ms) for fast testing
     const capacity = 2;
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>();
+    let slotCounter = 0;
     const mutex = new Mutex();
     const WINDOW_MS = 200;
 
@@ -166,16 +174,18 @@ describe('Throughput Simulation — Reserve-First Pipeline', () => {
         const result = await mutex.runExclusive(() => {
           const now = Date.now();
           const windowStart = now - WINDOW_MS;
-          while (timestamps.length > 0 && timestamps[0] <= windowStart) {
-            timestamps.shift();
+          for (const [id, ts] of slots) {
+            if (ts <= windowStart) slots.delete(id);
           }
-          if (timestamps.length < capacity) {
-            timestamps.push(now);
-            return { waitMs: 0, reservedAt: now };
+          if (slots.size < capacity) {
+            const slotId = ++slotCounter;
+            slots.set(slotId, now);
+            return { waitMs: 0, slotId };
           }
-          return { waitMs: timestamps[0] + WINDOW_MS - now + 5, reservedAt: 0 };
+          const oldestTs = Math.min(...slots.values());
+          return { waitMs: oldestTs + WINDOW_MS - now + 5, slotId: 0 };
         });
-        if (result.waitMs <= 0) return result.reservedAt;
+        if (result.waitMs <= 0) return result.slotId;
         await new Promise(r => setTimeout(r, result.waitMs));
       }
     }
@@ -205,15 +215,15 @@ describe('Throughput Simulation — Reserve-First Pipeline', () => {
     const pacer = new PacerSimulator(capacity);
 
     // Simulate the try/finally pattern from bid.ts
-    let reservedAt = 0;
+    let slotId = 0;
     let slotConsumed = false;
     try {
-      reservedAt = await pacer.reserveSlot();
+      slotId = await pacer.reserveSlot();
       // Simulate: bid placed successfully
       slotConsumed = true;
     } finally {
-      if (!slotConsumed && reservedAt > 0) {
-        await pacer.releaseSlot(reservedAt);
+      if (!slotConsumed && slotId > 0) {
+        await pacer.releaseSlot(slotId);
       }
     }
 
@@ -226,27 +236,27 @@ describe('Throughput Simulation — Reserve-First Pipeline', () => {
     const capacity = 5;
     const pacer = new PacerSimulator(capacity);
 
-    let reservedAt = 0;
+    let slotId = 0;
     let slotConsumed = false;
     try {
-      reservedAt = await pacer.reserveSlot();
+      slotId = await pacer.reserveSlot();
       // Simulate: decided not to bid (e.g., already top bidder)
       // slotConsumed stays false
     } finally {
-      if (!slotConsumed && reservedAt > 0) {
-        await pacer.releaseSlot(reservedAt);
+      if (!slotConsumed && slotId > 0) {
+        await pacer.releaseSlot(slotId);
       }
     }
 
     expect(pacer.used).toBe(0); // Slot released
   });
 
-  it('reservedAt=0 guard prevents release when slot was never acquired', async () => {
+  it('slotId=0 guard prevents release when slot was never acquired', async () => {
     const capacity = 5;
     const pacer = new PacerSimulator(capacity);
 
-    // Simulate: error thrown before reserveSlot() — reservedAt stays 0
-    let reservedAt = 0;
+    // Simulate: error thrown before reserveSlot() — slotId stays 0
+    let slotId = 0;
     let slotConsumed = false;
     try {
       // Simulate dedup check causing early return before slot reservation
@@ -254,9 +264,9 @@ describe('Throughput Simulation — Reserve-First Pipeline', () => {
     } catch {
       // Expected
     } finally {
-      // Should NOT attempt release since reservedAt is 0
-      if (!slotConsumed && reservedAt > 0) {
-        await pacer.releaseSlot(reservedAt);
+      // Should NOT attempt release since slotId is 0
+      if (!slotConsumed && slotId > 0) {
+        await pacer.releaseSlot(slotId);
       }
     }
 
@@ -386,10 +396,10 @@ describe('Throughput Simulation — Full Pipeline', () => {
 
     const tasks = Array.from({ length: TOKEN_COUNT }, (_, i) =>
       queue.add(async () => {
-        let reservedAt = 0;
+        let slotId = 0;
         let slotConsumed = false;
         try {
-          reservedAt = await pacer.reserveSlot();
+          slotId = await pacer.reserveSlot();
           await new Promise(r => setTimeout(r, API_DELAY)); // API calls
 
           // 80% of tokens get a bid, 20% skip (every 5th token)
@@ -401,8 +411,8 @@ describe('Throughput Simulation — Full Pipeline', () => {
             bidTimes.push(Date.now() - start);
           }
         } finally {
-          if (!slotConsumed && reservedAt > 0) {
-            await pacer.releaseSlot(reservedAt);
+          if (!slotConsumed && slotId > 0) {
+            await pacer.releaseSlot(slotId);
             slotsReleased++;
           }
         }
@@ -506,10 +516,10 @@ describe('Throughput Simulation — Full Pipeline', () => {
           return;
         }
 
-        let reservedAt = 0;
+        let slotId = 0;
         let slotConsumed = false;
         try {
-          reservedAt = await pacer.reserveSlot();
+          slotId = await pacer.reserveSlot();
           if (walletExhaustedForCycle) return;
 
           await new Promise(r => setTimeout(r, 2));
@@ -522,8 +532,8 @@ describe('Throughput Simulation — Full Pipeline', () => {
             walletExhaustedForCycle = true;
           }
         } finally {
-          if (!slotConsumed && reservedAt > 0) {
-            await pacer.releaseSlot(reservedAt);
+          if (!slotConsumed && slotId > 0) {
+            await pacer.releaseSlot(slotId);
             slotsReleased++;
           }
         }
@@ -570,39 +580,32 @@ describe('Throughput Simulation — Full Pipeline', () => {
   });
 });
 
-describe('Throughput Simulation — slotReserved Flag', () => {
-  it('slotReserved=true skips internal pacer reservation', async () => {
+describe('Throughput Simulation — Reserve-First Pipeline', () => {
+  it('rotation functions never call global pacer internally', async () => {
     const pacerCalls: string[] = [];
 
-    // Simulate placeBidWithRotation
-    async function placeBidWithRotation(slotReserved: boolean) {
-      if (!slotReserved) {
-        pacerCalls.push('waitForGlobalBidSlot');
-      }
+    // Simulate placeBidWithRotation — no slotReserved param anymore
+    // The function never calls waitForGlobalBidSlot() internally.
+    // Scheduled bids reserve externally; counter-bids bypass entirely.
+    async function placeBidWithRotation() {
+      // No pacer call — removed in audit
       pacerCalls.push('placeBid');
       return { success: true };
     }
 
-    // Scheduled bid (slotReserved=true — caller already reserved)
-    await placeBidWithRotation(true);
+    await placeBidWithRotation();
     expect(pacerCalls).toEqual(['placeBid']);
-
-    pacerCalls.length = 0;
-
-    // Counter-bid (slotReserved=false — reserves internally)
-    await placeBidWithRotation(false);
-    expect(pacerCalls).toEqual(['waitForGlobalBidSlot', 'placeBid']);
   });
 
-  it('scheduled loop pattern: reserve → fetch → decide → bid(slotReserved=true)', async () => {
+  it('scheduled loop pattern: reserve → fetch → decide → bid', async () => {
     const pacer = new PacerSimulator(10);
     const steps: string[] = [];
 
     // Simulate the reserve-first pipeline
-    let reservedAt = 0;
+    let slotId = 0;
     let slotConsumed = false;
     try {
-      reservedAt = await pacer.reserveSlot();
+      slotId = await pacer.reserveSlot();
       steps.push('reserved');
 
       await new Promise(r => setTimeout(r, 1)); // API fetch
@@ -610,15 +613,15 @@ describe('Throughput Simulation — slotReserved Flag', () => {
 
       // Decision: bid
       slotConsumed = true;
-      steps.push('bid(slotReserved=true)');
+      steps.push('bid');
     } finally {
-      if (!slotConsumed && reservedAt > 0) {
-        await pacer.releaseSlot(reservedAt);
+      if (!slotConsumed && slotId > 0) {
+        await pacer.releaseSlot(slotId);
         steps.push('released');
       }
     }
 
-    expect(steps).toEqual(['reserved', 'fetched', 'bid(slotReserved=true)']);
+    expect(steps).toEqual(['reserved', 'fetched', 'bid']);
     expect(pacer.used).toBe(1);
   });
 
@@ -626,10 +629,10 @@ describe('Throughput Simulation — slotReserved Flag', () => {
     const pacer = new PacerSimulator(10);
     const steps: string[] = [];
 
-    let reservedAt = 0;
+    let slotId = 0;
     let slotConsumed = false;
     try {
-      reservedAt = await pacer.reserveSlot();
+      slotId = await pacer.reserveSlot();
       steps.push('reserved');
 
       await new Promise(r => setTimeout(r, 1)); // API fetch
@@ -638,8 +641,8 @@ describe('Throughput Simulation — slotReserved Flag', () => {
       // Decision: skip (already top bidder)
       steps.push('skip');
     } finally {
-      if (!slotConsumed && reservedAt > 0) {
-        await pacer.releaseSlot(reservedAt);
+      if (!slotConsumed && slotId > 0) {
+        await pacer.releaseSlot(slotId);
         steps.push('released');
       }
     }
@@ -648,24 +651,21 @@ describe('Throughput Simulation — slotReserved Flag', () => {
     expect(pacer.used).toBe(0);
   });
 
-  it('counter-bid pattern: no external reserve, bids with slotReserved=false', async () => {
+  it('counter-bid pattern: bypasses global pacer entirely', async () => {
     const pacer = new PacerSimulator(10);
     const steps: string[] = [];
 
-    // Counter-bids don't use reserve-first — they reserve internally
-    // (slotReserved=false path in placeBidWithRotation)
-    async function mockPlaceBidWithRotation(slotReserved: boolean) {
-      if (!slotReserved) {
-        await pacer.reserveSlot();
-        steps.push('internal_reserve');
-      }
+    // Counter-bids bypass the global pacer — they're rare, time-sensitive,
+    // and already per-wallet rate-limited. No reservation at all.
+    async function mockPlaceBidWithRotation() {
       await new Promise(r => setTimeout(r, 1));
       steps.push('bid');
     }
 
-    await mockPlaceBidWithRotation(false);
-    expect(steps).toEqual(['internal_reserve', 'bid']);
-    expect(pacer.used).toBe(1);
+    await mockPlaceBidWithRotation();
+    expect(steps).toEqual(['bid']);
+    // Pacer not touched — counter-bids are free
+    expect(pacer.used).toBe(0);
   });
 });
 
@@ -803,7 +803,8 @@ describe('Throughput Simulation — Scaling Scenarios', () => {
 
   it('exceeding capacity requires waiting: 30 bids with capacity 25', async () => {
     // Use a short window (100ms) so test doesn't take 60s
-    const timestamps: number[] = [];
+    const slots2 = new Map<number, number>();
+    let slotCounter2 = 0;
     const mutex = new Mutex();
     const capacity = 25;
     const WINDOW_MS = 100;
@@ -813,16 +814,18 @@ describe('Throughput Simulation — Scaling Scenarios', () => {
         const result = await mutex.runExclusive(() => {
           const now = Date.now();
           const windowStart = now - WINDOW_MS;
-          while (timestamps.length > 0 && timestamps[0] <= windowStart) {
-            timestamps.shift();
+          for (const [id, ts] of slots2) {
+            if (ts <= windowStart) slots2.delete(id);
           }
-          if (timestamps.length < capacity) {
-            timestamps.push(now);
-            return { waitMs: 0, reservedAt: now };
+          if (slots2.size < capacity) {
+            const slotId = ++slotCounter2;
+            slots2.set(slotId, now);
+            return { waitMs: 0, slotId };
           }
-          return { waitMs: timestamps[0] + WINDOW_MS - now + 5, reservedAt: 0 };
+          const oldestTs = Math.min(...slots2.values());
+          return { waitMs: oldestTs + WINDOW_MS - now + 5, slotId: 0 };
         });
-        if (result.waitMs <= 0) return result.reservedAt;
+        if (result.waitMs <= 0) return result.slotId;
         await new Promise(r => setTimeout(r, result.waitMs));
       }
     }

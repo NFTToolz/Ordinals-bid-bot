@@ -54,8 +54,7 @@ export interface BidPacerStatus {
 }
 
 class BidPacer {
-  private bidCount: number = 0;
-  private windowStart: number = Date.now();
+  private bidTimestamps: number[] = [];
   private readonly WINDOW_MS: number;
   private readonly MAX_BIDS: number;
   private isPaused: boolean = false;
@@ -71,14 +70,12 @@ class BidPacer {
   }
 
   /**
-   * Reset window if expired
+   * Remove expired timestamps outside the sliding window
    */
-  private checkWindowReset(): void {
-    const now = Date.now();
-    if (now - this.windowStart >= this.WINDOW_MS) {
-      this.bidCount = 0;
-      this.windowStart = now;
-      this.isPaused = false;
+  private cleanExpired(): void {
+    const windowStart = Date.now() - this.WINDOW_MS;
+    while (this.bidTimestamps.length > 0 && this.bidTimestamps[0] <= windowStart) {
+      this.bidTimestamps.shift();
     }
   }
 
@@ -88,39 +85,35 @@ class BidPacer {
    * Uses single-waiter pattern: all tasks share the same wait promise
    */
   async waitForSlot(): Promise<void> {
-    this.checkWindowReset();
+    this.cleanExpired();
 
-    // If at limit, wait for window reset
-    if (this.bidCount >= this.MAX_BIDS) {
-      // If already waiting, join existing wait (single-waiter pattern)
-      if (this.waitPromise) {
-        return this.waitPromise;
-      }
+    // Under limit — proceed immediately
+    if (this.bidTimestamps.length < this.MAX_BIDS) return;
 
-      const now = Date.now();
-      const elapsed = now - this.windowStart;
-      const waitTime = this.WINDOW_MS - elapsed + 1000; // +1s buffer
+    // At limit — wait for oldest bid to expire from the sliding window
+    if (this.waitPromise) {
+      return this.waitPromise;
+    }
 
-      if (waitTime > 0) {
-        this.isPaused = true;
-        this.totalWaits++;
-        Logger.pacer.waiting(this.bidCount, this.MAX_BIDS, Math.ceil(waitTime / 1000));
+    const waitTime = this.bidTimestamps[0] + this.WINDOW_MS - Date.now() + 100; // +100ms buffer
 
-        // Create shared promise that all waiters will join
-        this.waitPromise = new Promise<void>(resolve => {
-          setTimeout(() => {
-            // Reset after wait
-            this.bidCount = 0;
-            this.windowStart = Date.now();
-            this.isPaused = false;
-            this.waitPromise = null;
-            Logger.pacer.windowReset();
-            resolve();
-          }, Math.max(waitTime, 0));
-        });
+    if (waitTime > 0) {
+      this.isPaused = true;
+      this.totalWaits++;
+      Logger.pacer.waiting(this.bidTimestamps.length, this.MAX_BIDS, Math.ceil(waitTime / 1000));
 
-        return this.waitPromise;
-      }
+      // Create shared promise that all waiters will join
+      this.waitPromise = new Promise<void>(resolve => {
+        setTimeout(() => {
+          this.cleanExpired();
+          this.isPaused = false;
+          this.waitPromise = null;
+          Logger.pacer.windowReset();
+          resolve();
+        }, Math.max(waitTime, 0));
+      });
+
+      return this.waitPromise;
     }
   }
 
@@ -129,15 +122,16 @@ class BidPacer {
    * Call this AFTER a bid is successfully placed
    */
   recordBid(): void {
-    this.checkWindowReset();
-    this.bidCount++;
+    this.cleanExpired();
+    this.bidTimestamps.push(Date.now());
     this.totalBidsPlaced++;
 
-    const remaining = this.MAX_BIDS - this.bidCount;
-    const elapsed = Date.now() - this.windowStart;
-    const resetIn = Math.max(0, Math.ceil((this.WINDOW_MS - elapsed) / 1000));
+    const remaining = this.MAX_BIDS - this.bidTimestamps.length;
+    const resetIn = this.bidTimestamps.length > 0
+      ? Math.max(0, Math.ceil((this.bidTimestamps[0] + this.WINDOW_MS - Date.now()) / 1000))
+      : 0;
 
-    Logger.pacer.bid(this.bidCount, this.MAX_BIDS, remaining, resetIn);
+    Logger.pacer.bid(this.bidTimestamps.length, this.MAX_BIDS, remaining, resetIn);
   }
 
   /**
@@ -164,8 +158,9 @@ class BidPacer {
       // If no match, keep default 60s
     }
 
-    // Force the count to max to trigger pause on next waitForSlot
-    this.bidCount = this.MAX_BIDS;
+    // Fill timestamps to MAX_BIDS with current time to trigger pause on next waitForSlot
+    const now = Date.now();
+    this.bidTimestamps = Array(this.MAX_BIDS).fill(now);
     this.isPaused = true;
 
     // Also set global rate limit so scheduled runs can check
@@ -178,23 +173,22 @@ class BidPacer {
    * Check if we can place a bid right now (non-blocking check)
    */
   canPlaceBid(): boolean {
-    this.checkWindowReset();
-    return this.bidCount < this.MAX_BIDS;
+    this.cleanExpired();
+    return this.bidTimestamps.length < this.MAX_BIDS;
   }
 
   /**
    * Get current pacer status
    */
   getStatus(): BidPacerStatus {
-    this.checkWindowReset();
-
-    const elapsed = Date.now() - this.windowStart;
-    const remaining = Math.max(0, this.WINDOW_MS - elapsed);
+    this.cleanExpired();
 
     return {
-      bidsUsed: this.bidCount,
-      bidsRemaining: this.MAX_BIDS - this.bidCount,
-      windowResetIn: Math.ceil(remaining / 1000),
+      bidsUsed: this.bidTimestamps.length,
+      bidsRemaining: this.MAX_BIDS - this.bidTimestamps.length,
+      windowResetIn: this.bidTimestamps.length > 0
+        ? Math.max(0, Math.ceil((this.bidTimestamps[0] + this.WINDOW_MS - Date.now()) / 1000))
+        : 0,
       isPaused: this.isPaused,
       totalBidsPlaced: this.totalBidsPlaced,
       totalWaits: this.totalWaits,
@@ -213,8 +207,7 @@ class BidPacer {
    * Reset the pacer (useful for testing or manual intervention)
    */
   reset(): void {
-    this.bidCount = 0;
-    this.windowStart = Date.now();
+    this.bidTimestamps = [];
     this.isPaused = false;
     Logger.pacer.manualReset();
   }

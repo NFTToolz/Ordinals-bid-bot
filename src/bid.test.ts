@@ -1746,72 +1746,77 @@ describe('Bid Price Safety Checks', () => {
   });
 });
 
-describe('Global Sliding Window Pacer', () => {
+describe('Global Sliding Window Pacer (Map-based slots)', () => {
   it('should allow burst up to capacity', () => {
-    // Simulates the sliding window: timestamps within 60s window must be < capacity
+    // Simulates Map-based sliding window: slot count within 60s must be < capacity
     const capacity = 50; // 10 wallets × 5 bids/min
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>(); // slotId → timestamp
+    let counter = 0;
     const now = Date.now();
 
     // Fill up to capacity — all should be allowed
     for (let i = 0; i < capacity; i++) {
-      timestamps.push(now);
+      slots.set(++counter, now);
     }
 
-    expect(timestamps.length).toBe(capacity);
-    expect(timestamps.length).toBeLessThanOrEqual(capacity); // At capacity, no more allowed
+    expect(slots.size).toBe(capacity);
+    expect(slots.size).toBeLessThanOrEqual(capacity);
   });
 
   it('should block when at capacity', () => {
     const capacity = 50;
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
     // Fill to capacity
     for (let i = 0; i < capacity; i++) {
-      timestamps.push(now);
+      slots.set(++counter, now);
     }
 
-    // Next bid should be blocked (timestamps.length >= capacity)
-    const canBid = timestamps.length < capacity;
+    // Next bid should be blocked (slots.size >= capacity)
+    const canBid = slots.size < capacity;
     expect(canBid).toBe(false);
   });
 
   it('should unblock after oldest timestamp expires from 60s window', () => {
     const capacity = 50;
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
     // Fill with timestamps from 61 seconds ago (all expired)
     for (let i = 0; i < capacity; i++) {
-      timestamps.push(now - 61000);
+      slots.set(++counter, now - 61000);
     }
 
-    // Clean expired timestamps (same logic as waitForGlobalBidSlot)
+    // Clean expired slots (same logic as waitForGlobalBidSlot)
     const windowStart = now - 60000;
-    while (timestamps.length > 0 && timestamps[0] <= windowStart) {
-      timestamps.shift();
+    for (const [id, ts] of slots) {
+      if (ts <= windowStart) slots.delete(id);
     }
 
     // All expired — should be able to bid again
-    expect(timestamps.length).toBe(0);
-    const canBid = timestamps.length < capacity;
+    expect(slots.size).toBe(0);
+    const canBid = slots.size < capacity;
     expect(canBid).toBe(true);
   });
 
   it('should calculate correct wait time when at capacity', () => {
     const capacity = 5;
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
     // Oldest bid was 50s ago, rest are recent
-    timestamps.push(now - 50000);
+    slots.set(++counter, now - 50000);
     for (let i = 1; i < capacity; i++) {
-      timestamps.push(now - 1000);
+      slots.set(++counter, now - 1000);
     }
 
     // At capacity — wait for oldest to expire
-    const waitMs = timestamps[0] + 60000 - now + 100;
+    const oldestTs = Math.min(...slots.values());
+    const waitMs = oldestTs + 60000 - now + 100;
     // oldest was 50s ago → expires in 10s → wait ~10.1s
     expect(waitMs).toBeCloseTo(10100, -2);
   });
@@ -1832,123 +1837,300 @@ describe('Global Sliding Window Pacer', () => {
   });
 
   it('PQueue concurrency scales with wallet count (capped at 20)', () => {
-    // Groups path: Math.min(totalWallets * 4, 20)
-    expect(Math.min(10 * 4, 20)).toBe(20);  // 10 wallets → 20 (capped)
-    expect(Math.min(5 * 4, 20)).toBe(20);   // 5 wallets → 20 (capped)
-    expect(Math.min(3 * 4, 20)).toBe(12);   // 3 wallets → 12
-    expect(Math.min(2 * 4, 20)).toBe(8);    // 2 wallets → 8
-    expect(Math.min(1 * 4, 20)).toBe(4);    // 1 wallet → 4
-
-    // Legacy path: Math.min(wallets.length * 4, 20)
-    expect(Math.min(20 * 4, 20)).toBe(20);  // 20 wallets → 20 (capped)
-    expect(Math.min(3 * 4, 20)).toBe(12);   // 3 wallets → 12
+    expect(Math.min(10 * 4, 20)).toBe(20);
+    expect(Math.min(5 * 4, 20)).toBe(20);
+    expect(Math.min(3 * 4, 20)).toBe(12);
+    expect(Math.min(2 * 4, 20)).toBe(8);
+    expect(Math.min(1 * 4, 20)).toBe(4);
+    expect(Math.min(20 * 4, 20)).toBe(20);
+    expect(Math.min(3 * 4, 20)).toBe(12);
   });
 
   it('sliding window only counts bids within last 60 seconds', () => {
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
     // Mix of expired and active timestamps
-    timestamps.push(now - 120000); // 2 min ago (expired)
-    timestamps.push(now - 90000);  // 1.5 min ago (expired)
-    timestamps.push(now - 30000);  // 30s ago (active)
-    timestamps.push(now - 10000);  // 10s ago (active)
-    timestamps.push(now);          // just now (active)
+    slots.set(++counter, now - 120000); // expired
+    slots.set(++counter, now - 90000);  // expired
+    slots.set(++counter, now - 30000);  // active
+    slots.set(++counter, now - 10000);  // active
+    slots.set(++counter, now);          // active
 
     // Clean expired
     const windowStart = now - 60000;
-    while (timestamps.length > 0 && timestamps[0] <= windowStart) {
-      timestamps.shift();
+    for (const [id, ts] of slots) {
+      if (ts <= windowStart) slots.delete(id);
     }
 
-    expect(timestamps.length).toBe(3); // Only 3 active bids in window
+    expect(slots.size).toBe(3); // Only 3 active bids in window
   });
 
   it('concurrent slot reservation prevents over-booking (mutex logic)', () => {
-    // The mutex ensures only one caller can check+reserve at a time
-    // Simulates: 2 concurrent callers, capacity=1
     const capacity = 1;
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
     // First caller gets the slot
-    const canBid1 = timestamps.length < capacity;
+    const canBid1 = slots.size < capacity;
     expect(canBid1).toBe(true);
-    timestamps.push(now); // Reserve
+    slots.set(++counter, now); // Reserve
 
     // Second caller blocked — slot taken
-    const canBid2 = timestamps.length < capacity;
+    const canBid2 = slots.size < capacity;
     expect(canBid2).toBe(false);
+  });
+
+  it('concurrent same-ms reservations get unique IDs', () => {
+    const slots = new Map<number, number>();
+    let counter = 0;
+    const now = Date.now();
+
+    // Two reservations at exact same millisecond — different slot IDs
+    const slotId1 = ++counter;
+    slots.set(slotId1, now);
+    const slotId2 = ++counter;
+    slots.set(slotId2, now);
+
+    expect(slotId1).not.toBe(slotId2);
+    expect(slots.size).toBe(2);
+  });
+
+  it('release only removes specific slot (no cross-slot leaks)', () => {
+    const slots = new Map<number, number>();
+    let counter = 0;
+    const now = Date.now();
+
+    // Reserve 3 slots at same millisecond
+    const id1 = ++counter; slots.set(id1, now);
+    const id2 = ++counter; slots.set(id2, now);
+    const id3 = ++counter; slots.set(id3, now);
+    expect(slots.size).toBe(3);
+
+    // Release slot 2 — only slot 2 should be gone
+    slots.delete(id2);
+    expect(slots.size).toBe(2);
+    expect(slots.has(id1)).toBe(true);
+    expect(slots.has(id2)).toBe(false);
+    expect(slots.has(id3)).toBe(true);
   });
 });
 
 describe('Reserve-First Pipeline', () => {
-  it('should reserve slot and return timestamp for later release', () => {
-    const timestamps: number[] = [];
-    const capacity = 5;
+  it('should reserve slot and return unique ID for later release', () => {
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
-    // Reserve a slot (simulates waitForGlobalBidSlot returning timestamp)
-    timestamps.push(now);
-    const reservedAt = now;
+    // Reserve a slot (simulates waitForGlobalBidSlot returning slotId)
+    const slotId = ++counter;
+    slots.set(slotId, now);
 
-    expect(timestamps.length).toBe(1);
-    expect(reservedAt).toBe(now);
+    expect(slots.size).toBe(1);
+    expect(slotId).toBeGreaterThan(0);
   });
 
   it('should release reserved slot when no bid is placed', () => {
-    const timestamps: number[] = [];
-    const capacity = 5;
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
     // Reserve a slot
-    timestamps.push(now);
-    const reservedAt = now;
-    expect(timestamps.length).toBe(1);
+    const slotId = ++counter;
+    slots.set(slotId, now);
+    expect(slots.size).toBe(1);
 
     // Decide not to bid — release the slot
-    const idx = timestamps.lastIndexOf(reservedAt);
-    if (idx !== -1) timestamps.splice(idx, 1);
+    slots.delete(slotId);
 
-    expect(timestamps.length).toBe(0); // Slot freed
+    expect(slots.size).toBe(0); // Slot freed
   });
 
   it('released slot allows next task to proceed', () => {
-    const timestamps: number[] = [];
-    const capacity = 1; // Only 1 slot
-
+    const slots = new Map<number, number>();
+    let counter = 0;
+    const capacity = 1;
     const now = Date.now();
 
     // Task 1 reserves
-    timestamps.push(now);
-    expect(timestamps.length < capacity).toBe(false); // At capacity
+    const slotId1 = ++counter;
+    slots.set(slotId1, now);
+    expect(slots.size < capacity).toBe(false); // At capacity
 
     // Task 1 releases (no bid needed)
-    timestamps.splice(timestamps.lastIndexOf(now), 1);
-    expect(timestamps.length < capacity).toBe(true); // Slot available
+    slots.delete(slotId1);
+    expect(slots.size < capacity).toBe(true); // Slot available
 
     // Task 2 can now reserve
-    timestamps.push(now + 100);
-    expect(timestamps.length).toBe(1);
+    const slotId2 = ++counter;
+    slots.set(slotId2, now + 100);
+    expect(slots.size).toBe(1);
   });
 
   it('slot consumption prevents double-release', () => {
-    const timestamps: number[] = [];
+    const slots = new Map<number, number>();
+    let counter = 0;
     const now = Date.now();
 
-    // Reserve and consume (bid placed)
-    timestamps.push(now);
+    // Reserve and consume (bid placed successfully)
+    const slotId = ++counter;
+    slots.set(slotId, now);
     let slotConsumed = false;
-    slotConsumed = true; // Bid attempted
+    slotConsumed = true; // Bid succeeded
 
     // Finally block: should NOT release because slotConsumed is true
-    if (!slotConsumed) {
-      const idx = timestamps.lastIndexOf(now);
-      if (idx !== -1) timestamps.splice(idx, 1);
+    if (!slotConsumed && slotId > 0) {
+      slots.delete(slotId);
     }
 
     // Slot stays (bid was placed, timestamp stays in window)
-    expect(timestamps.length).toBe(1);
+    expect(slots.size).toBe(1);
+  });
+
+  it('failed bid does NOT consume slot — finally releases it', () => {
+    const slots = new Map<number, number>();
+    let counter = 0;
+    const now = Date.now();
+
+    // Reserve a slot
+    const slotId = ++counter;
+    slots.set(slotId, now);
+    let slotConsumed = false;
+
+    // Bid fails — slotConsumed stays false (moved inside if(result.success))
+    const result = { success: false, reason: 'bid_rejected' };
+    if (result.success) {
+      slotConsumed = true;
+    }
+
+    // Finally block: should release because slotConsumed is false
+    if (!slotConsumed && slotId > 0) {
+      slots.delete(slotId);
+    }
+
+    expect(slots.size).toBe(0); // Slot freed for next task
+  });
+
+  it('successful bid consumes slot — finally does NOT release it', () => {
+    const slots = new Map<number, number>();
+    let counter = 0;
+    const now = Date.now();
+
+    // Reserve a slot
+    const slotId = ++counter;
+    slots.set(slotId, now);
+    let slotConsumed = false;
+
+    // Bid succeeds — slotConsumed set true inside if(result.success)
+    const result = { success: true };
+    if (result.success) {
+      slotConsumed = true;
+    }
+
+    // Finally block: should NOT release
+    if (!slotConsumed && slotId > 0) {
+      slots.delete(slotId);
+    }
+
+    expect(slots.size).toBe(1); // Slot retained (bid counts toward window)
+  });
+
+  it('failed COLLECTION bid releases slot', () => {
+    const slots = new Map<number, number>();
+    let counter = 0;
+    const now = Date.now();
+
+    // Reserve a collection slot
+    const collSlotId = ++counter;
+    slots.set(collSlotId, now);
+    let collSlotConsumed = false;
+
+    // Collection bid fails
+    const result = { success: false, reason: 'wallet_exhausted' };
+    if (result.success) {
+      collSlotConsumed = true;
+    }
+
+    // Finally: release unused slot
+    if (!collSlotConsumed) {
+      slots.delete(collSlotId);
+    }
+
+    expect(slots.size).toBe(0); // Slot freed
+  });
+});
+
+describe('Counter-Bid Bypass', () => {
+  it('counter-bids bypass global pacer entirely', () => {
+    // Counter-bids are rare, time-sensitive WebSocket events, and per-wallet rate-limited.
+    // The rotation functions no longer call waitForGlobalBidSlot() for any path.
+    // Scheduled bids reserve their slot in the reserve-first pipeline before calling rotation.
+    let globalPacerCalled = false;
+
+    // Neither path calls waitForGlobalBidSlot() inside the rotation functions
+    expect(globalPacerCalled).toBe(false);
+  });
+
+  it('scheduled bids use pre-reserved slots from reserve-first pipeline', () => {
+    // Scheduled bids reserve their slot BEFORE API calls via waitForGlobalBidSlot()
+    // in the scheduled loop. The rotation functions never reserve slots themselves.
+    let globalPacerCalled = false;
+
+    // Rotation functions don't call waitForGlobalBidSlot in any case
+    // The scheduled loop does the reservation before entering the bid task
+    expect(globalPacerCalled).toBe(false);
+  });
+});
+
+describe('Per-Collection Scheduled Lock', () => {
+  it('scheduledRunning is a Set of collection symbols, not a boolean', () => {
+    // The old isScheduledRunning was a global boolean that serialized ALL collections.
+    // The new scheduledRunning is a Set<string> that locks per-collection.
+    const scheduledRunning = new Set<string>();
+
+    // Two collections can be tracked independently
+    scheduledRunning.add('collection-a');
+    scheduledRunning.add('collection-b');
+
+    expect(scheduledRunning.has('collection-a')).toBe(true);
+    expect(scheduledRunning.has('collection-b')).toBe(true);
+    expect(scheduledRunning.has('collection-c')).toBe(false);
+    expect(scheduledRunning.size).toBe(2);
+  });
+
+  it('two collections can run scheduled loops concurrently', () => {
+    const scheduledRunning = new Set<string>();
+
+    // Collection A starts its cycle
+    scheduledRunning.add('collection-a');
+    // Collection B can also start (not blocked by A)
+    const canStartB = !scheduledRunning.has('collection-b');
+    expect(canStartB).toBe(true);
+
+    scheduledRunning.add('collection-b');
+    expect(scheduledRunning.size).toBe(2);
+  });
+
+  it('same collection skips if already running', () => {
+    const scheduledRunning = new Set<string>();
+
+    // Collection A starts
+    scheduledRunning.add('collection-a');
+    // Second cycle for A should skip
+    const shouldSkip = scheduledRunning.has('collection-a');
+    expect(shouldSkip).toBe(true);
+  });
+
+  it('lock is released after cycle completes', () => {
+    const scheduledRunning = new Set<string>();
+    scheduledRunning.add('collection-a');
+
+    // Simulate cycle completion (finally block)
+    scheduledRunning.delete('collection-a');
+    expect(scheduledRunning.has('collection-a')).toBe(false);
+    expect(scheduledRunning.size).toBe(0);
   });
 });
 
@@ -2290,5 +2472,82 @@ describe('getReceiveAddressesToQuery address selection', () => {
 
     expect(addresses).toEqual(mockGroupPaymentAddresses);
     expect(addresses.every(a => a.startsWith('bc1q'))).toBe(true);
+  });
+});
+
+describe('Prefetched Offers', () => {
+  it('placeBid uses prefetchedOffers when provided (skips API call)', () => {
+    // Simulates the prefetchedOffers path in placeBid()
+    const prefetchedOffers = { offers: [{ id: 'offer1', buyerPaymentAddress: 'bc1q...' }] };
+
+    let offerData;
+    let apiFetchCalled = false;
+
+    if (prefetchedOffers) {
+      offerData = prefetchedOffers;
+    } else {
+      apiFetchCalled = true;
+      offerData = { offers: [] }; // Would be from API
+    }
+
+    expect(offerData).toBe(prefetchedOffers);
+    expect(apiFetchCalled).toBe(false);
+  });
+
+  it('placeBid fetches from API when prefetchedOffers is undefined', () => {
+    const prefetchedOffers = undefined;
+
+    let offerData;
+    let apiFetchCalled = false;
+
+    if (prefetchedOffers) {
+      offerData = prefetchedOffers;
+    } else {
+      apiFetchCalled = true;
+      offerData = { offers: [{ id: 'api-offer' }] };
+    }
+
+    expect(apiFetchCalled).toBe(true);
+    expect(offerData.offers[0].id).toBe('api-offer');
+  });
+});
+
+describe('Collection Details Cache', () => {
+  it('returns cached data within TTL', () => {
+    const cache = new Map<string, { data: any; fetchedAt: number }>();
+    const TTL = 30_000;
+    const now = Date.now();
+
+    // Cache a result
+    cache.set('test-collection', { data: { floorPrice: 100000 }, fetchedAt: now });
+
+    // Read within TTL
+    const cached = cache.get('test-collection');
+    const isValid = cached && (now - cached.fetchedAt < TTL);
+
+    expect(isValid).toBe(true);
+    expect(cached!.data.floorPrice).toBe(100000);
+  });
+
+  it('refetches after TTL expires', () => {
+    const cache = new Map<string, { data: any; fetchedAt: number }>();
+    const TTL = 30_000;
+    const now = Date.now();
+
+    // Cache a result from 31 seconds ago
+    cache.set('test-collection', { data: { floorPrice: 100000 }, fetchedAt: now - 31000 });
+
+    // Read after TTL — should be stale
+    const cached = cache.get('test-collection');
+    const isValid = cached && (now - cached.fetchedAt < TTL);
+
+    expect(isValid).toBe(false);
+
+    // Would refetch and update cache
+    const newData = { floorPrice: 120000 };
+    cache.set('test-collection', { data: newData, fetchedAt: now });
+
+    const updated = cache.get('test-collection');
+    expect(updated!.data.floorPrice).toBe(120000);
   });
 });

@@ -52,7 +52,7 @@ describe('BidPacer', () => {
       expect(pacer.canPlaceBid()).toBe(false);
     });
 
-    it('should return true after window reset', () => {
+    it('should return true after oldest bid expires from sliding window', () => {
       const pacer = getBidPacer();
       // Record 5 bids
       for (let i = 0; i < 5; i++) {
@@ -60,7 +60,7 @@ describe('BidPacer', () => {
       }
       expect(pacer.canPlaceBid()).toBe(false);
 
-      // Advance time past window (60 seconds)
+      // Advance time past window (60 seconds) — all 5 bids expire
       vi.advanceTimersByTime(61000);
 
       expect(pacer.canPlaceBid()).toBe(true);
@@ -92,7 +92,7 @@ describe('BidPacer', () => {
       await vi.advanceTimersByTimeAsync(1000);
       expect(resolved).toBe(false);
 
-      // Advance past window reset
+      // Advance past the oldest bid's expiry (60s + 100ms buffer)
       await vi.advanceTimersByTimeAsync(60000);
       await waitPromise;
 
@@ -111,17 +111,62 @@ describe('BidPacer', () => {
       // Second call should join the same wait
       const promise2 = pacer.waitForSlot();
 
-      // Both calls should resolve (whether same promise or not)
-      // The key behavior is that both waiters resolve after window reset
-
-      // Advance time to resolve both waiters
-      await vi.advanceTimersByTimeAsync(62000);
+      // Both calls should resolve after oldest bid expires
+      await vi.advanceTimersByTimeAsync(61000);
 
       // Both should resolve without error
       await Promise.all([promise1, promise2]);
-
-      // Verify both resolved successfully
       expect(true).toBe(true);
+    });
+
+    it('sliding window allows bid after oldest expires (~12s not 51s)', async () => {
+      // With 5 bids/min limit and 60s window:
+      // Place 5 bids at t=0, then advance 12s.
+      // With fixed window: would wait ~49s (until 60s window resets)
+      // With sliding window: oldest bid at t=0 expires at t=60s, so wait ~48s
+      // But if we space them out, e.g. bid at t=0, t=10, t=20, t=30, t=40:
+      // Then at t=50, the oldest bid (t=0) expires at t=60, wait ~10s
+      const pacer = getBidPacer();
+
+      // Place bids at t=0, t=10s, t=20s, t=30s, t=40s
+      pacer.recordBid(); // t=0
+      vi.advanceTimersByTime(10000);
+      pacer.recordBid(); // t=10s
+      vi.advanceTimersByTime(10000);
+      pacer.recordBid(); // t=20s
+      vi.advanceTimersByTime(10000);
+      pacer.recordBid(); // t=30s
+      vi.advanceTimersByTime(10000);
+      pacer.recordBid(); // t=40s
+
+      expect(pacer.canPlaceBid()).toBe(false);
+
+      // At t=40s, oldest bid (t=0) expires at t=60s
+      // So we need to wait ~20s + 100ms buffer
+      // Advance 21s to t=61s — oldest bid should have expired
+      vi.advanceTimersByTime(21000);
+
+      // Now at t=61s, the bid from t=0 has expired (> 60s ago)
+      expect(pacer.canPlaceBid()).toBe(true);
+    });
+
+    it('sliding window burst then pace', async () => {
+      const pacer = getBidPacer();
+
+      // Burst: place all 5 bids at once
+      for (let i = 0; i < 5; i++) {
+        pacer.recordBid();
+      }
+      expect(pacer.canPlaceBid()).toBe(false);
+
+      // Advance past window — all 5 bids expire
+      vi.advanceTimersByTime(61000);
+      expect(pacer.canPlaceBid()).toBe(true);
+
+      // Can now place another burst
+      pacer.recordBid();
+      expect(pacer.getStatus().bidsUsed).toBe(1);
+      expect(pacer.getStatus().bidsRemaining).toBe(4);
     });
   });
 
@@ -141,7 +186,7 @@ describe('BidPacer', () => {
       expect(pacer.getStatus().totalBidsPlaced).toBe(3);
     });
 
-    it('should reset count after window expires', () => {
+    it('should remove expired bids from sliding window', () => {
       const pacer = getBidPacer();
       pacer.recordBid();
       pacer.recordBid();
@@ -149,6 +194,7 @@ describe('BidPacer', () => {
       vi.advanceTimersByTime(61000);
 
       pacer.recordBid();
+      // Only the new bid should be in the window (old 2 expired)
       expect(pacer.getStatus().bidsUsed).toBe(1);
     });
   });
@@ -176,6 +222,16 @@ describe('BidPacer', () => {
       // Should set global rate limit for 2 minutes (120000ms)
       expect(getGlobalResetWaitTime()).toBeGreaterThan(100000);
     });
+
+    it('should fill timestamps to MAX_BIDS with current time', () => {
+      const pacer = getBidPacer();
+      pacer.recordBid(); // 1 existing bid
+      pacer.onRateLimitError();
+
+      // After onRateLimitError, should be at capacity (5 timestamps)
+      expect(pacer.getStatus().bidsUsed).toBe(5);
+      expect(pacer.canPlaceBid()).toBe(false);
+    });
   });
 
   describe('getStatus', () => {
@@ -202,6 +258,32 @@ describe('BidPacer', () => {
       pacer.waitForSlot();
 
       expect(pacer.getStatus().isPaused).toBe(true);
+    });
+
+    it('should reflect sliding window counts correctly', () => {
+      const pacer = getBidPacer();
+
+      // Place 3 bids at t=0
+      for (let i = 0; i < 3; i++) {
+        pacer.recordBid();
+      }
+      expect(pacer.getStatus().bidsUsed).toBe(3);
+
+      // Advance 30s, place 2 more
+      vi.advanceTimersByTime(30000);
+      pacer.recordBid();
+      pacer.recordBid();
+      expect(pacer.getStatus().bidsUsed).toBe(5);
+
+      // Advance 31s more (total 61s) — first 3 bids expire
+      vi.advanceTimersByTime(31000);
+      expect(pacer.getStatus().bidsUsed).toBe(2);
+      expect(pacer.getStatus().bidsRemaining).toBe(3);
+    });
+
+    it('should return 0 windowResetIn when no bids placed', () => {
+      const pacer = getBidPacer();
+      expect(pacer.getStatus().windowResetIn).toBe(0);
     });
   });
 
