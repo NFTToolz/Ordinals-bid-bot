@@ -74,7 +74,7 @@ class BidPacer {
    */
   private cleanExpired(): void {
     const windowStart = Date.now() - this.WINDOW_MS;
-    while (this.bidTimestamps.length > 0 && this.bidTimestamps[0] <= windowStart) {
+    while (this.bidTimestamps.length > 0 && this.bidTimestamps[0] < windowStart) {
       this.bidTimestamps.shift();
     }
   }
@@ -158,9 +158,12 @@ class BidPacer {
       // If no match, keep default 60s
     }
 
-    // Fill timestamps to MAX_BIDS with current time to trigger pause on next waitForSlot
+    // Fill timestamps spread across the window so they expire gradually (not all at once)
+    // This prevents a burst of bids immediately after the pause expires
     const now = Date.now();
-    this.bidTimestamps = Array(this.MAX_BIDS).fill(now);
+    this.bidTimestamps = Array.from({ length: this.MAX_BIDS }, (_, i) =>
+      now - Math.floor((this.WINDOW_MS * i) / this.MAX_BIDS)
+    );
     this.isPaused = true;
 
     // Also set global rate limit so scheduled runs can check

@@ -1,5 +1,6 @@
 import { config } from "dotenv"
 import fs from "fs"
+import EventEmitter from "events"
 import * as bitcoin from "bitcoinjs-lib";
 import { Mutex } from 'async-mutex';
 import { ECPairFactory, ECPairAPI, TinySecp256k1Interface } from 'ecpair';
@@ -207,7 +208,7 @@ function safeECPairFromWIF(wif: string, networkParam: typeof network, context: s
 
 const DEFAULT_LOOP = Number(process.env.DEFAULT_LOOP) || 30
 const restartState = new Map<string, boolean>();
-let lastRehydrationTime = 0;  // Track when rehydration last ran
+// Per-collection lastRehydrationTime stored in bidHistory entries
 const rehydrationMutex = new Mutex();  // Prevent concurrent rehydration by multiple collection monitors
 const REHYDRATE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour - periodic rehydration interval
 
@@ -320,6 +321,7 @@ const globalBidSlots: Map<number, number> = new Map(); // slotId → timestamp
 let globalSlotCounter = 0;
 let globalBidCapacity = 5; // Default 5/min, recalculated after wallet init
 const globalPacerMutex = new Mutex();
+const globalPacerEmitter = new EventEmitter();
 
 // Collection details cache with 30s TTL - floor price doesn't change every second
 const collectionDetailsCache = new Map<string, { data: any; fetchedAt: number }>();
@@ -370,7 +372,7 @@ async function waitForGlobalBidSlot(): Promise<number> {
 
       // Clean expired slots outside 60s window
       for (const [id, ts] of globalBidSlots) {
-        if (ts <= windowStart) globalBidSlots.delete(id);
+        if (ts < windowStart) globalBidSlots.delete(id);
       }
 
       if (globalBidSlots.size < globalBidCapacity) {
@@ -388,18 +390,28 @@ async function waitForGlobalBidSlot(): Promise<number> {
 
     if (result.waitMs <= 0) return result.slotId; // Slot reserved
     Logger.info(`[GLOBAL PACER] At capacity (${globalBidCapacity}/min), waiting ${(result.waitMs / 1000).toFixed(1)}s`);
-    await delay(result.waitMs); // Wait OUTSIDE mutex, then retry
+    // Wait for either a slot release event or the computed timeout (whichever comes first)
+    // This eliminates thundering herd: waiters wake on release, not all at the same time
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, result.waitMs);
+      const onSlot = () => { clearTimeout(timer); resolve(); };
+      globalPacerEmitter.once('slot-available', onSlot);
+      // Ensure listener is cleaned up if timeout fires first
+      setTimeout(() => { globalPacerEmitter.removeListener('slot-available', onSlot); }, result.waitMs);
+    });
   }
 }
 
 /**
  * Release a previously reserved global bid slot.
  * Used when a task reserves a slot but decides not to bid (e.g., no action needed).
+ * Emits 'slot-available' to wake one waiter immediately instead of thundering herd.
  */
 async function releaseGlobalBidSlot(slotId: number): Promise<void> {
   await globalPacerMutex.runExclusive(() => {
     globalBidSlots.delete(slotId);
   });
+  globalPacerEmitter.emit('slot-available');
 }
 
 // Purchase deduplication: Track processed purchase event IDs with timestamps to prevent double-counting
@@ -689,6 +701,7 @@ interface BidHistory {
       buyerPaymentAddress: string;
     };
     quantity: number;
+    lastRehydrationTime?: number;  // Per-collection rehydration timestamp
     marketData?: {
       floorPrice: number;    // sats
       supply: string;
@@ -987,7 +1000,9 @@ class EventManager {
   private static readonly DROP_LOG_INTERVAL = 50;
   private itemEventDedup = new Map<string, number>();
   private collectionEventDedup = new Map<string, number>();
-  private static readonly DEDUP_COOLDOWN_MS = 5_000;
+  private static readonly DEDUP_COOLDOWN_MS = 2_000;
+  // O(1) index: dedupKey → queue index for fast in-queue superseding
+  private queueDedupIndex = new Map<string, number>();
   private preFilterStats = {
     notWatched: 0,
     unknownCollection: 0,
@@ -1006,6 +1021,15 @@ class EventManager {
   /** Expose pre-filter stats for the stats API. */
   getPreFilterStats() {
     return { ...this.preFilterStats };
+  }
+
+  /** Rebuild the dedup index from scratch after queue mutations (splice/shift). */
+  private rebuildDedupIndex(): void {
+    this.queueDedupIndex.clear();
+    for (let i = 0; i < this.queue.length; i++) {
+      const key = this.getQueueDedupKey(this.queue[i]);
+      if (key) this.queueDedupIndex.set(key, i);
+    }
   }
 
   /** Expose dropped events count for the stats API. */
@@ -1133,15 +1157,16 @@ class EventManager {
     // This prevents stale events from consuming API calls when the queue drains slowly.
     // e.g., 5 offer_cancelled events for the same token → only the newest survives.
     // offer_placed and offer_cancelled share a key per token (latest state wins).
+    // Uses O(1) queueDedupIndex Map instead of O(n) findIndex for fast lookup.
     const dedupKey = this.getQueueDedupKey(event);
     if (dedupKey) {
-      const existingIdx = this.queue.findIndex(
-        (e: CollectOfferActivity) => this.getQueueDedupKey(e) === dedupKey
-      );
-      if (existingIdx !== -1) {
+      const existingIdx = this.queueDedupIndex.get(dedupKey);
+      if (existingIdx !== undefined) {
         this.queue.splice(existingIdx, 1);
         this.preFilterStats.superseded++;
         this.preFilterStats.total++;
+        // Rebuild index after splice shifts indices
+        this.rebuildDedupIndex();
       }
     }
 
@@ -1173,9 +1198,15 @@ class EventManager {
       if (this.droppedEventsCount % EventManager.DROP_LOG_INTERVAL === 0) {
         Logger.warning(`[EVENT QUEUE] Dropped ${EventManager.DROP_LOG_INTERVAL} events (total: ${this.droppedEventsCount}) - queue full (${this.MAX_QUEUE_SIZE})`);
       }
+      // Rebuild index after overflow splice/shift shifts indices
+      this.rebuildDedupIndex();
     }
 
     this.queue.push(event);
+    // Update dedup index with new event's position
+    if (dedupKey) {
+      this.queueDedupIndex.set(dedupKey, this.queue.length - 1);
+    }
 
     // Log warning when queue is 80% full
     if (this.queue.length > this.MAX_QUEUE_SIZE * BOT_CONSTANTS.MEMORY_USAGE_THRESHOLD && this.queue.length % 100 === 0) {
@@ -1207,6 +1238,8 @@ class EventManager {
           }, { priority: 1 });
         }
       }
+      // Queue fully drained — clear the dedup index
+      this.queueDedupIndex.clear();
     } finally {
       release();
     }
@@ -1819,16 +1852,19 @@ class EventManager {
 
       // Rehydrate bid history on startup OR periodically every REHYDRATE_INTERVAL_MS
       // This recovers orphaned bids that may not be tracked (e.g., after crash, restart, or clock drift)
+      // Uses per-collection timestamp to prevent concurrent collections from skipping each other's rehydration
       const now = Date.now();
       const isCollectionRestart = restartState.get(item.collectionSymbol) !== false;
-      const shouldRehydrate = isCollectionRestart || (now - lastRehydrationTime > REHYDRATE_INTERVAL_MS);
+      const collectionLastRehydration = bidHistory[collectionSymbol]?.lastRehydrationTime ?? 0;
+      const shouldRehydrate = isCollectionRestart || (now - collectionLastRehydration > REHYDRATE_INTERVAL_MS);
 
       if (shouldRehydrate && !rehydrationMutex.isLocked()) {
         const releaseRehydration = await rehydrationMutex.acquire();
         try {
           // Double-check after acquiring lock (another monitor may have just completed rehydration)
           const recheckNow = Date.now();
-          if (isCollectionRestart || (recheckNow - lastRehydrationTime > REHYDRATE_INTERVAL_MS)) {
+          const recheckLastRehydration = bidHistory[collectionSymbol]?.lastRehydrationTime ?? 0;
+          if (isCollectionRestart || (recheckNow - recheckLastRehydration > REHYDRATE_INTERVAL_MS)) {
             const addressesToQuery = getReceiveAddressesToQuery();
             Logger.info(`[REHYDRATE] ${isCollectionRestart ? 'Startup' : 'Periodic'} rehydration - querying ${addressesToQuery.length} wallet address(es)`);
 
@@ -1858,7 +1894,9 @@ class EventManager {
                 await delay(BOT_CONSTANTS.REHYDRATION_INTER_WALLET_DELAY_MS);
               }
             }
-            lastRehydrationTime = Date.now();
+            if (bidHistory[collectionSymbol]) {
+              bidHistory[collectionSymbol].lastRehydrationTime = Date.now();
+            }
           }
         } finally {
           releaseRehydration();
@@ -2201,7 +2239,7 @@ class EventManager {
                     const bidPrice = currentPrice + Math.round(outBidMargin * CONVERSION_RATE)
                     if (bidPrice <= maxOffer) {
                       try {
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData, 0)
                         if (result.success) {
                           slotConsumed = true;
                           addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
@@ -2253,7 +2291,7 @@ class EventManager {
                   const bidPrice = minOffer
                   if (bidPrice <= maxOffer) {
                     try {
-                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
+                      const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData, 0)
                       if (result.success) {
                         slotConsumed = true;
                         addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
@@ -2315,7 +2353,7 @@ class EventManager {
 
                     if (bidPrice <= maxOffer) {
                       try {
-                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
+                        const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData, 0)
                         if (result.success) {
                           slotConsumed = true;
                           addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
@@ -2352,7 +2390,7 @@ class EventManager {
 
                         if (bidPrice <= maxOffer) {
                           try {
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData, 0)
                             if (result.success) {
                               slotConsumed = true;
                               addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
@@ -2384,7 +2422,7 @@ class EventManager {
                       if (bestPrice !== bidPrice) { // self adjust bids.
                         if (bidPrice <= maxOffer) {
                           try {
-                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData)
+                            const result = await placeBidWithRotation(item, tokenId, bidPrice, expiration, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, maxOffer, offerData, 0)
                             if (result.success) {
                               slotConsumed = true;
                               addRecentBid(tokenId, Date.now());  // Record bid time for deduplication
@@ -2507,7 +2545,7 @@ class EventManager {
 
             if (bidPrice <= maxOffer) {
               if (bidPrice < floorPrice) {
-                const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, 0)
                 if (result.success) {
                   collSlotConsumed = true;
                   bidHistory[collectionSymbol].offerType = "COLLECTION"
@@ -2559,7 +2597,7 @@ class EventManager {
 
                 if (bidPrice <= maxOffer) {
                   if (bidPrice < floorPrice) {
-                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, 0)
                     if (result.success) {
                       collSlotConsumed = true;
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
@@ -2606,7 +2644,7 @@ class EventManager {
 
                 if (bidPrice <= maxOffer) {
                   if (bidPrice < floorPrice) {
-                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+                    const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, 0)
                     if (result.success) {
                       collSlotConsumed = true;
                       bidHistory[collectionSymbol].offerType = "COLLECTION"
@@ -2627,7 +2665,7 @@ class EventManager {
           const bidPrice = minOffer
           if (bidPrice <= maxOffer) {
             if (bidPrice < floorPrice) {
-              const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance)
+              const result = await placeCollectionBidWithRotation(item, bidPrice, expiration, collectionSymbol, buyerTokenReceiveAddress, buyerPaymentAddress, publicKey, privateKey, feeSatsPerVbyte, maxOffer, balance, 0)
               if (result.success) {
                 collSlotConsumed = true;
                 bidHistory[collectionSymbol].offerType = "COLLECTION"
@@ -3856,7 +3894,8 @@ async function placeBidWithRotation(
   fallbackPublicKey: string,
   fallbackPrivateKey: string,
   maxAllowedPrice?: number,  // Safety cap - last line of defense against overbidding
-  prefetchedOffers?: { offers: any[] }  // Pre-fetched offer data from scheduled loop
+  prefetchedOffers?: { offers: any[] },  // Pre-fetched offer data from scheduled loop
+  walletWaitMs: number = BOT_CONSTANTS.WALLET_WAIT_MAX_MS  // 0 = no-wait for scheduled loops
 ): Promise<PlaceBidResult> {
   let buyerTokenReceiveAddress = fallbackReceiveAddress;
   let buyerPaymentAddress = fallbackPaymentAddress;
@@ -3872,7 +3911,7 @@ async function placeBidWithRotation(
     const groupName = collectionConfig.walletGroup;
 
     if (manager.hasGroup(groupName)) {
-      const wallet = await manager.waitForAvailableWallet(groupName, BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
+      const wallet = await manager.waitForAvailableWallet(groupName, walletWaitMs);
       if (!wallet) {
         Logger.wallet.allRateLimited(tokenId);
         return { success: false, reason: 'wallet_exhausted' };
@@ -3888,12 +3927,14 @@ async function placeBidWithRotation(
       usingWalletPool = true;
 
       Logger.wallet.using(walletLabel || 'unnamed', tokenId);
+    } else {
+      Logger.error(`[WALLET] Collection references non-existent wallet group "${groupName}" for ${tokenId}, using primary wallet`);
     }
   }
   // Priority 2: Legacy single wallet pool (backward compatibility)
   // Wait for an available wallet (retries with sleep instead of skipping)
   else if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    const wallet = await waitForAvailableWallet(BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
+    const wallet = await waitForAvailableWallet(walletWaitMs);
     if (!wallet) {
       Logger.wallet.allRateLimited(tokenId);
       return { success: false, reason: 'wallet_exhausted' };
@@ -4034,6 +4075,7 @@ async function placeCollectionBidWithRotation(
   feeSatsPerVbyte: number = 28,
   maxAllowedPrice?: number,
   balance?: number,
+  walletWaitMs: number = BOT_CONSTANTS.WALLET_WAIT_MAX_MS,
 ): Promise<PlaceBidResult> {
   let buyerTokenReceiveAddress = fallbackReceiveAddress;
   let buyerPaymentAddress = fallbackPaymentAddress;
@@ -4048,7 +4090,7 @@ async function placeCollectionBidWithRotation(
     const groupName = collectionConfig.walletGroup;
 
     if (manager.hasGroup(groupName)) {
-      const wallet = await manager.waitForAvailableWallet(groupName, BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
+      const wallet = await manager.waitForAvailableWallet(groupName, walletWaitMs);
       if (!wallet) {
         Logger.wallet.allRateLimited(collectionSymbol);
         return { success: false, reason: 'wallet_exhausted' };
@@ -4064,11 +4106,13 @@ async function placeCollectionBidWithRotation(
       usingWalletPool = true;
 
       Logger.wallet.using(walletLabel || 'unnamed', collectionSymbol);
+    } else {
+      Logger.error(`[WALLET] Collection references non-existent wallet group "${groupName}" for ${collectionSymbol}, using primary wallet`);
     }
   }
   // Priority 2: Legacy single wallet pool (backward compatibility)
   else if (ENABLE_WALLET_ROTATION && isWalletPoolInitialized()) {
-    const wallet = await waitForAvailableWallet(BOT_CONSTANTS.WALLET_WAIT_MAX_MS);
+    const wallet = await waitForAvailableWallet(walletWaitMs);
     if (!wallet) {
       Logger.wallet.allRateLimited(collectionSymbol);
       return { success: false, reason: 'wallet_exhausted' };
